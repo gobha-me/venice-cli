@@ -3,10 +3,10 @@
 A stdlib-only Python CLI wrapping the [Venice.ai](https://venice.ai) API.
 Zero install, pod-restart-survivable (lives under `~/.local/{bin,lib}`).
 
-v0.2 ships working `venice login`, `venice sfx` (sound-effect
-generation), `venice balance` (budget tracking), and `venice models`
-(catalog browser). `chat`, `tts`, `image`, and `embed` are scaffolded
-stubs.
+v0.3 ships working `venice login`, `venice sfx` (sound-effect
+generation), `venice tts` (text-to-speech), `venice balance` (budget
+tracking), and `venice models` (catalog browser). `chat`, `image`, and
+`embed` are scaffolded stubs.
 
 ## Install
 
@@ -76,6 +76,55 @@ venice sfx-status "$ID" -o /tmp/ocean.mp3
 
 Durations longer than the model max are clamped (warning on stderr).
 
+## Text-to-speech
+
+```sh
+# Positional text, auto-confirm, sub-cent cap.
+venice tts "Hello from Venice." --yes --max-spend 0.01
+
+# Read input from a file.
+venice tts --from-file speech.txt --yes -o out.mp3
+
+# Read input from stdin (pipe-friendly).
+cat speech.txt | venice tts --stdin --yes -o out.mp3
+echo "quick line" | venice tts --stdin --yes
+
+# Specific voice and WAV output.
+venice tts "Sky voice in wav." --voice af_sky --format wav --yes -o sky.wav
+
+# Different model (e.g. ElevenLabs Turbo for higher quality).
+venice tts "Demo line." --model tts-elevenlabs-turbo-v2-5 --voice <id> --yes
+
+# Speed control (0.25-4.0).
+venice tts "Fast talker." --speed 1.4 --yes
+
+# Dry-run shows estimated cost + balance without spending.
+venice tts "How much will this cost?" --dry-run
+```
+
+### TTS models and pricing (per 1M characters)
+
+| slug | price | voices |
+|---|---|---|
+| `tts-kokoro` (default) | $3.50 | 54 |
+| `tts-inworld-1-5-max` | $12.50 | 14 |
+| `tts-xai-v1` | $18.75 | 5 |
+| `tts-chatterbox-hd` | $50.00 | 9 |
+| `tts-orpheus` | $62.50 | 8 |
+| `tts-elevenlabs-turbo-v2-5` | $62.50 | 21 |
+| `tts-qwen3-0-6b` | $87.50 | 9 |
+| `tts-qwen3-1-7b` | $112.50 | 9 |
+| `tts-minimax-speech-02-hd` | $125.00 | 15 |
+| `tts-gemini-3-1-flash` | $187.50 | 30 |
+
+To see the voice list for any TTS model:
+```sh
+venice models tts-kokoro | jq '.model_spec.voices'
+```
+
+If `--voice` is omitted Venice uses each model's built-in default.
+Formats supported: `mp3` (default), `opus`, `aac`, `flac`, `wav`, `pcm`.
+
 ## Browse the model catalog
 
 ```sh
@@ -138,7 +187,8 @@ The player list (`paplay` -> `aplay` -> `ffplay` -> `mpg123` -> `play`
 | `venice models [--type T] [--detail] [SLUG]` | browse the catalog |
 | `venice sfx PROMPT [--duration N] [--max-spend USD] [...]` | generate a sound effect |
 | `venice sfx-status QUEUE_ID` | fetch a backgrounded SFX job |
-| `venice chat\|tts\|image\|embed` | stubs (exit 2) for v0.x |
+| `venice tts TEXT [--voice V] [--format F] [--speed N] [...]` | synthesize speech (sync) |
+| `venice chat\|image\|embed` | stubs (exit 2) for v0.x |
 
 ## Tests
 
