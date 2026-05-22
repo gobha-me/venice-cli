@@ -1,0 +1,23 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+.env
+.DS_Store
+
+# Build artifacts (none expected for stdlib-only, but be safe)
+build/
+dist/
+*.egg-info/
+
+# Local audio outputs -- never commit generated SFX
+venice-sfx-*.mp3
+venice-sfx-*.wav
+venice-sfx-*.flac
+venice-sfx-*.bin
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
