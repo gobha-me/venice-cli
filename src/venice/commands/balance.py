@@ -5,7 +5,7 @@ import json
 import sys
 
 from .. import auth
-from ..billing import fetch_balance, format_balance_breakdown, format_usd
+from ..billing import SPEND_ORDER, fetch_balance, format_balance_breakdown, format_usd
 from ..client import VeniceAPIError
 
 
@@ -80,23 +80,32 @@ def _run(args) -> int:
                 "tier": tier,
                 "next_epoch": next_epoch,
                 "key_expires": key_exp,
+                "spend_order": list(SPEND_ORDER),
+                "notes": {
+                    "DIEM": "epoch allowance from staked DIEM; resets at next_epoch",
+                    "BUNDLED_CREDITS": "monthly bundle; drains before USD cash; not exposed via inference key",
+                    "VCU": "tier compute units; not exposed via inference key",
+                },
             },
             sys.stdout,
             indent=2,
         )
         sys.stdout.write("\n")
     elif args.verbose:
-        print(f"Tier:        {tier or 'unknown'}")
-        print(f"Spendable:   {format_balance_breakdown(info)}")
-        print(f"  USD:       {format_usd(usd)}")
+        print(f"Tier:           {tier or 'unknown'}")
+        print(f"Spendable:      {format_balance_breakdown(info)}")
         if diem is not None:
             try:
-                print(f"  DIEM:      {float(diem):.4f} (= ${float(diem):.4f} credit)")
+                print(
+                    f"  DIEM allow.:  {float(diem):.4f}  "
+                    f"(this epoch; resets {next_epoch or '?'})"
+                )
             except (TypeError, ValueError):
-                print(f"  DIEM:      {diem}")
-        if next_epoch:
-            print(f"Next epoch:  {next_epoch}")
-        print(f"Key expires: {key_exp or 'never'}")
+                print(f"  DIEM allow.:  {diem}")
+        print(f"  monthly:      (not exposed via inference key; drains before cash)")
+        print(f"  USD cash:     {format_usd(usd)}")
+        print(f"Spend order:    {' -> '.join(SPEND_ORDER)}")
+        print(f"Key expires:    {key_exp or 'never'}")
     else:
         print(format_usd(total))
 

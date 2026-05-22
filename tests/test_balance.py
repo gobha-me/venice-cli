@@ -67,13 +67,17 @@ class TestBalance(unittest.TestCase):
         self.assertEqual(rc, 0)
         out = buf.getvalue()
         self.assertIn("Spendable:", out)
-        self.assertIn("USD", out)
-        self.assertIn("DIEM", out)
         self.assertIn("$13.58", out)
-        self.assertIn("12.35 USD", out)
-        self.assertIn("1.23 DIEM credit", out)
+        # DIEM listed FIRST in breakdown (mirrors spend order)
+        self.assertIn("1.23 DIEM allowance", out)
+        self.assertIn("12.35 USD cash", out)
+        # explicit reset hint + monthly note + spend order line
+        self.assertIn("resets ", out)
+        self.assertIn("monthly", out)
+        self.assertIn("Spend order:", out)
+        self.assertIn("DIEM allowance -> monthly credit -> USD cash", out)
 
-    def test_json_includes_total_tier_and_epoch(self):
+    def test_json_includes_total_tier_epoch_and_spend_order(self):
         from venice.commands import balance
 
         buf = io.StringIO()
@@ -93,6 +97,11 @@ class TestBalance(unittest.TestCase):
         self.assertAlmostEqual(out["total_usd_equiv"], 12.3456 + 1.234, places=6)
         self.assertEqual(out["tier"], "paid")
         self.assertEqual(out["next_epoch"], "2026-05-23T00:00:00.000Z")
+        self.assertEqual(
+            out["spend_order"],
+            ["DIEM allowance", "monthly credit", "USD cash"],
+        )
+        self.assertIn("BUNDLED_CREDITS", out["notes"])
 
     def test_min_threshold_below_returns_exit_1(self):
         from venice.commands import balance

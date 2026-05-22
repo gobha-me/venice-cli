@@ -37,29 +37,44 @@ You'll be prompted (hidden input) for your API key from
 
 ## Balance and budget tracking
 
-Venice exposes two balance buckets: `USD` (cash credit) and `DIEM`
-(Venice's stablecoin credit, **1 DIEM = $1 of purchasing power** — per-
-model pricing lists the same number in both `usd` and `diem` fields).
-The CLI treats your spendable balance as the sum.
+Venice has up to four spendable buckets, drained in this order:
+
+1. **DIEM allowance** — daily credit derived from staked DIEM tokens
+   (1 DIEM staked = $1/day). Resets every 24h at `nextEpochBegins`.
+   Per-epoch use-it-or-lose-it.
+2. **Monthly credit** (BUNDLED_CREDITS) — bundle granted with paid
+   subscriptions; drains before cash.
+3. **VCU** — Venice Compute Units, per-tier inclusions.
+4. **USD cash** — one-and-done prepaid USD balance.
+
+1 unit of any bucket == $1 of purchasing power (per-model pricing in
+`/models` lists the same number in both `usd` and `diem` fields).
+
+**Inference-key visibility**: this CLI reads `USD` + `DIEM` and the
+epoch reset time. The monthly-bundle and VCU balances live behind
+admin-key endpoints (`/billing/balance`, 401 with inference keys), so
+the CLI documents them but can't show their values. If you have
+monthly credit, the actual debit lands there before USD cash, so the
+"After charge" line on the USD cash side may be slightly pessimistic.
 
 ```sh
-venice balance              # -> $32.70 USD   (combined total, single line)
-venice balance --verbose    # tier, USD + DIEM breakdown, next epoch, key expiry
-venice balance --json       # raw object incl. total_usd_equiv for scripts
+venice balance              # -> $32.70 USD   (combined visible total)
+venice balance --verbose    # buckets, epoch reset, spend order
+venice balance --json       # incl. total_usd_equiv, spend_order, notes
 venice balance --min 5      # exit 1 if total < $5 (useful in scripts)
 ```
 
-The balance lookup is also tapped automatically by `venice sfx` and
-`venice tts`, which print
+`venice sfx` and `venice tts` print the balance line inline next to the
+cost quote, with DIEM listed first to mirror the drain order:
 
 ```
-Balance:        $32.70 USD (26.14 USD + 6.56 DIEM credit)
+Balance:        $32.70 USD (6.56 DIEM allowance + 26.14 USD cash)
 After charge:   $32.69 USD
 ```
 
-alongside the cost quote. Suppress with `--no-balance`. Hard-cap the
-spend per call with `--max-spend USD` (refuses to queue / synthesize if
-the estimate exceeds the cap).
+Suppress with `--no-balance`. Hard-cap a single call with
+`--max-spend USD` (refuses to queue / synthesize if the estimate
+exceeds the cap).
 
 ## Sound effects
 
