@@ -5,18 +5,20 @@ import json
 import sys
 
 from .. import auth
-from ..billing import fetch_balance, format_usd
+from ..billing import fetch_balance, format_balance_breakdown, format_usd
 from ..client import VeniceAPIError
 
 
 def register(subparsers) -> None:
     p = subparsers.add_parser(
         "balance",
-        help="Show current account balance (USD + DIEM).",
+        help="Show current spendable balance (USD + DIEM credit).",
         description=(
-            "Queries /api_keys/rate_limits. Default: print '$X.XX USD' to "
-            "stdout. --json for raw, --verbose for tier + next epoch. "
-            "--min sets a floor: exits 1 if balance < floor (script-friendly)."
+            "Queries /api_keys/rate_limits. Spendable balance = USD + DIEM "
+            "(1 DIEM = $1 of purchasing power). Default: prints combined "
+            "total '$X.XX USD' to stdout. --json for raw, --verbose for "
+            "tier + breakdown + epoch. --min sets a floor: exits 1 if total "
+            "is below it (script-friendly)."
         ),
     )
     p.add_argument(
@@ -64,6 +66,7 @@ def _run(args) -> int:
 
     usd = info.get("usd")
     diem = info.get("diem")
+    total = info.get("total")
     tier = info.get("tier")
     next_epoch = info.get("next_epoch")
     key_exp = info.get("key_expires")
@@ -73,6 +76,7 @@ def _run(args) -> int:
             {
                 "USD": usd,
                 "DIEM": diem,
+                "total_usd_equiv": total,
                 "tier": tier,
                 "next_epoch": next_epoch,
                 "key_expires": key_exp,
@@ -83,20 +87,25 @@ def _run(args) -> int:
         sys.stdout.write("\n")
     elif args.verbose:
         print(f"Tier:        {tier or 'unknown'}")
-        print(f"Balance:     {format_usd(usd)}")
+        print(f"Spendable:   {format_balance_breakdown(info)}")
+        print(f"  USD:       {format_usd(usd)}")
         if diem is not None:
-            print(f"             {float(diem):.4f} DIEM")
+            try:
+                print(f"  DIEM:      {float(diem):.4f} (= ${float(diem):.4f} credit)")
+            except (TypeError, ValueError):
+                print(f"  DIEM:      {diem}")
         if next_epoch:
             print(f"Next epoch:  {next_epoch}")
         print(f"Key expires: {key_exp or 'never'}")
     else:
-        print(format_usd(usd))
+        print(format_usd(total))
 
-    if args.min is not None and usd is not None:
+    if args.min is not None and total is not None:
         try:
-            if float(usd) < float(args.min):
+            if float(total) < float(args.min):
                 print(
-                    f"balance: ${float(usd):.4f} is below floor ${float(args.min):.4f}",
+                    f"balance: total {format_usd(total)} is below floor "
+                    f"{format_usd(args.min)}",
                     file=sys.stderr,
                 )
                 return 1

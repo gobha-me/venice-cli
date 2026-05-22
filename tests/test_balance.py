@@ -34,7 +34,7 @@ def _patched_env():
 
 class TestBalance(unittest.TestCase):
 
-    def test_default_prints_usd_to_stdout(self):
+    def test_default_prints_combined_total_to_stdout(self):
         from venice.commands import balance
 
         buf = io.StringIO()
@@ -48,9 +48,32 @@ class TestBalance(unittest.TestCase):
              mock.patch.object(sys, "stdout", buf):
             rc = balance._run(_args())
         self.assertEqual(rc, 0)
-        self.assertIn("$12.35 USD", buf.getvalue())
+        # USD 12.3456 + DIEM 1.234 = 13.5796 -> "$13.58 USD"
+        self.assertIn("$13.58 USD", buf.getvalue())
 
-    def test_json_includes_tier_and_epoch(self):
+    def test_verbose_shows_breakdown(self):
+        from venice.commands import balance
+
+        buf = io.StringIO()
+        with _patched_env(), \
+             mock.patch(
+                 "venice.client.urllib.request.urlopen",
+                 lambda *a, **kw: FakeResp(
+                     200, json.dumps(_FAKE_DATA).encode(), "application/json"
+                 ),
+             ), \
+             mock.patch.object(sys, "stdout", buf):
+            rc = balance._run(_args(verbose=True))
+        self.assertEqual(rc, 0)
+        out = buf.getvalue()
+        self.assertIn("Spendable:", out)
+        self.assertIn("USD", out)
+        self.assertIn("DIEM", out)
+        self.assertIn("$13.58", out)
+        self.assertIn("12.35 USD", out)
+        self.assertIn("1.23 DIEM credit", out)
+
+    def test_json_includes_total_tier_and_epoch(self):
         from venice.commands import balance
 
         buf = io.StringIO()
@@ -67,6 +90,7 @@ class TestBalance(unittest.TestCase):
         out = json.loads(buf.getvalue())
         self.assertEqual(out["USD"], 12.3456)
         self.assertEqual(out["DIEM"], 1.234)
+        self.assertAlmostEqual(out["total_usd_equiv"], 12.3456 + 1.234, places=6)
         self.assertEqual(out["tier"], "paid")
         self.assertEqual(out["next_epoch"], "2026-05-23T00:00:00.000Z")
 

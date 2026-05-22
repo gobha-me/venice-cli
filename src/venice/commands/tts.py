@@ -226,13 +226,15 @@ def _print_balance_and_remaining(client, cost: Optional[float], *, show: bool) -
         info = billing.fetch_balance(client)
     except VeniceAPIError:
         info = None
-    if not info or info.get("usd") is None:
+    if not info or info.get("total") is None:
         return
-    bal = info["usd"]
-    print(f"Balance:        {billing.format_usd(bal)}", file=sys.stderr)
+    print(
+        f"Balance:        {billing.format_balance_breakdown(info)}",
+        file=sys.stderr,
+    )
     if cost is not None:
         try:
-            remaining = float(bal) - float(cost)
+            remaining = float(info["total"]) - float(cost)
             print(f"After charge:   {billing.format_usd(remaining)}", file=sys.stderr)
         except (TypeError, ValueError):
             pass

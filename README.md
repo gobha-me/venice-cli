@@ -37,17 +37,29 @@ You'll be prompted (hidden input) for your API key from
 
 ## Balance and budget tracking
 
+Venice exposes two balance buckets: `USD` (cash credit) and `DIEM`
+(Venice's stablecoin credit, **1 DIEM = $1 of purchasing power** — per-
+model pricing lists the same number in both `usd` and `diem` fields).
+The CLI treats your spendable balance as the sum.
+
 ```sh
-venice balance              # -> $26.14 USD   (single line on stdout)
-venice balance --verbose    # tier, USD, DIEM, next epoch, key expiry
-venice balance --json       # raw object for scripts
-venice balance --min 5      # exit 1 if balance < $5 (useful in scripts)
+venice balance              # -> $32.70 USD   (combined total, single line)
+venice balance --verbose    # tier, USD + DIEM breakdown, next epoch, key expiry
+venice balance --json       # raw object incl. total_usd_equiv for scripts
+venice balance --min 5      # exit 1 if total < $5 (useful in scripts)
 ```
 
-The balance endpoint is also tapped automatically by `venice sfx`,
-which shows current balance + estimated remaining alongside the cost
-quote. Suppress with `--no-balance`. Hard-cap the spend per call with
-`--max-spend USD` (refuses to queue if the quote exceeds the cap).
+The balance lookup is also tapped automatically by `venice sfx` and
+`venice tts`, which print
+
+```
+Balance:        $32.70 USD (26.14 USD + 6.56 DIEM credit)
+After charge:   $32.69 USD
+```
+
+alongside the cost quote. Suppress with `--no-balance`. Hard-cap the
+spend per call with `--max-spend USD` (refuses to queue / synthesize if
+the estimate exceeds the cap).
 
 ## Sound effects
 

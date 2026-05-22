@@ -154,7 +154,7 @@ def _print_quote(quote_usd, model: str, duration: int) -> None:
 
 
 def _print_balance_and_remaining(client, quote_usd, *, show_balance: bool) -> None:
-    """Print pre-charge balance and estimated remaining if balance fetch works."""
+    """Print pre-charge balance (USD + DIEM credit) and estimated remaining."""
     if not show_balance:
         return
     info = None
@@ -162,12 +162,14 @@ def _print_balance_and_remaining(client, quote_usd, *, show_balance: bool) -> No
         info = billing.fetch_balance(client)
     except VeniceAPIError:
         info = None
-    if not info or info.get("usd") is None:
+    if not info or info.get("total") is None:
         return
-    bal = info["usd"]
-    print(f"Balance:        {billing.format_usd(bal)}", file=sys.stderr)
+    print(
+        f"Balance:        {billing.format_balance_breakdown(info)}",
+        file=sys.stderr,
+    )
     try:
-        remaining = float(bal) - float(quote_usd)
+        remaining = float(info["total"]) - float(quote_usd)
         print(
             f"After charge:   {billing.format_usd(remaining)}",
             file=sys.stderr,
