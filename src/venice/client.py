@@ -6,6 +6,7 @@ Maps non-2xx to VeniceAPIError with status, URL, and a body excerpt.
 from __future__ import annotations
 
 import json
+import os
 import time
 import urllib.error
 import urllib.parse
@@ -177,6 +178,20 @@ class VeniceClient:
                 status, path, f"non-JSON response ({ctype}): {e}"
             ) from None
 
+    def get_balance(self) -> Optional[dict]:
+        """Fetch current balance + tier via /api_keys/rate_limits.
+
+        Returns the parsed `data` block (with balances, apiTier, nextEpochBegins,
+        rateLimits) or None if the call fails. Best-effort; callers should
+        treat None as "balance unavailable, continue".
+        """
+        try:
+            doc = self.get_json("/api_keys/rate_limits")
+        except VeniceAPIError:
+            return None
+        data = doc.get("data") if isinstance(doc, dict) else None
+        return data if isinstance(data, dict) else None
+
     @staticmethod
     def _raise_api_error(status: int, url: str, body: bytes, ctype: str):
         excerpt = ""
@@ -193,3 +208,15 @@ class VeniceClient:
         except Exception:
             pass
         raise VeniceAPIError(status, url, excerpt, code=code)
+
+
+def build_client_from_auth():
+    """Construct a VeniceClient using env-var or file credentials.
+
+    Raises auth.AuthError if no key is available. Honors $VENICE_BASE_URL.
+    """
+    from . import auth
+
+    key = auth.load_key()
+    base = os.environ.get(config.ENV_BASE_URL) or config.DEFAULT_BASE_URL
+    return VeniceClient(api_key=key, base_url=base)

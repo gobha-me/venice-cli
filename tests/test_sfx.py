@@ -21,6 +21,8 @@ def _build_args(**overrides):
         background=False,
         dry_run=False,
         no_cleanup=False,
+        max_spend=None,
+        no_balance=True,
         poll_interval=0,
         max_wait=10,
         command="sfx",

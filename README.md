@@ -3,8 +3,10 @@
 A stdlib-only Python CLI wrapping the [Venice.ai](https://venice.ai) API.
 Zero install, pod-restart-survivable (lives under `~/.local/{bin,lib}`).
 
-v0.1 ships working `venice login` + `venice sfx` (sound-effect
-generation). `chat`, `tts`, `image`, and `embed` are scaffolded stubs.
+v0.2 ships working `venice login`, `venice sfx` (sound-effect
+generation), `venice balance` (budget tracking), and `venice models`
+(catalog browser). `chat`, `tts`, `image`, and `embed` are scaffolded
+stubs.
 
 ## Install
 
@@ -33,24 +35,39 @@ You'll be prompted (hidden input) for your API key from
 
 `$VENICE_API_KEY` in the environment overrides the file.
 
+## Balance and budget tracking
+
+```sh
+venice balance              # -> $26.14 USD   (single line on stdout)
+venice balance --verbose    # tier, USD, DIEM, next epoch, key expiry
+venice balance --json       # raw object for scripts
+venice balance --min 5      # exit 1 if balance < $5 (useful in scripts)
+```
+
+The balance endpoint is also tapped automatically by `venice sfx`,
+which shows current balance + estimated remaining alongside the cost
+quote. Suppress with `--no-balance`. Hard-cap the spend per call with
+`--max-spend USD` (refuses to queue if the quote exceeds the cap).
+
 ## Sound effects
 
 ```sh
-# Quote only -- no charge, no audio.
+# Quote only -- no charge, no audio. Shows balance + estimated remaining.
 venice sfx "thunderstorm rolling in" --duration 8 --dry-run
 
 # Generate, confirm cost, save to ./venice-sfx-<id>.mp3.
 venice sfx "soft chime" --duration 2
 
-# Auto-confirm, custom output path, no playback.
-venice sfx "rain on tin roof" --duration 4 --yes -o /tmp/rain.mp3 --no-play
+# Auto-confirm, custom output path, no playback, hard budget cap.
+venice sfx "rain on tin roof" --duration 4 --yes --max-spend 0.05 \
+    -o /tmp/rain.mp3 --no-play
 
 # Background: prints queue_id to stdout, fetch later.
 ID=$(venice sfx "ocean waves" --duration 10 --yes --background)
 venice sfx-status "$ID" -o /tmp/ocean.mp3
 ```
 
-### Models
+### SFX Models
 
 | slug | max duration |
 |---|---|
@@ -58,6 +75,21 @@ venice sfx-status "$ID" -o /tmp/ocean.mp3
 | `mmaudio-v2-text-to-audio` | 30 s |
 
 Durations longer than the model max are clamped (warning on stderr).
+
+## Browse the model catalog
+
+```sh
+venice models                          # count by type
+venice models --type music             # list ids, one per line
+venice models --type music --detail    # ids + name + pricing + capabilities
+venice models elevenlabs-sound-effects-v2   # full JSON for one model
+venice models --type all --json        # everything, raw
+```
+
+At time of writing the catalog spans ~258 models across text (80),
+code (30), image (26), **video (92)**, music+sfx (10), tts (10),
+embedding (9), and upscale (1). The video models include Sora 2,
+Veo 3.1, Kling, Runway Gen4, LTX-2, Wan 2.7, Seedance 2.0, and more.
 
 ### Exit codes
 
@@ -96,6 +128,17 @@ The player list (`paplay` -> `aplay` -> `ffplay` -> `mpg123` -> `play`
 |---|---|
 | `VENICE_API_KEY` | overrides the file-based key (no disk read) |
 | `VENICE_BASE_URL` | override the API base URL (testing, proxy) |
+
+## Commands at a glance
+
+| command | does what |
+|---|---|
+| `venice login` | store API key (interactive, hidden input, mode 0600) |
+| `venice balance [--verbose\|--json\|--min N]` | current USD + DIEM balance |
+| `venice models [--type T] [--detail] [SLUG]` | browse the catalog |
+| `venice sfx PROMPT [--duration N] [--max-spend USD] [...]` | generate a sound effect |
+| `venice sfx-status QUEUE_ID` | fetch a backgrounded SFX job |
+| `venice chat\|tts\|image\|embed` | stubs (exit 2) for v0.x |
 
 ## Tests
 

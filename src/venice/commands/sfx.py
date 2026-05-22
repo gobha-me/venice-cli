@@ -1,14 +1,13 @@
 """`venice sfx` -- generate a sound effect via Venice's async audio queue."""
 from __future__ import annotations
 
-import os
 import sys
 import time
 from pathlib import Path
 from typing import Optional, Tuple
 
-from .. import audio_player, auth, config
-from ..client import VeniceAPIError, VeniceClient
+from .. import audio_player, auth, billing, config
+from ..client import VeniceAPIError, build_client_from_auth
 
 SFX_MODELS = {
     "elevenlabs-sound-effects-v2": (22, "mp3"),
@@ -52,6 +51,18 @@ def register(subparsers) -> None:
     p.add_argument("--background", action="store_true")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--no-cleanup", action="store_true")
+    p.add_argument(
+        "--max-spend",
+        type=float,
+        default=None,
+        metavar="USD",
+        help="Refuse to queue if the quote exceeds this USD cap.",
+    )
+    p.add_argument(
+        "--no-balance",
+        action="store_true",
+        help="Skip the upfront balance display.",
+    )
     p.add_argument("--poll-interval", type=float, default=config.SFX_POLL_INTERVAL_SEC)
     p.add_argument("--max-wait", type=float, default=config.SFX_POLL_MAX_WAIT_SEC)
     p.set_defaults(handler=_run_generate)
@@ -80,14 +91,12 @@ def register_status(subparsers) -> None:
     sp.set_defaults(handler=_run_status)
 
 
-def _build_client() -> Tuple[VeniceClient, int]:
+def _build_client():
     try:
-        key = auth.load_key()
+        return build_client_from_auth(), 0
     except auth.AuthError as e:
         print(str(e), file=sys.stderr)
-        return None, 2  # type: ignore[return-value]
-    base = os.environ.get(config.ENV_BASE_URL) or config.DEFAULT_BASE_URL
-    return VeniceClient(api_key=key, base_url=base), 0
+        return None, 2
 
 
 def _clamp_duration(model: str, duration: int) -> int:
@@ -137,15 +146,34 @@ def _status_to_exit(err: VeniceAPIError) -> int:
 
 
 def _print_quote(quote_usd, model: str, duration: int) -> None:
-    try:
-        formatted = f"${float(quote_usd):.4f}"
-    except (TypeError, ValueError):
-        formatted = f"{quote_usd!r}"
     print(
-        f"Estimated cost: {formatted} USD "
+        f"Estimated cost: {billing.format_usd(quote_usd)} "
         f"(model={model}, duration={duration}s)",
         file=sys.stderr,
     )
+
+
+def _print_balance_and_remaining(client, quote_usd, *, show_balance: bool) -> None:
+    """Print pre-charge balance and estimated remaining if balance fetch works."""
+    if not show_balance:
+        return
+    info = None
+    try:
+        info = billing.fetch_balance(client)
+    except VeniceAPIError:
+        info = None
+    if not info or info.get("usd") is None:
+        return
+    bal = info["usd"]
+    print(f"Balance:        {billing.format_usd(bal)}", file=sys.stderr)
+    try:
+        remaining = float(bal) - float(quote_usd)
+        print(
+            f"After charge:   {billing.format_usd(remaining)}",
+            file=sys.stderr,
+        )
+    except (TypeError, ValueError):
+        pass
 
 
 def _confirm_or_exit(yes: bool) -> Optional[int]:
@@ -274,6 +302,21 @@ def _run_generate(args) -> int:
 
     quote_value = quote.get("quote", quote)
     _print_quote(quote_value, args.model, duration)
+    _print_balance_and_remaining(
+        client, quote_value, show_balance=not args.no_balance
+    )
+
+    if args.max_spend is not None:
+        try:
+            if float(quote_value) > float(args.max_spend):
+                print(
+                    f"sfx: quote {billing.format_usd(quote_value)} exceeds "
+                    f"--max-spend {billing.format_usd(args.max_spend)}; aborting",
+                    file=sys.stderr,
+                )
+                return 1
+        except (TypeError, ValueError):
+            pass
 
     if args.dry_run:
         return 0
