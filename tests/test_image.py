@@ -33,6 +33,8 @@ def _build_args(**ov):
         hide_watermark=False,
         name=None,
         output=None,
+        save_json=False,
+        from_json=None,
         yes=True,
         dry_run=False,
         max_spend=None,
@@ -65,6 +67,25 @@ def _gen_payload(n=1):
     return json.dumps({
         "id": "generate-image-1",
         "images": [b64 for _ in range(n)],
+        "timing": {"total": 1000},
+    }).encode()
+
+
+def _gen_payload_resolved(n=1, seed=998319):
+    """Like _gen_payload but echoes resolved params at request.data (incl. the
+    seed Venice picked), as the real /image/generate response does."""
+    b64 = base64.b64encode(FAKE_PNG).decode()
+    return json.dumps({
+        "id": "generate-image-1",
+        "images": [b64 for _ in range(n)],
+        "request": {"data": {
+            "model": "venice-sd35",
+            "prompt": "a fierce red dragon",
+            "format": "png",
+            "seed": seed,
+            "steps": 20,
+            "variants": n,
+        }},
         "timing": {"total": 1000},
     }).encode()
 
@@ -258,6 +279,132 @@ class TestImageFlow(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(captured["body"]["hide_watermark"], False)
         self.assertEqual(captured["body"]["safe_mode"], True)
+
+    def test_no_sidecar_by_default(self):
+        from venice.commands import image
+
+        responses = iter([
+            FakeResp(200, _image_models_payload(), "application/json"),
+            FakeResp(200, _gen_payload_resolved(1), "application/json"),
+        ])
+        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.client.urllib.request.urlopen",
+                        lambda *a, **kw: next(responses)):
+            rc = image._run(_build_args())
+        self.assertEqual(rc, 0)
+        self.assertEqual(list(Path(".").glob("*.json")), [])
+
+    def test_save_json_writes_sidecar(self):
+        from venice.commands import image
+
+        responses = iter([
+            FakeResp(200, _image_models_payload(), "application/json"),
+            FakeResp(200, _gen_payload_resolved(1, seed=998319), "application/json"),
+        ])
+        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.client.urllib.request.urlopen",
+                        lambda *a, **kw: next(responses)):
+            rc = image._run(_build_args(save_json=True))
+        self.assertEqual(rc, 0)
+        sidecars = sorted(Path(".").glob("venice-image-*.json"))
+        self.assertEqual(len(sidecars), 1, f"expected 1 sidecar, got {sidecars}")
+        spec = json.loads(sidecars[0].read_text())
+        self.assertEqual(spec["seed"], 998319)  # resolved seed captured
+        self.assertNotIn("variants", spec)  # normalized to a single image
+
+    def test_save_json_multivariant_writes_one_sidecar(self):
+        from venice.commands import image
+
+        responses = iter([
+            FakeResp(200, _image_models_payload(), "application/json"),
+            FakeResp(200, _gen_payload_resolved(3), "application/json"),
+        ])
+        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.client.urllib.request.urlopen",
+                        lambda *a, **kw: next(responses)):
+            rc = image._run(_build_args(save_json=True, variants=3))
+        self.assertEqual(rc, 0)
+        pngs = sorted(Path(".").glob("venice-image-*.png"))
+        sidecars = sorted(Path(".").glob("venice-image-*.json"))
+        self.assertEqual(len(pngs), 3)
+        # Only one call-level seed backs all variants and it reproduces the
+        # first one, so exactly one sidecar is written -- next to variant 1.
+        self.assertEqual(len(sidecars), 1, f"expected 1 sidecar, got {sidecars}")
+        self.assertTrue(sidecars[0].name.endswith("-1.json"))
+        self.assertNotIn("variants", json.loads(sidecars[0].read_text()))
+
+    def test_replay_from_json_regenerates(self):
+        from venice.commands import image
+
+        sidecar = Path(self.tmp.name) / "card.json"
+        sidecar.write_text(json.dumps({
+            "model": "venice-sd35",
+            "prompt": "a saved dragon",
+            "format": "png",
+            "seed": 998319,
+            "steps": 20,
+        }), encoding="utf-8")
+
+        responses = iter([
+            FakeResp(200, _image_models_payload(), "application/json"),
+            FakeResp(200, _gen_payload(1), "application/json"),
+        ])
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            if req.full_url.endswith("/image/generate"):
+                captured["body"] = json.loads(req.data.decode("utf-8"))
+            return next(responses)
+
+        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.client.urllib.request.urlopen", fake_urlopen):
+            rc = image._run(_build_args(prompt=None, from_json=sidecar))
+        self.assertEqual(rc, 0)
+        self.assertEqual(captured["body"]["seed"], 998319)
+        self.assertEqual(captured["body"]["prompt"], "a saved dragon")
+        self.assertEqual(captured["body"]["steps"], 20)
+        self.assertEqual(len(list(Path(".").glob("*.png"))), 1)
+
+    def test_replay_cli_override(self):
+        from venice.commands import image
+
+        sidecar = Path(self.tmp.name) / "card.json"
+        sidecar.write_text(json.dumps({
+            "model": "venice-sd35",
+            "prompt": "a saved dragon",
+            "format": "png",
+            "seed": 998319,
+            "steps": 20,
+        }), encoding="utf-8")
+
+        responses = iter([
+            FakeResp(200, _image_models_payload(), "application/json"),
+            FakeResp(200, _gen_payload(1), "application/json"),
+        ])
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            if req.full_url.endswith("/image/generate"):
+                captured["body"] = json.loads(req.data.decode("utf-8"))
+            return next(responses)
+
+        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.client.urllib.request.urlopen", fake_urlopen):
+            rc = image._run(_build_args(
+                prompt="a different dragon", from_json=sidecar, steps=40))
+        self.assertEqual(rc, 0)
+        self.assertEqual(captured["body"]["steps"], 40)  # CLI overrides JSON
+        self.assertEqual(captured["body"]["prompt"], "a different dragon")
+        self.assertEqual(captured["body"]["seed"], 998319)  # unchanged from JSON
+
+    def test_replay_invalid_json_returns_exit_2(self):
+        from venice.commands import image
+
+        sidecar = Path(self.tmp.name) / "bad.json"
+        sidecar.write_text("{not valid json", encoding="utf-8")
+        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}):
+            rc = image._run(_build_args(prompt=None, from_json=sidecar))
+        self.assertEqual(rc, 2)
 
 
 if __name__ == "__main__":

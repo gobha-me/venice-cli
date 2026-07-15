@@ -9,12 +9,21 @@ batch generation of a whole card set from --from-file.
 Every call uses JSON mode (return_binary omitted), so the response is
 {"images": ["<base64>", ...]} which we decode -- one code path for 1-4
 variants, no client changes needed.
+
+Reproducibility round-trip: --save-json writes a .json sidecar of the
+resolved params (including the actual seed Venice used) next to the generated
+image; --from-json replays such a sidecar to regenerate, with explicitly-passed
+CLI flags (and a positional prompt) overriding the saved values. A call has one
+seed, and replaying it reproduces the first variant, so with --variants>1 only
+that first (reproducible) variant gets a sidecar.
 """
 from __future__ import annotations
 
+import argparse
 import base64
 import binascii
 import hashlib
+import json
 import re
 import sys
 from pathlib import Path
@@ -63,6 +72,16 @@ def register(subparsers) -> None:
         metavar="PATH",
         help="Batch mode: read prompts from PATH (one per line; blank lines "
         "and '#' comments skipped; optional 'name<TAB>prompt').",
+    )
+    # Replay lives outside the mutually-exclusive group so a positional prompt
+    # can coexist as an override of the saved one.
+    p.add_argument(
+        "--from-json",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Replay a sidecar: load resolved params from PATH and regenerate. "
+        "Explicitly-passed flags (and a positional prompt) override saved values.",
     )
     p.add_argument(
         "--model",
@@ -123,6 +142,14 @@ def register(subparsers) -> None:
     )
     p.add_argument("--output", "-o", type=Path, default=None,
                    help="Output file (single) or directory. Default: cwd.")
+    p.add_argument(
+        "--save-json",
+        action="store_true",
+        default=False,
+        help="Write a .json sidecar of resolved params (incl. seed) for "
+        "reproducible replay via --from-json (with --variants>1, only the "
+        "first, reproducible variant gets one).",
+    )
     p.add_argument("--yes", "-y", action="store_true")
     p.add_argument("--dry-run", action="store_true",
                    help="Estimate cost and exit; don't call /image/generate.")
@@ -186,6 +213,28 @@ def _decode_images(doc: dict) -> List[bytes]:
         except (binascii.Error, ValueError):
             continue
     return out
+
+
+def _sidecar_params(doc: dict, body: dict) -> dict:
+    """Flat, replayable spec of resolved params for the sidecar.
+
+    Prefers the resolved `request.data` block Venice echoes -- it carries the
+    actual seed even when the user passed none -- and falls back to the sent
+    body. `variants` is dropped so the sidecar reproduces a single image on
+    replay.
+    """
+    resolved = None
+    req = doc.get("request") if isinstance(doc, dict) else None
+    if isinstance(req, dict):
+        data = req.get("data")
+        if isinstance(data, dict) and data:
+            resolved = data
+    params = dict(resolved if resolved is not None else body)
+    params.pop("variants", None)
+    params.setdefault("model", body.get("model"))
+    params.setdefault("prompt", body.get("prompt"))
+    params.setdefault("format", body.get("format"))
+    return params
 
 
 # ---- pricing + cost estimation ----------------------------------------------
@@ -413,6 +462,19 @@ def _write_images(images: List[bytes], paths: List[Path]) -> Optional[int]:
     return None
 
 
+def _write_sidecar(json_path: Path, params: dict) -> None:
+    """Best-effort: write a params sidecar. Warns but never fails the run --
+    the image is already on disk; the sidecar is reproducibility metadata."""
+    try:
+        with json_path.open("w", encoding="utf-8") as fh:
+            json.dump(params, fh, indent=2, sort_keys=True)
+            fh.write("\n")
+    except OSError as e:
+        print(f"warning: could not write sidecar {json_path}: {e}", file=sys.stderr)
+        return
+    print(f"wrote sidecar {json_path.resolve()}", file=sys.stderr)
+
+
 def _generate_one(client, prompt: str, args, paths: List[Path]) -> int:
     body = _build_body(prompt, args)
     try:
@@ -424,13 +486,92 @@ def _generate_one(client, prompt: str, args, paths: List[Path]) -> int:
     if not images:
         print("image: server returned no images", file=sys.stderr)
         return 5
-    rc = _write_images(images, paths[: len(images)])
-    return rc if rc is not None else 0
+    written = paths[: len(images)]
+    rc = _write_images(images, written)
+    if rc is not None:
+        return rc
+    if getattr(args, "save_json", False):
+        # One call-level seed backs all variants, and replaying it reproduces
+        # only the first variant byte-for-byte -- so the sidecar goes next to
+        # variant 1 alone; a sidecar beside variants 2..N would falsely imply
+        # they're individually reproducible.
+        params = _sidecar_params(doc, body)
+        _write_sidecar(written[0].with_suffix(".json"), params)
+    return 0
+
+
+# ---- replay ------------------------------------------------------------------
+
+# Generation fields a sidecar can supply and CLI flags can override
+# (== the inputs of _build_body).
+_REPLAY_FIELDS = (
+    "model", "prompt", "format", "width", "height", "aspect_ratio",
+    "resolution", "negative_prompt", "seed", "cfg_scale", "steps",
+    "style_preset", "variants", "safe_mode", "hide_watermark",
+)
+
+
+def _load_sidecar(path: Path) -> Optional[dict]:
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError as e:
+        print(f"image: cannot read {path}: {e}", file=sys.stderr)
+        return None
+    try:
+        spec = json.loads(raw)
+    except ValueError as e:
+        print(f"image: {path} is not valid JSON: {e}", file=sys.stderr)
+        return None
+    if not isinstance(spec, dict):
+        print(f"image: {path} must contain a JSON object", file=sys.stderr)
+        return None
+    return spec
+
+
+def _apply_replay(args):
+    """Merge a sidecar with CLI overrides into a synthetic namespace.
+
+    Returns the merged namespace, or an int exit code on error. A generation
+    field is taken from the CLI when it was set explicitly (differs from the
+    parser default); otherwise it falls back to the saved spec.
+    """
+    if args.from_file is not None:
+        print("image: --from-json and --from-file are mutually exclusive",
+              file=sys.stderr)
+        return 2
+    spec = _load_sidecar(args.from_json)
+    if spec is None:
+        return 2
+
+    from ..cli import build_parser  # lazy: avoids a circular import at load
+    defaults = build_parser().parse_args(["image"])
+
+    merged = argparse.Namespace(**vars(args))
+    for f in _REPLAY_FIELDS:
+        cur = getattr(args, f)
+        if f == "prompt":
+            explicit = bool(cur and cur.strip())
+        else:
+            explicit = cur != getattr(defaults, f, None)
+        if explicit:
+            continue
+        if spec.get(f) is not None:
+            setattr(merged, f, spec[f])
+
+    merged.from_file = None
+    merged.from_json = None
+    return merged
 
 
 # ---- main flow ---------------------------------------------------------------
 
 def _run(args) -> int:
+    if args.from_json is not None:
+        merged = _apply_replay(args)
+        if isinstance(merged, int):
+            return merged
+        args = merged
+
     if not (MIN_VARIANTS <= args.variants <= MAX_VARIANTS):
         print(
             f"image: --variants {args.variants} out of range "
