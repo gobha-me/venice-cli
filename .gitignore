@@ -21,3 +21,7 @@ venice-sfx-*.bin
 .vscode/
 .idea/
 *.swp
+
+# Vendored Venice OpenAPI spec -- local dev reference only (large, fast-moving
+# third-party file). Fetch fresh from Venice rather than tracking in history.
+reference/venice-openapi.yaml
