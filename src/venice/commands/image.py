@@ -31,6 +31,14 @@ from typing import List, Optional, Tuple
 
 from .. import auth, billing, config
 from ..client import VeniceAPIError, build_client_from_auth
+from ._shared import (
+    confirm_or_exit as _confirm_or_exit,
+    over_budget as _over_budget,
+    print_balance_and_remaining as _print_balance_and_remaining,
+    print_estimate as _print_estimate,
+    status_to_exit as _status_to_exit,
+    write_bytes_outputs as _write_images,
+)
 
 DEFAULT_IMAGE_MODEL = "venice-sd35"  # pixel-based; honors --width/--height
 
@@ -392,100 +400,7 @@ def _read_batch(path: Path) -> Tuple[Optional[List[Tuple[str, str]]], int]:
     return items, 0
 
 
-# ---- shared UX ---------------------------------------------------------------
-
-def _print_estimate(cost: Optional[float], count_desc: str, model: str) -> None:
-    if cost is None:
-        print(
-            f"Estimated cost: (unknown -- could not fetch {model} pricing) "
-            f"[{count_desc}]",
-            file=sys.stderr,
-        )
-    else:
-        print(
-            f"Estimated cost: {billing.format_usd(cost)} "
-            f"({count_desc}, model={model})",
-            file=sys.stderr,
-        )
-
-
-def _print_balance_and_remaining(client, cost: Optional[float], *, show: bool) -> None:
-    if not show:
-        return
-    try:
-        info = billing.fetch_balance(client)
-    except VeniceAPIError:
-        info = None
-    if not info or info.get("total") is None:
-        return
-    print(f"Balance:        {billing.format_balance_breakdown(info)}", file=sys.stderr)
-    if cost is not None:
-        try:
-            remaining = float(info["total"]) - float(cost)
-            print(f"After charge:   {billing.format_usd(remaining)}", file=sys.stderr)
-        except (TypeError, ValueError):
-            pass
-
-
-def _over_budget(cost: Optional[float], max_spend: Optional[float]) -> bool:
-    if max_spend is None or cost is None:
-        return False
-    try:
-        return float(cost) > float(max_spend)
-    except (TypeError, ValueError):
-        return False
-
-
-def _confirm_or_exit(yes: bool) -> Optional[int]:
-    if yes:
-        return None
-    if not sys.stdin.isatty():
-        print("non-interactive; pass --yes to confirm the charge.", file=sys.stderr)
-        return 1
-    try:
-        ans = input("Proceed? [y/N] ").strip().lower()
-    except EOFError:
-        ans = ""
-    if ans not in ("y", "yes"):
-        print("aborted by user", file=sys.stderr)
-        return 1
-    return None
-
-
-def _status_to_exit(err: VeniceAPIError) -> int:
-    s = err.status
-    if s == 400:
-        return 2
-    if s == 402:
-        return 1  # insufficient balance ~ declined
-    if s == 422:
-        return 3
-    if s == 429:
-        return 4
-    if s == 503:
-        return 5
-    if 500 <= s < 600:
-        return 5
-    if s == 404:
-        return 6
-    if s == 0:
-        return 8
-    return 2
-
-
-def _write_images(images: List[bytes], paths: List[Path]) -> Optional[int]:
-    """Write decoded images to paths. Returns an exit code on failure, else None."""
-    for data, path in zip(images, paths):
-        try:
-            path.write_bytes(data)
-        except OSError as e:
-            print(f"could not write {path}: {e}", file=sys.stderr)
-            return 9
-        abs_path = path.resolve()
-        print(str(abs_path))
-        print(f"wrote {len(data)} bytes to {abs_path}", file=sys.stderr)
-    return None
-
+# ---- sidecar -----------------------------------------------------------------
 
 def _write_sidecar(json_path: Path, params: dict) -> None:
     """Best-effort: write a params sidecar. Warns but never fails the run --
@@ -670,7 +585,7 @@ def _run_single(client, args) -> int:
     price = _fetch_image_price(client, args.model)
     cost = _estimate_cost(price, args.variants)
     desc = f"{args.variants} image" + ("s" if args.variants != 1 else "")
-    _print_estimate(cost, desc, args.model)
+    _print_estimate(cost, f"{desc}, model={args.model}")
     _print_balance_and_remaining(client, cost, show=not args.no_balance)
 
     if _over_budget(cost, args.max_spend):
@@ -703,7 +618,7 @@ def _run_batch(client, args) -> int:
     price = _fetch_image_price(client, args.model)
     cost = _estimate_cost(price, args.variants, n)
     desc = f"{n} prompt" + ("s" if n != 1 else "") + f" x {args.variants}"
-    _print_estimate(cost, desc, args.model)
+    _print_estimate(cost, f"{desc}, model={args.model}")
     _print_balance_and_remaining(client, cost, show=not args.no_balance)
 
     if _over_budget(cost, args.max_spend):

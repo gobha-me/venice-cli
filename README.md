@@ -3,10 +3,11 @@
 A stdlib-only Python CLI wrapping the [Venice.ai](https://venice.ai) API.
 Zero install, pod-restart-survivable (lives under `~/.local/{bin,lib}`).
 
-v0.4 ships working `venice login`, `venice sfx` (sound-effect
-generation), `venice tts` (text-to-speech), `venice image` (image
-generation), `venice balance` (budget tracking), and `venice models`
-(catalog browser). `chat` and `embed` are scaffolded stubs.
+Ships working `venice login`, `venice sfx` (sound-effect generation),
+`venice tts` (text-to-speech), `venice image` (image generation),
+`venice upscale` / `venice bg-remove` (image post-processing),
+`venice balance` (budget tracking), and `venice models` (catalog
+browser). `chat` and `embed` are scaffolded stubs.
 
 ## Install
 
@@ -234,6 +235,51 @@ Formats: `png` (default), `webp`, `jpeg`. Aspect-ratio/resolution-tier
 models take `--aspect-ratio`/`--resolution` instead of `--width`/`--height`.
 `--hide-watermark` drops the Venice watermark (Venice may keep it for some
 content); `--no-safe-mode` stops adult-classified art from being blurred.
+
+## Upscale images
+
+`venice image` caps output at 1280px, so take art larger by upscaling it
+(1-4x, default 2x) via `/image/upscale`:
+
+```sh
+# 2x upscale -> ./env-upscaled.png (960x540 -> 1920x1080).
+venice upscale env.png --scale 2 --yes
+
+# Enhance-only pass (scale 1 requires --enhance) with a style hint.
+venice upscale portrait.png --scale 1 --enhance --enhance-prompt gold --yes
+
+# Custom output, tune how much the enhancer may change the image.
+venice upscale card.png --scale 4 --enhance --enhance-creativity 0.3 \
+    -o card-4k.png --yes
+
+# Dry-run: show the planned output + balance, spend nothing.
+venice upscale env.png --dry-run
+```
+
+Input is a PNG/JPEG file under 25 MB. Pricing is **dynamic** (Venice bills
+$0.001-$10.00 per call by input size and scale), so there's no reliable
+pre-charge estimate; the balance is shown and you confirm (or `--yes`).
+
+## Remove backgrounds
+
+Venice's generate call ignores `background: transparent`, so make an asset
+opaque then strip its background via `/image/background-remove` for a
+transparent PNG (e.g. rank insignia, icons):
+
+```sh
+# Local file -> ./insignia-nobg.png (transparent).
+venice bg-remove insignia.png --yes
+
+# From a URL instead of a local file.
+venice bg-remove --image-url https://example.com/logo.png -o logo-nobg.png --yes
+
+# Dry-run: show the planned output + balance, spend nothing.
+venice bg-remove insignia.png --dry-run
+```
+
+Provide exactly one source: a positional file (base64-encoded under 25 MB) or
+`--image-url`. Pricing is dynamic like `upscale`; balance is shown and you
+confirm before the charge.
 
 ## Browse the model catalog
 
