@@ -24,6 +24,9 @@ def _build_args(**ov):
         aspect_ratio=None,
         resolution=None,
         negative_prompt=None,
+        style_prefix=None,
+        preset=None,
+        preset_file=None,
         seed=None,
         cfg_scale=None,
         steps=None,
@@ -258,6 +261,155 @@ class TestImageFlow(unittest.TestCase):
         self.assertEqual(b["hide_watermark"], True)
         self.assertEqual(b["format"], "png")
         self.assertNotIn("variants", b)  # omitted when 1
+
+    def test_style_prefix_prepended(self):
+        from venice.commands import image
+
+        body = image._build_body(
+            "a fierce red dragon", _build_args(style_prefix="EPIC,"))
+        self.assertEqual(body["prompt"], "EPIC, a fierce red dragon")
+
+    def test_style_prefix_applies_in_batch(self):
+        from venice.commands import image
+
+        batch = Path(self.tmp.name) / "cards.tsv"
+        batch.write_text(
+            "fire-dragon\tA fierce red dragon\n"
+            "stone-golem\tAn ancient stone golem\n",
+            encoding="utf-8",
+        )
+        responses = iter([
+            FakeResp(200, _image_models_payload(), "application/json"),
+            FakeResp(200, _gen_payload(1), "application/json"),
+            FakeResp(200, _gen_payload(1), "application/json"),
+        ])
+        bodies = []
+
+        def fake_urlopen(req, timeout=None):
+            if req.full_url.endswith("/image/generate"):
+                bodies.append(json.loads(req.data.decode("utf-8")))
+            return next(responses)
+
+        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.client.urllib.request.urlopen", fake_urlopen):
+            rc = image._run(_build_args(
+                prompt=None, from_file=batch, style_prefix="EPIC,"))
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(bodies), 2)
+        self.assertTrue(all(b["prompt"].startswith("EPIC, ") for b in bodies))
+        # Filenames come from the per-card prompt, not the shared prefix.
+        self.assertTrue(Path("fire-dragon.png").exists())
+
+    def test_negative_prompt_batch_wide(self):
+        from venice.commands import image
+
+        batch = Path(self.tmp.name) / "cards.tsv"
+        batch.write_text(
+            "fire-dragon\tA fierce red dragon\n"
+            "stone-golem\tAn ancient stone golem\n",
+            encoding="utf-8",
+        )
+        responses = iter([
+            FakeResp(200, _image_models_payload(), "application/json"),
+            FakeResp(200, _gen_payload(1), "application/json"),
+            FakeResp(200, _gen_payload(1), "application/json"),
+        ])
+        bodies = []
+
+        def fake_urlopen(req, timeout=None):
+            if req.full_url.endswith("/image/generate"):
+                bodies.append(json.loads(req.data.decode("utf-8")))
+            return next(responses)
+
+        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.client.urllib.request.urlopen", fake_urlopen):
+            rc = image._run(_build_args(
+                prompt=None, from_file=batch, negative_prompt="text, watermark"))
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(bodies), 2)
+        self.assertTrue(
+            all(b["negative_prompt"] == "text, watermark" for b in bodies))
+
+    def test_preset_resolves_style_and_negative(self):
+        from venice.commands import image
+
+        preset_file = Path("presets.json")
+        preset_file.write_text(json.dumps({
+            "frontline": {
+                "style_prefix": "dark fantasy oil painting",
+                "negative_prompt": "text, watermark, blurry",
+            },
+        }), encoding="utf-8")
+        responses = iter([
+            FakeResp(200, _image_models_payload(), "application/json"),
+            FakeResp(200, _gen_payload(1), "application/json"),
+        ])
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            if req.full_url.endswith("/image/generate"):
+                captured["body"] = json.loads(req.data.decode("utf-8"))
+            return next(responses)
+
+        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.client.urllib.request.urlopen", fake_urlopen):
+            rc = image._run(_build_args(
+                prompt="a knight", preset="frontline", preset_file=preset_file))
+        self.assertEqual(rc, 0)
+        b = captured["body"]
+        self.assertEqual(b["prompt"], "dark fantasy oil painting a knight")
+        self.assertEqual(b["negative_prompt"], "text, watermark, blurry")
+
+    def test_cli_overrides_preset(self):
+        from venice.commands import image
+
+        preset_file = Path("presets.json")
+        preset_file.write_text(json.dumps({
+            "frontline": {
+                "style_prefix": "dark fantasy oil painting",
+                "negative_prompt": "text, watermark, blurry",
+            },
+        }), encoding="utf-8")
+        responses = iter([
+            FakeResp(200, _image_models_payload(), "application/json"),
+            FakeResp(200, _gen_payload(1), "application/json"),
+        ])
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            if req.full_url.endswith("/image/generate"):
+                captured["body"] = json.loads(req.data.decode("utf-8"))
+            return next(responses)
+
+        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.client.urllib.request.urlopen", fake_urlopen):
+            rc = image._run(_build_args(
+                prompt="a knight", preset="frontline", preset_file=preset_file,
+                style_prefix="watercolor sketch"))
+        self.assertEqual(rc, 0)
+        b = captured["body"]
+        self.assertEqual(b["prompt"], "watercolor sketch a knight")
+        # negative_prompt not overridden -> still from the preset.
+        self.assertEqual(b["negative_prompt"], "text, watermark, blurry")
+
+    def test_preset_unknown_name_returns_exit_2(self):
+        from venice.commands import image
+
+        preset_file = Path("presets.json")
+        preset_file.write_text(json.dumps({"frontline": {}}), encoding="utf-8")
+        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}):
+            rc = image._run(_build_args(
+                prompt="a knight", preset="nope", preset_file=preset_file))
+        self.assertEqual(rc, 2)
+
+    def test_preset_missing_file_returns_exit_2(self):
+        from venice.commands import image
+
+        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}):
+            rc = image._run(_build_args(
+                prompt="a knight", preset="frontline",
+                preset_file=Path("does-not-exist.json")))
+        self.assertEqual(rc, 2)
 
     def test_hide_watermark_defaults_false_in_body(self):
         from venice.commands import image

@@ -104,6 +104,28 @@ def register(subparsers) -> None:
                    help="Aspect ratio (aspect-ratio/resolution-tier models).")
     p.add_argument("--resolution", default=None, metavar="TIER",
                    help="Resolution tier, e.g. 1K/2K/4K (tier models).")
+    # Shared style templating (local; applies to single + batch).
+    p.add_argument(
+        "--style-prefix",
+        default=None,
+        metavar="TEXT",
+        help="Text prepended to every prompt (single + batch) for a shared "
+        "look. Does not affect output filenames.",
+    )
+    p.add_argument(
+        "--preset",
+        default=None,
+        metavar="NAME",
+        help="Named {style_prefix, negative_prompt} bundle from the presets "
+        "file. Explicit --style-prefix/--negative-prompt override it.",
+    )
+    p.add_argument(
+        "--preset-file",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help=f"Presets JSON location (default {config.PRESETS_FILE}).",
+    )
     # Parameter passthrough.
     p.add_argument("--negative-prompt", default=None,
                    help="What to exclude from the image.")
@@ -168,6 +190,9 @@ def register(subparsers) -> None:
 # ---- request body ------------------------------------------------------------
 
 def _build_body(prompt: str, args) -> dict:
+    prefix = getattr(args, "style_prefix", None)
+    if prefix and prefix.strip():
+        prompt = f"{prefix.strip()} {prompt}"
     body: dict = {
         "model": args.model,
         "prompt": prompt,
@@ -563,6 +588,44 @@ def _apply_replay(args):
     return merged
 
 
+# ---- style presets -----------------------------------------------------------
+
+def _resolve_preset(args) -> Optional[int]:
+    """Fill style_prefix/negative_prompt from a named preset when --preset is set.
+
+    Explicit CLI flags win: a preset value is applied only where the arg is
+    still None. Returns an int exit code on error, else None.
+    """
+    name = getattr(args, "preset", None)
+    if not name:
+        return None
+    path = args.preset_file or config.PRESETS_FILE
+    try:
+        raw = Path(path).read_text(encoding="utf-8")
+    except OSError as e:
+        print(f"image: cannot read presets file {path}: {e}", file=sys.stderr)
+        return 2
+    try:
+        presets = json.loads(raw)
+    except ValueError as e:
+        print(f"image: {path} is not valid JSON: {e}", file=sys.stderr)
+        return 2
+    if not isinstance(presets, dict):
+        print(f"image: {path} must contain a JSON object of presets",
+              file=sys.stderr)
+        return 2
+    entry = presets.get(name)
+    if not isinstance(entry, dict):
+        available = ", ".join(sorted(presets)) or "(none)"
+        print(f"image: preset {name!r} not found in {path}; available: {available}",
+              file=sys.stderr)
+        return 2
+    for field in ("style_prefix", "negative_prompt"):
+        if getattr(args, field, None) is None and entry.get(field) is not None:
+            setattr(args, field, entry[field])
+    return None
+
+
 # ---- main flow ---------------------------------------------------------------
 
 def _run(args) -> int:
@@ -571,6 +634,10 @@ def _run(args) -> int:
         if isinstance(merged, int):
             return merged
         args = merged
+
+    rc = _resolve_preset(args)
+    if rc is not None:
+        return rc
 
     if not (MIN_VARIANTS <= args.variants <= MAX_VARIANTS):
         print(

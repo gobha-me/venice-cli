@@ -184,7 +184,41 @@ venice image "how much will this cost?" --dry-run
 # optional 'name<TAB>prompt'; blank lines and '#' comments skipped).
 venice image --from-file cards.tsv --yes -o ./card-art/
 venice image --from-file cards.tsv --variants 2 --dry-run
+
+# Shared look across a whole set: a style prefix prepended to every prompt
+# plus one negative prompt applied to the entire batch. Output filenames
+# stay based on each card's own prompt, not the prefix.
+venice image --from-file cards.tsv -o ./card-art/ --yes \
+    --style-prefix "dark fantasy oil painting, dramatic cinematic lighting" \
+    --negative-prompt "text, watermark, signature, blurry, lowres"
 ```
+
+### Shared style templating
+
+For a consistent set (e.g. a whole card deck), keep the long style + negative
+strings in one place with a **preset** instead of retyping them:
+
+```sh
+venice image --from-file cards.tsv -o ./card-art/ --yes \
+    --preset frontline --preset-file ./frontline.json
+```
+
+`--preset-file` defaults to `~/.config/venice/image_presets.json`; point it at a
+file in your project to version presets alongside the assets. Format:
+
+```json
+{
+  "frontline": {
+    "style_prefix": "dark fantasy oil painting, dramatic cinematic lighting",
+    "negative_prompt": "text, watermark, signature, blurry, lowres"
+  }
+}
+```
+
+Precedence: an explicit `--style-prefix` / `--negative-prompt` on the command
+line overrides the preset; the preset fills whatever you leave off. A single
+`--negative-prompt` (or the preset's) applies to every image in a `--from-file`
+batch.
 
 `cards.tsv` example (tab between name and prompt):
 
