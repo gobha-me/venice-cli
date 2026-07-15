@@ -1,5 +1,5 @@
 """Single import point. Adding a subcommand = one import + one tuple entry."""
-from . import balance, bg_remove, chat, embed, image, login, models, sfx, tts, upscale
+from . import balance, bg_remove, chat, embed, image, login, models, music, sfx, tts, upscale
 
 
 def register_all(subparsers) -> None:
@@ -8,6 +8,8 @@ def register_all(subparsers) -> None:
     models.register(subparsers)
     sfx.register(subparsers)
     sfx.register_status(subparsers)
+    music.register(subparsers)
+    music.register_status(subparsers)
     chat.register(subparsers)
     tts.register(subparsers)
     image.register(subparsers)
