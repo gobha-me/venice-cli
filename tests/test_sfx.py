@@ -26,6 +26,13 @@ def _build_args(**overrides):
         poll_interval=0,
         max_wait=10,
         command="sfx",
+        master=False,
+        lufs=-16.0,
+        true_peak=-1.0,
+        sample_rate=48000,
+        bit_depth=24,
+        loop=False,
+        loop_crossfade=2.0,
     )
     base.update(overrides)
     return argparse.Namespace(**base)
@@ -118,6 +125,55 @@ class TestSfxFullFlow(unittest.TestCase):
         # stdout should have received the queue_id on a line by itself
         writes = "".join(c.args[0] for c in out.write.call_args_list)
         self.assertIn("BGID12345", writes)
+
+    def test_master_flag_masters_saved_file(self):
+        from venice.commands import sfx
+
+        responses = iter([
+            FakeResp(200, b'{"quote": 0.0027}', "application/json"),
+            FakeResp(
+                200,
+                b'{"model":"elevenlabs-sound-effects-v2","queue_id":"abcdef1234567890","status":"QUEUED"}',
+                "application/json",
+            ),
+            FakeResp(200, b"FAKEMP3BYTES", "audio/mpeg"),
+            FakeResp(200, b'{"success": true}', "application/json"),
+        ])
+        mastered = []
+
+        def fake_master(inp, out, **kw):
+            mastered.append((Path(inp), Path(out), kw))
+            return 0
+
+        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.client.urllib.request.urlopen", lambda *a, **kw: next(responses)), \
+             mock.patch("venice.client.time.sleep"), \
+             mock.patch("venice.audio_post.has_ffmpeg", lambda: True), \
+             mock.patch("venice.audio_post.master", fake_master):
+            rc = sfx._run_generate(_build_args(master=True))
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(mastered), 1)
+        inp, out, _ = mastered[0]
+        self.assertTrue(inp.name.startswith("venice-sfx-"))
+        self.assertTrue(out.name.endswith(".mastered.wav"))
+
+    def test_master_without_ffmpeg_aborts_before_spend(self):
+        from venice.commands import sfx
+
+        calls = []
+
+        def fake_urlopen(req, timeout=None):
+            calls.append(req.full_url)
+            raise AssertionError("should not reach the network")
+
+        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.client.urllib.request.urlopen", fake_urlopen), \
+             mock.patch("venice.audio_post.has_ffmpeg", lambda: False):
+            rc = sfx._run_generate(_build_args(master=True))
+
+        self.assertEqual(rc, 2)
+        self.assertEqual(calls, [])
 
     def test_missing_api_key_returns_exit_2(self):
         from venice.commands import sfx

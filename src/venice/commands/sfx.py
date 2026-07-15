@@ -4,7 +4,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from .. import billing, config
+from .. import audio_post, billing, config
 from ..client import VeniceAPIError
 from . import _audio, _shared
 
@@ -55,6 +55,7 @@ def register(subparsers) -> None:
     )
     p.add_argument("--poll-interval", type=float, default=config.SFX_POLL_INTERVAL_SEC)
     p.add_argument("--max-wait", type=float, default=config.SFX_POLL_MAX_WAIT_SEC)
+    audio_post.add_master_flags(p, include_toggle=True)
     p.set_defaults(handler=_run_generate)
 
 
@@ -98,6 +99,11 @@ def _clamp_duration(model: str, duration: int) -> int:
 def _run_generate(args) -> int:
     if not args.prompt:
         print("sfx: prompt required (or use: venice sfx-status <id>)", file=sys.stderr)
+        return 2
+
+    if args.master and not audio_post.has_ffmpeg():
+        print("sfx: --master requires ffmpeg on PATH; install it or drop --master",
+              file=sys.stderr)
         return 2
 
     client, rc = _audio.build_client()
@@ -158,6 +164,7 @@ def _run_generate(args) -> int:
         )
         return 0
 
+    post = audio_post.master_hook(args) if args.master else None
     return _audio.retrieve_and_save(
         client,
         args.model,
@@ -169,6 +176,7 @@ def _run_generate(args) -> int:
         args.play,
         name_prefix="venice-sfx",
         retry_hint=f"venice sfx-status {queue_id}",
+        post_process=post,
     )
 
 

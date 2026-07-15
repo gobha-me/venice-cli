@@ -4,8 +4,9 @@ A stdlib-only Python CLI wrapping the [Venice.ai](https://venice.ai) API.
 Zero install, pod-restart-survivable (lives under `~/.local/{bin,lib}`).
 
 Ships working `venice login`, `venice sfx` (sound-effect generation),
-`venice tts` (text-to-speech), `venice image` (image generation),
-`venice upscale` / `venice bg-remove` (image post-processing),
+`venice music` (long-form ambience/music), `venice tts` (text-to-speech),
+`venice image` (image generation), `venice upscale` / `venice bg-remove`
+(image post-processing), `venice master` (audio mastering),
 `venice balance` (budget tracking), and `venice models` (catalog
 browser). `chat` and `embed` are scaffolded stubs.
 
@@ -281,6 +282,42 @@ Provide exactly one source: a positional file (base64-encoded under 25 MB) or
 `--image-url`. Pricing is dynamic like `upscale`; balance is shown and you
 confirm before the charge.
 
+## Master audio
+
+Venice's audio queue returns a model-default container (sfx = mp3) and its
+`/audio/speech` exposes no sample-rate/bit-depth control, so loudness
+normalization, true-peak limiting, and seamless looping are done locally.
+`venice master` shells out to **ffmpeg** (and **ffprobe** for `--loop`) — no
+API call, no spend — to produce a WAV master (default 48kHz/24-bit) with
+2-pass `loudnorm`:
+
+```sh
+# 48k/24-bit WAV master, LUFS -16 / true-peak -1 dBTP -> ./track.mastered.wav
+venice master track.mp3
+
+# Seamless-loop ambience (crossfade the tail into the head).
+venice master ambience.mp3 --loop --loop-crossfade 3 -o ambience-loop.wav
+
+# Tune targets / format.
+venice master pad.wav --lufs -14 --true-peak -1.5 --bit-depth 16 --sample-rate 44100
+
+# Show the ffmpeg commands without running them (works without ffmpeg installed).
+venice master track.mp3 --dry-run
+```
+
+The same flags are available on `venice music` / `venice sfx` via `--master`,
+which masters the generated file right after it's saved (writing a sibling
+`*.mastered.wav`). Requires ffmpeg; if it's missing the command errors **before
+spending** rather than after generating:
+
+```sh
+venice music "tense dungeon drone" --duration 60 --yes --master --loop
+venice sfx "campfire crackle" --duration 8 --yes --master
+```
+
+Needs ffmpeg on PATH (`sudo apt install ffmpeg`). ffprobe (bundled with ffmpeg)
+is required only for `--loop`.
+
 ## Browse the model catalog
 
 ```sh
@@ -346,6 +383,8 @@ The player list (`paplay` -> `aplay` -> `ffplay` -> `mpg123` -> `play`
 | `venice tts TEXT [--voice V] [--format F] [--speed N] [...]` | synthesize speech (sync) |
 | `venice image PROMPT [--variants N] [--name NAME] [--max-spend USD] [...]` | generate image(s) (sync) |
 | `venice image --from-file PATH [...]` | batch-generate a card set |
+| `venice music PROMPT [--duration N] [--master] [--loop] [...]` | generate long-form ambience/music |
+| `venice master INPUT [--loop] [--lufs N] [--bit-depth N] [...]` | master audio to WAV (48k/24-bit, LUFS/true-peak) |
 | `venice chat\|embed` | stubs (exit 2) for v0.x |
 
 ## Tests

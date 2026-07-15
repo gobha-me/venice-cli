@@ -36,6 +36,13 @@ def _build_args(**overrides):
         poll_interval=0,
         max_wait=10,
         command="music",
+        master=False,
+        lufs=-16.0,
+        true_peak=-1.0,
+        sample_rate=48000,
+        bit_depth=24,
+        loop=False,
+        loop_crossfade=2.0,
     )
     base.update(overrides)
     return argparse.Namespace(**base)
@@ -253,6 +260,46 @@ class TestMusicFlow(unittest.TestCase):
 
         self.assertEqual(rc, 0)
         self.assertEqual(len(sorted(Path(".").glob("venice-music-*.mp3"))), 1)
+
+    def test_master_flag_masters_saved_file(self):
+        from venice.commands import music
+
+        responses = [_quote(), _queue(), _processing(), _audio_bytes(), _complete()]
+        urlopen = _router(_models_payload(), responses)
+        mastered = []
+
+        def fake_master(inp, out, **kw):
+            mastered.append((Path(inp), Path(out), kw))
+            return 0
+
+        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.client.urllib.request.urlopen", urlopen), \
+             mock.patch("venice.client.time.sleep"), \
+             mock.patch("venice.audio_post.has_ffmpeg", lambda: True), \
+             mock.patch("venice.audio_post.master", fake_master):
+            rc = music._run_generate(_build_args(master=True, loop=True))
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(mastered), 1)
+        inp, out, kw = mastered[0]
+        self.assertTrue(inp.name.startswith("venice-music-"))
+        self.assertTrue(out.name.endswith(".mastered.wav"))
+        self.assertTrue(kw["loop"])
+        self.assertEqual(kw["sample_rate"], 48000)
+
+    def test_master_without_ffmpeg_aborts_before_spend(self):
+        from venice.commands import music
+
+        calls = []
+        urlopen = _router(_models_payload(), [], calls=calls)
+
+        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.client.urllib.request.urlopen", urlopen), \
+             mock.patch("venice.audio_post.has_ffmpeg", lambda: False):
+            rc = music._run_generate(_build_args(master=True))
+
+        self.assertEqual(rc, 2)
+        self.assertEqual(calls, [])  # no /models, no /quote, no /queue -> no spend
 
     def test_missing_api_key_returns_exit_2(self):
         from venice.commands import music
