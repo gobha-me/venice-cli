@@ -10,7 +10,7 @@ from __future__ import annotations
 import sys
 import time
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 from .. import audio_player, auth
 from ..client import VeniceAPIError, build_client_from_auth
@@ -102,6 +102,7 @@ def retrieve_and_save(
     *,
     name_prefix: str,
     retry_hint: str,
+    post_process: Optional[Callable[[Path], int]] = None,
 ) -> int:
     body = {"model": model, "queue_id": queue_id}
     start = time.monotonic()
@@ -144,9 +145,13 @@ def retrieve_and_save(
         except VeniceAPIError as e:
             print(f"warning: cleanup call failed: {e}", file=sys.stderr)
 
+    post_rc = 0
+    if post_process is not None:
+        post_rc = post_process(out_path)
+
     should_play = want_play
     if should_play is None:
         should_play = sys.stdout.isatty() and audio_player.has_player()
     if should_play:
         audio_player.play(out_path)
-    return 0
+    return post_rc

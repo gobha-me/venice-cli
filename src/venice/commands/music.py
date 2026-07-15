@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from .. import billing, config
+from .. import audio_post, billing, config
 from ..client import VeniceAPIError
 from . import _audio, _shared
 
@@ -67,6 +67,7 @@ def register(subparsers) -> None:
     )
     p.add_argument("--poll-interval", type=float, default=config.SFX_POLL_INTERVAL_SEC)
     p.add_argument("--max-wait", type=float, default=config.SFX_POLL_MAX_WAIT_SEC)
+    audio_post.add_master_flags(p, include_toggle=True)
     p.set_defaults(handler=_run_generate)
 
 
@@ -204,6 +205,11 @@ def _run_generate(args) -> int:
         print("music: prompt required (or use: venice music-status <id>)", file=sys.stderr)
         return 2
 
+    if args.master and not audio_post.has_ffmpeg():
+        print("music: --master requires ffmpeg on PATH; install it or drop --master",
+              file=sys.stderr)
+        return 2
+
     client, rc = _audio.build_client()
     if rc != 0:
         return rc
@@ -275,6 +281,7 @@ def _run_generate(args) -> int:
         )
         return 0
 
+    post = audio_post.master_hook(args) if args.master else None
     return _audio.retrieve_and_save(
         client,
         args.model,
@@ -286,6 +293,7 @@ def _run_generate(args) -> int:
         args.play,
         name_prefix="venice-music",
         retry_hint=f"venice music-status {queue_id}",
+        post_process=post,
     )
 
 
