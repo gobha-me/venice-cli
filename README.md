@@ -3,10 +3,10 @@
 A stdlib-only Python CLI wrapping the [Venice.ai](https://venice.ai) API.
 Zero install, pod-restart-survivable (lives under `~/.local/{bin,lib}`).
 
-v0.3 ships working `venice login`, `venice sfx` (sound-effect
-generation), `venice tts` (text-to-speech), `venice balance` (budget
-tracking), and `venice models` (catalog browser). `chat`, `image`, and
-`embed` are scaffolded stubs.
+v0.4 ships working `venice login`, `venice sfx` (sound-effect
+generation), `venice tts` (text-to-speech), `venice image` (image
+generation), `venice balance` (budget tracking), and `venice models`
+(catalog browser). `chat` and `embed` are scaffolded stubs.
 
 ## Install
 
@@ -152,6 +152,55 @@ venice models tts-kokoro | jq '.model_spec.voices'
 If `--voice` is omitted Venice uses each model's built-in default.
 Formats supported: `mp3` (default), `opus`, `aac`, `flac`, `wav`, `pcm`.
 
+## Image generation
+
+Sync `POST /image/generate`, same budget rails as `sfx`/`tts`. Default
+output is **PNG** (lossless, good for card art and upscaling).
+
+```sh
+# Single image. Confirm cost, save to ./venice-image-<id>.png.
+venice image "a fierce red dragon, trading-card art"
+
+# Meaningful filename + auto-confirm + hard cap.
+venice image "ancient stone golem" --name stone-golem --yes --max-spend 0.05
+
+# Generate 4 variants to pick the best -> ...-1.png ... -4.png.
+venice image "frost wyrm, splash art" --variants 4 --yes
+
+# Sizing + tuning (pixel-based models take --width/--height, max 1280).
+venice image "portrait card frame" --width 768 --height 1024 \
+    --negative-prompt "text, watermark" --seed 42 --cfg-scale 7.5 --yes
+
+# Omit the Venice watermark (best for finished card art).
+venice image "frost wyrm, splash art" --hide-watermark --yes
+
+# Don't blur flagged fantasy/battle art.
+venice image "epic battle, dramatic" --no-safe-mode --yes
+
+# Dry-run: estimate cost + balance, list planned files, spend nothing.
+venice image "how much will this cost?" --dry-run
+
+# Batch a whole card set from a file (one prompt per line;
+# optional 'name<TAB>prompt'; blank lines and '#' comments skipped).
+venice image --from-file cards.tsv --yes -o ./card-art/
+venice image --from-file cards.tsv --variants 2 --dry-run
+```
+
+`cards.tsv` example (tab between name and prompt):
+
+```
+fire-dragon	A fierce red dragon breathing flame, trading-card art
+stone-golem	An ancient moss-covered stone golem, trading-card art
+An unnamed prompt gets a slug from its first few words
+```
+
+Choose a model with `--model` (default `venice-sd35`); see
+`venice models --type image --detail` for ids and per-image pricing.
+Formats: `png` (default), `webp`, `jpeg`. Aspect-ratio/resolution-tier
+models take `--aspect-ratio`/`--resolution` instead of `--width`/`--height`.
+`--hide-watermark` drops the Venice watermark (Venice may keep it for some
+content); `--no-safe-mode` stops adult-classified art from being blurred.
+
 ## Browse the model catalog
 
 ```sh
@@ -172,7 +221,7 @@ Veo 3.1, Kling, Runway Gen4, LTX-2, Wan 2.7, Seedance 2.0, and more.
 | exit | meaning |
 |---|---|
 | 0 | success |
-| 1 | user declined / aborted |
+| 1 | user declined / aborted / insufficient balance (402) |
 | 2 | bad input, no API key, missing prompt, stub command |
 | 3 | content policy block (422) |
 | 4 | rate limit (429) |
@@ -215,7 +264,9 @@ The player list (`paplay` -> `aplay` -> `ffplay` -> `mpg123` -> `play`
 | `venice sfx PROMPT [--duration N] [--max-spend USD] [...]` | generate a sound effect |
 | `venice sfx-status QUEUE_ID` | fetch a backgrounded SFX job |
 | `venice tts TEXT [--voice V] [--format F] [--speed N] [...]` | synthesize speech (sync) |
-| `venice chat\|image\|embed` | stubs (exit 2) for v0.x |
+| `venice image PROMPT [--variants N] [--name NAME] [--max-spend USD] [...]` | generate image(s) (sync) |
+| `venice image --from-file PATH [...]` | batch-generate a card set |
+| `venice chat\|embed` | stubs (exit 2) for v0.x |
 
 ## Tests
 
