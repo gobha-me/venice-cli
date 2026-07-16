@@ -13,3 +13,7 @@ DEFAULT_BASE_URL = "https://api.venice.ai/api/v1"
 
 SFX_POLL_INTERVAL_SEC = 2.0
 SFX_POLL_MAX_WAIT_SEC = 300
+
+# Video generation runs minutes, not seconds -- poll less often, wait longer.
+VIDEO_POLL_INTERVAL_SEC = 5.0
+VIDEO_POLL_MAX_WAIT_SEC = 900

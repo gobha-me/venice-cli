@@ -6,12 +6,12 @@ optional `venice chat` command uses the official OpenAI SDK (Venice is
 OpenAI-compatible).
 
 Ships working `venice login`, `venice sfx` (sound-effect generation),
-`venice music` (long-form ambience/music), `venice tts` (text-to-speech),
-`venice image` (image generation), `venice upscale` / `venice bg-remove`
-(image post-processing), `venice master` (audio mastering),
-`venice chat` (one-shot chat completions with Venice extensions),
-`venice balance` (budget tracking), and `venice models` (catalog
-browser). `embed` is a scaffolded stub.
+`venice music` (long-form ambience/music), `venice video` (text-to-video),
+`venice tts` (text-to-speech), `venice image` (image generation),
+`venice upscale` / `venice bg-remove` (image post-processing),
+`venice master` (audio mastering), `venice chat` (one-shot chat completions
+with Venice extensions), `venice balance` (budget tracking), and
+`venice models` (catalog browser). `embed` is a scaffolded stub.
 
 ## Optional dependency
 
@@ -330,6 +330,36 @@ venice sfx "campfire crackle" --duration 8 --yes --master
 Needs ffmpeg on PATH (`sudo apt install ffmpeg`). ffprobe (bundled with ffmpeg)
 is required only for `--loop`.
 
+## Video
+
+Text-to-video on the same async queue as `sfx`/`music`
+(`/video/quote` → `/video/queue` → `/video/retrieve` → `/video/complete`),
+writing an mp4 to `venice-video-<id>.mp4`. Generation runs minutes, not
+seconds, so it polls less often and waits longer by default (`--poll-interval`
+5s, `--max-wait` 900s). `--model` defaults to the catalog's `default`-trait
+video model; available durations, resolutions, and aspect ratios vary by model.
+
+```sh
+# Quote only -- no spend.
+venice video "a koi pond at dawn, slow push-in" --dry-run
+
+# Generate a 5s clip (default), confirm the spend, save to ./out.mp4.
+venice video "a koi pond at dawn" --duration 5s --resolution 720p -o out.mp4 --yes
+
+# Pick a model / aspect ratio; drop the generated audio track.
+venice video "neon city flythrough" --model seedance-2-0-text-to-video \
+  --aspect-ratio 16:9 --no-audio --yes
+
+# Queue now, fetch later.
+ID=$(venice video "storm clouds timelapse" --duration 10s --background)
+venice video-status "$ID"
+```
+
+Some (VPS-backed) models return a presigned `download_url` at queue time and
+stream nothing back from `/video/retrieve`; the CLI fetches the mp4 from that
+URL transparently. When queued with `--background`, the URL is printed alongside
+the queue id — pass it back via `venice video-status <id> --download-url <url>`.
+
 ## Chat
 
 One-shot `POST /chat/completions` via the OpenAI SDK (see
@@ -460,6 +490,8 @@ The player list (`paplay` -> `aplay` -> `ffplay` -> `mpg123` -> `play`
 | `venice image PROMPT [--variants N] [--name NAME] [--max-spend USD] [...]` | generate image(s) (sync) |
 | `venice image --from-file PATH [...]` | batch-generate a card set |
 | `venice music PROMPT [--duration N] [--master] [--loop] [...]` | generate long-form ambience/music |
+| `venice video PROMPT [--duration 5s] [--resolution R] [--aspect-ratio A] [...]` | generate a video (async queue, mp4) |
+| `venice video-status QUEUE_ID [--download-url URL]` | fetch a backgrounded video job |
 | `venice master INPUT [--loop] [--lufs N] [--bit-depth N] [...]` | master audio to WAV (48k/24-bit, LUFS/true-peak) |
 | `venice chat MESSAGE [--system S] [--model M] [--web-search on] [...]` | one-shot chat completion (OpenAI SDK) |
 | `venice embed` | stub (exit 2) for v0.x |

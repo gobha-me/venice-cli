@@ -14,7 +14,7 @@ from typing import Optional
 
 from .. import audio_post, billing, config
 from ..client import VeniceAPIError
-from . import _audio, _shared
+from . import _audio, _queue, _shared
 
 DEFAULT_MUSIC_MODEL = "elevenlabs-music"
 
@@ -210,7 +210,7 @@ def _run_generate(args) -> int:
               file=sys.stderr)
         return 2
 
-    client, rc = _audio.build_client()
+    client, rc = _queue.build_client()
     if rc != 0:
         return rc
 
@@ -226,7 +226,7 @@ def _run_generate(args) -> int:
         quote = client.post_json("/audio/quote", quote_body)
     except VeniceAPIError as e:
         print(f"quote rejected: {e}", file=sys.stderr)
-        return _audio.status_to_exit(e)
+        return _queue.status_to_exit(e)
 
     quote_value = quote.get("quote", quote)
     label = f"model={args.model}"
@@ -265,7 +265,7 @@ def _run_generate(args) -> int:
         queued = client.post_json("/audio/queue", queue_body)
     except VeniceAPIError as e:
         print(f"queue failed: {e}", file=sys.stderr)
-        return _audio.status_to_exit(e)
+        return _queue.status_to_exit(e)
 
     queue_id = queued.get("queue_id") or queued.get("id") or ""
     if not queue_id:
@@ -298,7 +298,7 @@ def _run_generate(args) -> int:
 
 
 def _run_status(args) -> int:
-    client, rc = _audio.build_client()
+    client, rc = _queue.build_client()
     if rc != 0:
         return rc
     want_play = True if args.play else None
