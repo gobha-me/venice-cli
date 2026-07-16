@@ -71,7 +71,7 @@ class VeniceClient:
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",
-            "Accept": "application/json, audio/*, image/*",
+            "Accept": "application/json, audio/*, image/*, video/*",
             "User-Agent": self.user_agent,
         }
         data: Optional[bytes] = None
@@ -122,7 +122,11 @@ class VeniceClient:
         ct_low = (ctype or "").lower()
         if ct_low.startswith("application/json"):
             return ctype, (json.loads(raw.decode("utf-8")) if raw else {})
-        if ct_low.startswith("audio/") or ct_low.startswith("image/"):
+        if (
+            ct_low.startswith("audio/")
+            or ct_low.startswith("image/")
+            or ct_low.startswith("video/")
+        ):
             return ctype, raw
         return ctype, raw
 
@@ -134,11 +138,18 @@ class VeniceClient:
         interval: float = config.SFX_POLL_INTERVAL_SEC,
         max_wait: float = config.SFX_POLL_MAX_WAIT_SEC,
         on_tick: Optional[Callable[[dict], None]] = None,
-    ) -> Tuple[str, bytes]:
+        terminal_statuses: Tuple[str, ...] = (),
+    ) -> Tuple[str, ResponseType]:
         """Poll an async endpoint that switches content-type on completion.
 
-        Returns (content_type, audio_bytes) on success.
-        Raises VeniceAPIError on terminal HTTP errors.
+        On success returns (content_type, payload):
+          - (ctype, bytes) when the endpoint streams the finished media, or
+          - (ctype, dict) when the JSON `status` is in `terminal_statuses`
+            (e.g. video's "COMPLETED" -- the media is fetched separately from a
+            download_url). Audio callers leave `terminal_statuses` empty and
+            always get bytes.
+
+        Raises VeniceAPIError on terminal HTTP errors or an unexpected status.
         Raises TimeoutError if max_wait elapses while still PROCESSING.
         """
         deadline = time.monotonic() + max_wait
@@ -151,6 +162,8 @@ class VeniceClient:
                     0, path, f"unexpected payload type from {path}: {type(payload).__name__}"
                 )
             status = payload.get("status")
+            if status and status in terminal_statuses:
+                return ctype, payload
             if status and status != "PROCESSING":
                 raise VeniceAPIError(
                     0, path, f"unexpected status: {payload!r}"
@@ -162,10 +175,33 @@ class VeniceClient:
                     pass
             if time.monotonic() >= deadline:
                 raise TimeoutError(
-                    f"audio not ready after {max_wait}s "
+                    f"not ready after {max_wait}s "
                     f"(last status: {status!r})"
                 )
             time.sleep(interval)
+
+    def get_url_bytes(self, url: str) -> Tuple[str, bytes]:
+        """Fetch an arbitrary URL's bytes with a plain GET (no auth header).
+
+        For presigned download URLs (e.g. a video's download_url), which carry
+        their own auth in the query string and must not receive our Bearer token.
+        Returns (content_type, bytes); maps HTTP/URL errors to VeniceAPIError.
+        """
+        req = urllib.request.Request(
+            url, headers={"User-Agent": self.user_agent}, method="GET"
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                return resp.headers.get("Content-Type", ""), resp.read()
+        except urllib.error.HTTPError as e:
+            err_body = b""
+            try:
+                err_body = e.read()
+            except Exception:
+                pass
+            self._raise_api_error(e.code, url, err_body, "")
+        except urllib.error.URLError as e:
+            raise VeniceAPIError(0, url, f"connection error: {e.reason}") from None
 
     @staticmethod
     def _decode_json(status: int, path: str, ctype: str, raw: bytes) -> dict:
