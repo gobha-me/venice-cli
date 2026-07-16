@@ -1,14 +1,26 @@
 # venice
 
-A stdlib-only Python CLI wrapping the [Venice.ai](https://venice.ai) API.
-Zero install, pod-restart-survivable (lives under `~/.local/{bin,lib}`).
+A Python CLI wrapping the [Venice.ai](https://venice.ai) API. The base is
+stdlib-only and pod-restart-survivable (lives under `~/.local/{bin,lib}`); the
+optional `venice chat` command uses the official OpenAI SDK (Venice is
+OpenAI-compatible).
 
 Ships working `venice login`, `venice sfx` (sound-effect generation),
 `venice music` (long-form ambience/music), `venice tts` (text-to-speech),
 `venice image` (image generation), `venice upscale` / `venice bg-remove`
 (image post-processing), `venice master` (audio mastering),
+`venice chat` (one-shot chat completions with Venice extensions),
 `venice balance` (budget tracking), and `venice models` (catalog
-browser). `chat` and `embed` are scaffolded stubs.
+browser). `embed` is a scaffolded stub.
+
+## Optional dependency
+
+Every command except `venice chat` is stdlib-only. `chat` needs the OpenAI
+SDK:
+
+```sh
+pip install -r requirements.txt   # or: pip install openai
+```
 
 ## Install
 
@@ -318,6 +330,70 @@ venice sfx "campfire crackle" --duration 8 --yes --master
 Needs ffmpeg on PATH (`sudo apt install ffmpeg`). ffprobe (bundled with ffmpeg)
 is required only for `--loop`.
 
+## Chat
+
+One-shot `POST /chat/completions` via the OpenAI SDK (see
+[Optional dependency](#optional-dependency)). Streams the reply by default;
+`--model` is validated against `/models?type=text` (a free GET) before the
+paid call, and defaults to the catalog's `default`-trait text model.
+
+```sh
+# Simplest: message as an argument, streamed to stdout.
+venice chat "Explain DIEM staking in one sentence."
+
+# System prompt, explicit model, no streaming.
+venice chat "Rewrite this as a haiku." --system "You are a poet." \
+    --model llama-3.3-70b --no-stream
+
+# Read the message from stdin (either form).
+echo "Summarize this changelog." | venice chat -
+git log --oneline -20 | venice chat - --system "Group these into release notes."
+
+# Raw response object for scripting (forces --no-stream).
+venice chat "ping" --json | jq '.choices[0].message.content'
+```
+
+### Venice extensions
+
+Venice augments the OpenAI schema with a `venice_parameters` block; these flags
+map onto it:
+
+```sh
+# Live web search + inline source citations (printed to stderr).
+venice chat "What shipped in the latest Venice API update?" \
+    --web-search on --web-citations
+
+# Scrape URLs in the message via Firecrawl.
+venice chat "Summarize https://venice.ai/blog" --web-scraping
+
+# Talk to a public Venice character by its Public ID slug.
+venice chat "Introduce yourself." --character venice
+
+# Reasoning models: drop <think> blocks, or disable thinking entirely.
+venice chat "Tricky logic puzzle..." --strip-thinking
+venice chat "Just answer fast." --no-thinking
+
+# Omit Venice's supplied system prompt (uncensored/raw behavior).
+venice chat "..." --no-venice-system-prompt
+
+# xAI native web+X search on grok models (extra ~$0.01/search).
+venice chat "Latest posts about Venice?" --model grok-4-20 --x-search
+```
+
+| flag | effect |
+|---|---|
+| `--web-search {auto,on,off}` | Venice web search (default off) |
+| `--web-citations` | cite web sources (with `--web-search`) |
+| `--web-scraping` | Firecrawl-scrape URLs in the message |
+| `--character SLUG` | use a public Venice character |
+| `--no-venice-system-prompt` | omit Venice's supplied system prompt |
+| `--strip-thinking` | strip `<think>` blocks (reasoning models) |
+| `--no-thinking` | disable thinking (reasoning models) |
+| `--x-search` | xAI web+X search (grok; extra ~$0.01/search) |
+
+Chat pricing is dynamic (per token, model-dependent), so there's no pre-call
+quote; pass `--json` or watch the `usage:` line on stderr to see token counts.
+
 ## Browse the model catalog
 
 ```sh
@@ -385,7 +461,8 @@ The player list (`paplay` -> `aplay` -> `ffplay` -> `mpg123` -> `play`
 | `venice image --from-file PATH [...]` | batch-generate a card set |
 | `venice music PROMPT [--duration N] [--master] [--loop] [...]` | generate long-form ambience/music |
 | `venice master INPUT [--loop] [--lufs N] [--bit-depth N] [...]` | master audio to WAV (48k/24-bit, LUFS/true-peak) |
-| `venice chat\|embed` | stubs (exit 2) for v0.x |
+| `venice chat MESSAGE [--system S] [--model M] [--web-search on] [...]` | one-shot chat completion (OpenAI SDK) |
+| `venice embed` | stub (exit 2) for v0.x |
 
 ## Tests
 
@@ -393,8 +470,10 @@ The player list (`paplay` -> `aplay` -> `ffplay` -> `mpg123` -> `play`
 make test
 ```
 
-Stdlib `unittest` only. Tests mock `urlopen` and patch `HOME` to a
-tmpdir -- no live API calls, no real disk writes outside the tmpdir.
+Stdlib `unittest` only. Tests mock `urlopen` (and, for `chat`, the OpenAI
+client) and patch `HOME` to a tmpdir -- no live API calls, no real disk writes
+outside the tmpdir. The `chat` tests need the OpenAI SDK importable
+(`pip install -r requirements.txt`).
 
 ## Uninstall
 
