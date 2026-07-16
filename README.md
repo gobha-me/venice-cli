@@ -2,21 +2,21 @@
 
 A Python CLI wrapping the [Venice.ai](https://venice.ai) API. The base is
 stdlib-only and pod-restart-survivable (lives under `~/.local/{bin,lib}`); the
-optional `venice chat` command uses the official OpenAI SDK (Venice is
-OpenAI-compatible).
+optional `venice chat` and `venice embed` commands use the official OpenAI SDK
+(Venice is OpenAI-compatible).
 
 Ships working `venice login`, `venice sfx` (sound-effect generation),
 `venice music` (long-form ambience/music), `venice video` (text-to-video),
 `venice tts` (text-to-speech), `venice image` (image generation),
 `venice upscale` / `venice bg-remove` (image post-processing),
 `venice master` (audio mastering), `venice chat` (one-shot chat completions
-with Venice extensions), `venice balance` (budget tracking), and
-`venice models` (catalog browser). `embed` is a scaffolded stub.
+with Venice extensions), `venice embed` (text embeddings),
+`venice balance` (budget tracking), and `venice models` (catalog browser).
 
 ## Optional dependency
 
-Every command except `venice chat` is stdlib-only. `chat` needs the OpenAI
-SDK:
+Every command except `venice chat` and `venice embed` is stdlib-only. Those two
+need the OpenAI SDK:
 
 ```sh
 pip install -r requirements.txt   # or: pip install openai
@@ -424,6 +424,36 @@ venice chat "Latest posts about Venice?" --model grok-4-20 --x-search
 Chat pricing is dynamic (per token, model-dependent), so there's no pre-call
 quote; pass `--json` or watch the `usage:` line on stderr to see token counts.
 
+## Embeddings
+
+Turn text into embedding vectors with a Venice embedding model (`/embeddings`,
+via the OpenAI SDK). The model defaults to the catalog's `default`-trait
+embedding model; pass `--model` to pick another (see
+`venice models --type embedding`).
+
+```sh
+# Single input -> one JSON array on stdout.
+venice embed "the quick brown fox"
+
+# Read the input from stdin.
+echo "summarize me" | venice embed -
+
+# Batch: one input per non-empty line -> one vector per line (index order).
+venice embed --from-file corpus.txt
+
+# Pipe vectors to jq (newline-delimited JSON, one array per line).
+venice embed "hello" | jq 'length'
+
+# Truncate dimensions (if the model supports it) and pick a model.
+venice embed "hello" --model text-embedding-qwen3-8b --dimensions 256
+
+# Full raw response object (model, data, usage) instead of bare vectors.
+venice embed "hello" --json | jq '.usage'
+```
+
+By default each embedding prints as a JSON array, one per line;
+`--encoding-format base64` requests base64-packed vectors instead of floats.
+
 ## Browse the model catalog
 
 ```sh
@@ -494,7 +524,7 @@ The player list (`paplay` -> `aplay` -> `ffplay` -> `mpg123` -> `play`
 | `venice video-status QUEUE_ID [--download-url URL]` | fetch a backgrounded video job |
 | `venice master INPUT [--loop] [--lufs N] [--bit-depth N] [...]` | master audio to WAV (48k/24-bit, LUFS/true-peak) |
 | `venice chat MESSAGE [--system S] [--model M] [--web-search on] [...]` | one-shot chat completion (OpenAI SDK) |
-| `venice embed` | stub (exit 2) for v0.x |
+| `venice embed [TEXT] [--from-file PATH] [--model M] [--dimensions N] [--json]` | text embeddings (OpenAI SDK) |
 
 ## Tests
 
