@@ -26,7 +26,7 @@ def import_openai(label: str):
     except ImportError:
         print(
             f"venice {label} needs the openai package: "
-            "pip install -r requirements.txt (or: pip install openai)",
+            'pip install "venice-cli[openai]" (or: pip install openai)',
             file=sys.stderr,
         )
         return None

@@ -4,16 +4,23 @@ Thanks for taking a look. This is a small project with a simple rhythm.
 
 ## Development setup
 
-No build step. Clone, and run from the repo:
+Clone, and run from the repo:
 
 ```sh
 git clone https://github.com/gobha-me/venice-cli.git
 cd venice-cli
-pip install -r requirements.txt   # only needed for `venice chat` / `venice embed`
 PYTHONPATH=src python3 -m venice --help
 ```
 
-`./install.sh` symlinks `venice` onto your PATH if you want the real command.
+That needs no install at all. For an editable install with the `openai` extra
+(only `venice chat` / `venice embed` need it):
+
+```sh
+pip install -e ".[openai]"
+```
+
+`./install.sh` symlinks `venice` onto your PATH if you want the real command
+without pip. Don't mix the two: both own `~/.local/bin/venice`.
 
 ## Before opening a PR
 

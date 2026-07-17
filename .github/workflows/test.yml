@@ -25,17 +25,58 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
+          cache-dependency-path: pyproject.toml
 
       # The chat/embed/shared_openai tests import the OpenAI SDK (they mock the
-      # client, but the module must be importable). No system packages are
-      # needed: ffmpeg/montage shell-outs are mocked at subprocess/shutil.which.
+      # client, but the module must be importable), so CI installs the [openai]
+      # extra. No system packages are needed: ffmpeg/montage shell-outs are
+      # mocked at subprocess/shutil.which.
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -e ".[openai]"
 
       - name: Lint
         run: make lint
 
       - name: Test
         run: make test
+
+  # Builds the distributions and proves the *base* install is dependency-free.
+  # The test job above always installs the [openai] extra, so it cannot catch a
+  # module-scope `import openai` sneaking into a base command -- this job can.
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Build
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+          twine check --strict dist/*
+
+      - name: Install the wheel (base only, no extras)
+        run: pip install dist/*.whl
+
+      - name: Console script works
+        run: |
+          venice --version
+          venice --help
+
+      # register_all imports every command module eagerly, so the two steps
+      # above already exercised the whole command graph. If openai is absent
+      # and they passed, the base really is stdlib-only.
+      - name: Base install must not pull in openai
+        run: |
+          if python -c "import openai" 2>/dev/null; then
+            echo "::error::openai is importable after a base install -- a base command imports it at module scope"
+            exit 1
+          fi
+          echo "ok: base install is openai-free"

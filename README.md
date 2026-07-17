@@ -4,6 +4,10 @@ A Python CLI wrapping the [Venice.ai](https://venice.ai) API. The base is
 stdlib-only; the optional `venice chat` and `venice embed` commands use the
 official OpenAI SDK (Venice is OpenAI-compatible).
 
+```sh
+pip install venice-cli
+```
+
 > **Unofficial.** This is an independent, community-maintained client. It is not
 > affiliated with, endorsed by, or supported by Venice.ai. "Venice" and
 > "Venice.ai" belong to their respective owners. For official support, see
@@ -18,36 +22,65 @@ generated images), `venice chat` (one-shot chat completions with Venice
 extensions), `venice embed` (text embeddings), `venice balance` (budget
 tracking), and `venice models` (catalog browser).
 
-## Optional dependency
-
-Every command except `venice chat` and `venice embed` is stdlib-only. Those two
-need the OpenAI SDK:
+## Install
 
 ```sh
-pip install -r requirements.txt   # or: pip install openai
+pip install venice-cli              # base: stdlib-only, no dependencies
+pip install "venice-cli[openai]"    # + venice chat / venice embed
 ```
+
+The distribution is named `venice-cli`, but the command is `venice` (and the
+import package is `venice`). `pipx install "venice-cli[openai]"` works too, and
+keeps the CLI out of your system site-packages.
+
+### Dependencies
+
+The base install pulls in **nothing** — every command is stdlib-only except
+`venice chat` and `venice embed`, which use the official OpenAI SDK against
+Venice's OpenAI-compatible API. That SDK is lazy-imported, so it's shipped as an
+optional extra rather than a hard requirement: if you only generate images or
+audio, you don't pay for it. Without the extra, `venice chat` and `venice embed`
+exit 2 with a hint; every other command works normally.
+
+Extras are per-feature and additive, so the pattern holds as the CLI grows:
+
+| Install | Enables |
+| --- | --- |
+| `venice-cli` | everything except chat/embed |
+| `venice-cli[openai]` | `venice chat`, `venice embed` |
+| `venice-cli[all]` | every extra (currently the same as `[openai]`) |
 
 Some commands shell out to external binaries when present: `venice master` and
 `venice contact-sheet` use `ffmpeg`/`ffprobe` (and ImageMagick's `montage` if
-available); audio playback uses `mpg123`, `ffplay`, or `paplay`.
+available); audio playback uses `mpg123`, `ffplay`, or `paplay`. These are
+detected at runtime — nothing breaks if they're missing.
 
-## Install
+### From source (development)
 
-Clone anywhere, then run the installer:
+Clone anywhere; no install is needed to run it:
 
 ```sh
 git clone https://github.com/gobha-me/venice-cli.git
 cd venice-cli
-./install.sh
+PYTHONPATH=src python3 -m venice --help
 ```
 
-This creates two symlinks:
+For an editable install: `pip install -e ".[openai]"`.
+
+Alternatively `./install.sh` puts `venice` on your PATH without pip, by creating
+two symlinks:
 - `~/.local/bin/venice` -> `<repo>/bin/venice`
 - `~/.local/lib/venice` -> `<repo>/src/venice`
 
 and `~/.config/venice/` (mode 0700) for the credentials file. The installer
 resolves the repo path itself, so the clone can live wherever you like.
 `~/.local/bin` should be on your PATH.
+
+> **Don't mix pip and `./install.sh`.** Both own `~/.local/bin/venice`. If pip
+> got there first, `install.sh` refuses to clobber the real file and exits 1. If
+> `install.sh` got there first, pip silently replaces the symlink — your repo
+> edits stop taking effect with no error. Pick one; `pip uninstall venice-cli`
+> or `./uninstall.sh` to back the other out.
 
 ## First-time setup
 
@@ -547,18 +580,26 @@ make test
 
 Stdlib `unittest` only. Tests mock `urlopen` (and, for `chat`, the OpenAI
 client) and patch `HOME` to a tmpdir -- no live API calls, no real disk writes
-outside the tmpdir. The `chat` tests need the OpenAI SDK importable
-(`pip install -r requirements.txt`).
+outside the tmpdir. The `chat` and `embed` tests need the OpenAI SDK importable
+(`pip install -e ".[openai]"`).
 
 ## Uninstall
+
+If you installed with pip:
+
+```sh
+pip uninstall venice-cli
+```
+
+If you installed from source with `./install.sh`:
 
 ```sh
 ./uninstall.sh
 ```
 
-Removes the two symlinks only. The credentials file at
-`~/.config/venice/credentials` is left alone -- delete it manually if
-you want.
+Either way the credentials file at `~/.config/venice/credentials` is left
+alone -- delete it manually if you want. `uninstall.sh` removes only the two
+symlinks, and only if they point at that repo.
 
 ## Security note
 

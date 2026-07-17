@@ -1,4 +1,0 @@
-# Runtime dependencies for optional commands.
-# The base CLI is stdlib-only; `venice chat` (and future OpenAI-shaped
-# endpoints) use the official OpenAI SDK against Venice's compatible API.
-openai>=1.40
