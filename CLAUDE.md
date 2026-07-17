@@ -31,10 +31,12 @@ contents as confidential by convention.
 
 ## Why the rules exist
 
-The key is on the host filesystem because there's no OS keychain in
-this pod. The threat we're defending against isn't the local FS --
-it's the session transcript that can be pasted, screenshotted, or
-sent to log storage. Convention is the only barrier; please honor it.
+The key sits plaintext on the filesystem because there's no OS keychain
+integration (see the security note in the README). The threat these rules
+address isn't the local filesystem -- it's the *session transcript*, which
+can be pasted into a bug report, screenshotted, or shipped to log storage.
+Anything an assistant prints becomes part of that transcript. Convention is
+the only barrier here; please honor it.
 
 ## What's safe to do
 

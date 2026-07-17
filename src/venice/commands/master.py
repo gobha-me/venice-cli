@@ -1,8 +1,8 @@
 """`venice master` -- master an existing audio file with ffmpeg.
 
 Pure local post-processing (no Venice API call): 48k/24-bit WAV, 2-pass loudnorm
-(LUFS + true-peak), and an optional seamless loop. Feeds mastered ambience/music
-to the FRONTLINE asset set from files `venice music`/`sfx` already produced.
+(LUFS + true-peak), and an optional seamless loop. Takes files `venice music` /
+`venice sfx` already produced and makes them delivery-ready.
 """
 from __future__ import annotations
 
