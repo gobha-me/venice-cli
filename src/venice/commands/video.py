@@ -15,11 +15,11 @@ from __future__ import annotations
 import sys
 import time
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Optional
 
 from .. import billing, config
 from ..client import VeniceAPIError
-from . import _queue, _shared
+from . import _models, _queue, _shared
 
 VIDEO_EXT_BY_CTYPE = {
     "video/mp4": ".mp4",
@@ -119,55 +119,6 @@ def register_status(subparsers) -> None:
     sp.set_defaults(handler=_run_status)
 
 
-def _video_models(client) -> Optional[List[dict]]:
-    """Fetch the video-model catalog. None if the (free) GET is unavailable."""
-    try:
-        doc = client.get_json("/models", params={"type": "video"})
-    except VeniceAPIError:
-        return None
-    data = doc.get("data") if isinstance(doc, dict) else None
-    return list(data) if isinstance(data, list) else None
-
-
-def _default_model(models: List[dict]) -> Optional[str]:
-    for m in models:
-        spec = m.get("model_spec") if isinstance(m, dict) else None
-        traits = spec.get("traits") if isinstance(spec, dict) else None
-        if isinstance(traits, list) and "default" in traits:
-            return m.get("id")
-    return None
-
-
-def _resolve_model(args, models: Optional[List[dict]]) -> Tuple[Optional[str], Optional[int]]:
-    """Return (model_id, exit_code). exit_code is None on success."""
-    if models is None:
-        if args.model:
-            return args.model, None
-        print(
-            "video: could not fetch the model catalog; pass --model explicitly",
-            file=sys.stderr,
-        )
-        return None, 2
-
-    ids = [m.get("id") for m in models if isinstance(m, dict) and m.get("id")]
-    if args.model:
-        if args.model in ids:
-            return args.model, None
-        print(f"video: unknown video model {args.model!r}", file=sys.stderr)
-        print("available: " + ", ".join(ids), file=sys.stderr)
-        return None, 6
-
-    default = _default_model(models)
-    if default:
-        return default, None
-    print(
-        "video: no default video model advertised; pass --model. "
-        "available: " + ", ".join(ids),
-        file=sys.stderr,
-    )
-    return None, 6
-
-
 def _shared_params(args) -> dict:
     """Optional params accepted by both /video/quote and /video/queue."""
     extra: dict = {}
@@ -189,8 +140,10 @@ def _run_generate(args) -> int:
     if rc != 0:
         return rc
 
-    models = _video_models(client)
-    model, rc = _resolve_model(args, models)
+    models = _models.catalog(client, "video")
+    model, rc = _models.resolve_model(
+        args.model, models, label="video", noun="video model"
+    )
     if rc is not None:
         return rc
 
@@ -264,8 +217,10 @@ def _run_status(args) -> int:
         return rc
     model = args.model
     if not model:
-        models = _video_models(client)
-        model, rc = _resolve_model(args, models)
+        models = _models.catalog(client, "video")
+        model, rc = _models.resolve_model(
+            args.model, models, label="video", noun="video model"
+        )
         if rc is not None:
             return rc
     return _retrieve_and_save(

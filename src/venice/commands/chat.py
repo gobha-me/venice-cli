@@ -13,15 +13,11 @@ from __future__ import annotations
 
 import json
 import sys
-from typing import List, Optional
+from typing import Optional
 
-from .. import auth, config
-from ..client import VeniceAPIError, build_client_from_auth
-
-OPENAI_MISSING_HINT = (
-    "venice chat needs the openai package: pip install -r requirements.txt "
-    "(or: pip install openai)"
-)
+from .. import auth
+from ..client import build_client_from_auth
+from . import _models, _openai
 
 
 def register(subparsers) -> None:
@@ -111,56 +107,6 @@ def _resolve_message(args) -> Optional[str]:
     return msg
 
 
-def _text_models(client) -> Optional[List[dict]]:
-    """Fetch the text-model catalog. None if the (free) GET is unavailable."""
-    try:
-        doc = client.get_json("/models", params={"type": "text"})
-    except VeniceAPIError:
-        return None
-    data = doc.get("data") if isinstance(doc, dict) else None
-    return list(data) if isinstance(data, list) else None
-
-
-def _default_model(models: List[dict]) -> Optional[str]:
-    for m in models:
-        spec = m.get("model_spec") if isinstance(m, dict) else None
-        traits = spec.get("traits") if isinstance(spec, dict) else None
-        if isinstance(traits, list) and "default" in traits:
-            return m.get("id")
-    return None
-
-
-def _resolve_model(args, models: Optional[List[dict]]) -> tuple:
-    """Return (model_id, exit_code). exit_code is None on success."""
-    if models is None:
-        # Catalog unavailable: can't validate or pick a default.
-        if args.model:
-            return args.model, None
-        print(
-            "chat: could not fetch the model catalog; pass --model explicitly",
-            file=sys.stderr,
-        )
-        return None, 2
-
-    ids = [m.get("id") for m in models if isinstance(m, dict) and m.get("id")]
-    if args.model:
-        if args.model in ids:
-            return args.model, None
-        print(f"chat: unknown text model {args.model!r}", file=sys.stderr)
-        print("available: " + ", ".join(ids), file=sys.stderr)
-        return None, 6
-
-    default = _default_model(models)
-    if default:
-        return default, None
-    print(
-        "chat: no default text model advertised; pass --model. "
-        "available: " + ", ".join(ids),
-        file=sys.stderr,
-    )
-    return None, 6
-
-
 def _venice_parameters(args) -> dict:
     """Assemble venice_parameters from the extension flags (only set keys)."""
     vp: dict = {}
@@ -240,36 +186,14 @@ def _print_usage(usage) -> None:
         print(f"usage: prompt={pt} completion={ct} total={tt}", file=sys.stderr)
 
 
-def _openai_exit(oai, e) -> int:
-    """Map an openai SDK exception to a venice exit code."""
-    if isinstance(e, oai.APIConnectionError):
-        print(f"chat: connection error: {e}", file=sys.stderr)
-        return 8
-    status = getattr(e, "status_code", None)
-    print(f"chat: API error: {e}", file=sys.stderr)
-    if status == 401:
-        return 2
-    if status == 404:
-        return 6
-    if status == 429:
-        return 4
-    if isinstance(status, int) and 500 <= status < 600:
-        return 5
-    if isinstance(status, int) and 400 <= status < 500:
-        return 2
-    return 5
-
-
 def _run(args) -> int:
     message = _resolve_message(args)
     if not message:
         print("chat: no message (pass an argument or pipe stdin)", file=sys.stderr)
         return 2
 
-    try:
-        import openai
-    except ImportError:
-        print(OPENAI_MISSING_HINT, file=sys.stderr)
+    openai = _openai.import_openai("chat")
+    if openai is None:
         return 2
 
     try:
@@ -278,12 +202,14 @@ def _run(args) -> int:
         print(str(e), file=sys.stderr)
         return 2
 
-    models = _text_models(client)
-    model, rc = _resolve_model(args, models)
+    models = _models.catalog(client, "text")
+    model, rc = _models.resolve_model(
+        args.model, models, label="chat", noun="text model"
+    )
     if rc is not None:
         return rc
 
-    oai = openai.OpenAI(api_key=client.api_key, base_url=client.base_url)
+    oai = _openai.build_openai(openai, client)
     kwargs = _build_kwargs(args, model, message)
 
     stream = args.stream and not args.json
@@ -292,7 +218,7 @@ def _run(args) -> int:
             return _run_stream(oai, kwargs)
         return _run_once(oai, kwargs, args.json)
     except openai.OpenAIError as e:
-        return _openai_exit(openai, e)
+        return _openai.status_to_exit(openai, e, "chat")
 
 
 def _run_once(oai, kwargs: dict, as_json: bool) -> int:
