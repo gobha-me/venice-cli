@@ -1,17 +1,22 @@
-# venice
+# venice-cli
 
 A Python CLI wrapping the [Venice.ai](https://venice.ai) API. The base is
-stdlib-only and pod-restart-survivable (lives under `~/.local/{bin,lib}`); the
-optional `venice chat` and `venice embed` commands use the official OpenAI SDK
-(Venice is OpenAI-compatible).
+stdlib-only; the optional `venice chat` and `venice embed` commands use the
+official OpenAI SDK (Venice is OpenAI-compatible).
+
+> **Unofficial.** This is an independent, community-maintained client. It is not
+> affiliated with, endorsed by, or supported by Venice.ai. "Venice" and
+> "Venice.ai" belong to their respective owners. For official support, see
+> [venice.ai](https://venice.ai).
 
 Ships working `venice login`, `venice sfx` (sound-effect generation),
 `venice music` (long-form ambience/music), `venice video` (text-to-video),
 `venice tts` (text-to-speech), `venice image` (image generation),
 `venice upscale` / `venice bg-remove` (image post-processing),
-`venice master` (audio mastering), `venice chat` (one-shot chat completions
-with Venice extensions), `venice embed` (text embeddings),
-`venice balance` (budget tracking), and `venice models` (catalog browser).
+`venice master` (audio mastering), `venice contact-sheet` (montage grids of
+generated images), `venice chat` (one-shot chat completions with Venice
+extensions), `venice embed` (text embeddings), `venice balance` (budget
+tracking), and `venice models` (catalog browser).
 
 ## Optional dependency
 
@@ -22,11 +27,17 @@ need the OpenAI SDK:
 pip install -r requirements.txt   # or: pip install openai
 ```
 
+Some commands shell out to external binaries when present: `venice master` and
+`venice contact-sheet` use `ffmpeg`/`ffprobe` (and ImageMagick's `montage` if
+available); audio playback uses `mpg123`, `ffplay`, or `paplay`.
+
 ## Install
 
+Clone anywhere, then run the installer:
+
 ```sh
-git clone <this repo> ~/Projects/venice
-cd ~/Projects/venice
+git clone https://github.com/gobha-me/venice-cli.git
+cd venice-cli
 ./install.sh
 ```
 
@@ -34,8 +45,9 @@ This creates two symlinks:
 - `~/.local/bin/venice` -> `<repo>/bin/venice`
 - `~/.local/lib/venice` -> `<repo>/src/venice`
 
-and `~/.config/venice/` (mode 0700) for the credentials file.
-`~/.local/bin` should already be on your PATH.
+and `~/.config/venice/` (mode 0700) for the credentials file. The installer
+resolves the repo path itself, so the clone can live wherever you like.
+`~/.local/bin` should be on your PATH.
 
 ## First-time setup
 
@@ -214,7 +226,7 @@ strings in one place with a **preset** instead of retyping them:
 
 ```sh
 venice image --from-file cards.tsv -o ./card-art/ --yes \
-    --preset frontline --preset-file ./frontline.json
+    --preset dark-fantasy --preset-file ./presets.json
 ```
 
 `--preset-file` defaults to `~/.config/venice/image_presets.json`; point it at a
@@ -222,7 +234,7 @@ file in your project to version presets alongside the assets. Format:
 
 ```json
 {
-  "frontline": {
+  "dark-fantasy": {
     "style_prefix": "dark fantasy oil painting, dramatic cinematic lighting",
     "negative_prompt": "text, watermark, signature, blurry, lowres"
   }
@@ -487,11 +499,11 @@ Veo 3.1, Kling, Runway Gen4, LTX-2, Wan 2.7, Seedance 2.0, and more.
 
 ## Audio playback caveat
 
-Only `paplay` is available in this pod by default. It plays WAV
-natively, but MP3 (which is Venice's default output) relies on
-PulseAudio's GStreamer plumbing -- may fail silently. If it does, the
-file is still saved; the CLI just won't auto-play. To get reliable
-MP3 playback in-CLI:
+Auto-play depends on whatever player your system has. If all you have
+is `paplay`, note that it plays WAV natively but handles MP3 (Venice's
+default output) via PulseAudio's GStreamer plumbing, which can fail
+silently. If playback fails the file is still saved; the CLI just
+won't auto-play it. For reliable MP3 playback in-CLI, install one of:
 
 ```sh
 sudo apt install mpg123    # or: ffmpeg
@@ -523,6 +535,7 @@ The player list (`paplay` -> `aplay` -> `ffplay` -> `mpg123` -> `play`
 | `venice video PROMPT [--duration 5s] [--resolution R] [--aspect-ratio A] [...]` | generate a video (async queue, mp4) |
 | `venice video-status QUEUE_ID [--download-url URL]` | fetch a backgrounded video job |
 | `venice master INPUT [--loop] [--lufs N] [--bit-depth N] [...]` | master audio to WAV (48k/24-bit, LUFS/true-peak) |
+| `venice contact-sheet DIR_OR_GLOB [--cols N] [--cell WxH] [--label] [...]` | tile images into one contact sheet (no API call) |
 | `venice chat MESSAGE [--system S] [--model M] [--web-search on] [...]` | one-shot chat completion (OpenAI SDK) |
 | `venice embed [TEXT] [--from-file PATH] [--model M] [--dimensions N] [--json]` | text embeddings (OpenAI SDK) |
 
@@ -549,9 +562,17 @@ you want.
 
 ## Security note
 
-The API key is plaintext on disk at `~/.config/venice/credentials`
-(mode 0600). There is no OS keychain in this pod, so this is the
-honest baseline. The `CLAUDE.md` at the repo root tells Claude Code
-not to read or echo the file -- that's convention, not crypto. If
-you share your terminal or session transcript, be aware of what's in
-your scrollback.
+The API key is stored **plaintext on disk** at
+`~/.config/venice/credentials` (mode 0600, inside a 0700 directory).
+There is no OS keychain integration -- file permissions are the only
+protection, so anything that can read your home directory can read the
+key.
+
+- In CI or any shared environment, prefer `$VENICE_API_KEY` (it
+  overrides the file) sourced from that system's secret store, and
+  don't run `venice login` there.
+- The key is never logged or printed by this tool, but it is visible to
+  anything reading your process environment or scrollback. Be aware of
+  what's on screen when sharing a terminal.
+- If a key is exposed, revoke and rotate it at
+  <https://venice.ai/settings/api>.

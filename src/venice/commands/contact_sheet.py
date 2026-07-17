@@ -1,8 +1,9 @@
 """`venice contact-sheet` -- montage a set of images into a review grid.
 
-Pure local post-processing (no Venice API call): tiles card art / variant rolls
-into one sheet via ImageMagick `montage` or `ffmpeg` (auto-detected). Optional
-per-cell filename labels. Feeds the FRONTLINE review workflow.
+Pure local post-processing (no Venice API call): tiles a batch of generated
+images -- variant rolls, a whole set -- into one sheet via ImageMagick `montage`
+or `ffmpeg` (auto-detected). Optional per-cell filename labels. Makes a large
+batch reviewable at a glance.
 """
 from __future__ import annotations
 
