@@ -1,0 +1,82 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "venice-cli"
+dynamic = ["version"]
+description = "A stdlib-only Python CLI for the Venice.ai API: audio, video, images, chat, and embeddings."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Jeffrey Smith" }]
+keywords = [
+  "venice",
+  "venice-ai",
+  "cli",
+  "tts",
+  "text-to-image",
+  "text-to-video",
+  "embeddings",
+  "llm",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Intended Audience :: End Users/Desktop",
+  "Operating System :: POSIX",
+  "Operating System :: MacOS",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Multimedia :: Sound/Audio",
+  "Topic :: Multimedia :: Graphics",
+  "Topic :: Utilities",
+]
+
+# The base CLI is stdlib-only. Third-party SDKs are lazy-imported by the
+# commands that need them and declared as extras below, so `pip install
+# venice-cli` stays dependency-free.
+dependencies = []
+
+[project.optional-dependencies]
+openai = ["openai>=1.40"]
+all = ["venice-cli[openai]"]
+
+[project.scripts]
+venice = "venice.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/gobha-me/venice-cli"
+Repository = "https://github.com/gobha-me/venice-cli"
+Issues = "https://github.com/gobha-me/venice-cli/issues"
+Changelog = "https://github.com/gobha-me/venice-cli/releases"
+
+[tool.hatch.version]
+path = "src/venice/__init__.py"
+
+# Dist name (venice-cli) differs from the import package (venice), so the
+# wheel target must be named explicitly -- the default heuristic looks for
+# src/venice_cli and fails.
+[tool.hatch.build.targets.wheel]
+packages = ["src/venice"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/src",
+  "/tests",
+  "/bin",
+  "/Makefile",
+  "/install.sh",
+  "/uninstall.sh",
+  "/README.md",
+  "/LICENSE",
+  "/CONTRIBUTING.md",
+  "/SECURITY.md",
+]

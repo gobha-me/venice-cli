@@ -2,7 +2,7 @@
 
 Mocks the OpenAI client (embeddings.create) and the free
 /models?type=embedding catalog GET (via urlopen). No network, no real key.
-The openai package must be importable (pip install -r requirements.txt).
+The openai package must be importable (pip install -e ".[openai]").
 """
 import argparse
 import io

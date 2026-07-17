@@ -2,7 +2,7 @@
 
 Mocks the OpenAI client (chat completions) and the free /models catalog GET
 (via urlopen). No network, no real key. The openai package must be importable
-(pip install -r requirements.txt).
+(pip install -e ".[openai]").
 """
 import argparse
 import io
