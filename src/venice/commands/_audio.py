@@ -29,6 +29,31 @@ def ext_for(ctype: str) -> Tuple[str, bool]:
     return _queue.ext_for(ctype, EXT_BY_CTYPE)
 
 
+def retrieve_bytes(
+    client,
+    model: str,
+    queue_id: str,
+    *,
+    poll_interval: float,
+    max_wait: float,
+    on_tick: Optional[Callable[[dict], None]] = None,
+) -> Tuple[str, bytes]:
+    """Poll /audio/retrieve until the media is ready and return (ctype, bytes).
+
+    Print-free core of `retrieve_and_save`: the bare poll, with no file I/O,
+    stdout, cleanup, or playback -- so callers that own stdout (e.g. the MCP
+    stdio server) can reuse the poll without corrupting their transport. Raises
+    VeniceAPIError on a terminal API error and TimeoutError on `max_wait`.
+    """
+    return client.poll_retrieve(
+        "/audio/retrieve",
+        {"model": model, "queue_id": queue_id},
+        interval=poll_interval,
+        max_wait=max_wait,
+        on_tick=on_tick,
+    )
+
+
 def retrieve_and_save(
     client,
     model: str,
@@ -43,13 +68,13 @@ def retrieve_and_save(
     retry_hint: str,
     post_process: Optional[Callable[[Path], int]] = None,
 ) -> int:
-    body = {"model": model, "queue_id": queue_id}
     start = time.monotonic()
     try:
-        ctype, audio = client.poll_retrieve(
-            "/audio/retrieve",
-            body,
-            interval=poll_interval,
+        ctype, audio = retrieve_bytes(
+            client,
+            model,
+            queue_id,
+            poll_interval=poll_interval,
             max_wait=max_wait,
             on_tick=_queue.progress_tick(start),
         )

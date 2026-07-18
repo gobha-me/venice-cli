@@ -47,7 +47,12 @@ dependencies = []
 
 [project.optional-dependencies]
 openai = ["openai>=1.40"]
-all = ["venice-cli[openai]"]
+# The MCP server (`venice mcp-serve`) uses the FastMCP server from the `mcp` SDK.
+# The SDK requires Python >=3.10, so the dep is gated by an environment marker:
+# on 3.9 the extra resolves to nothing (the CLI stays 3.9-compatible; only this
+# one optional command needs 3.10+). Imported lazily, like the openai extra.
+mcp = ["mcp>=1.2; python_version>='3.10'"]
+all = ["venice-cli[openai]", "venice-cli[mcp]"]
 
 [project.scripts]
 venice = "venice.cli:main"

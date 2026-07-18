@@ -37,18 +37,24 @@ keeps the CLI out of your system site-packages.
 
 The base install pulls in **nothing** — every command is stdlib-only except
 `venice chat` and `venice embed`, which use the official OpenAI SDK against
-Venice's OpenAI-compatible API. That SDK is lazy-imported, so it's shipped as an
-optional extra rather than a hard requirement: if you only generate images or
-audio, you don't pay for it. Without the extra, `venice chat` and `venice embed`
-exit 2 with a hint; every other command works normally.
+Venice's OpenAI-compatible API, and `venice mcp-serve`, which uses the MCP SDK.
+Those SDKs are lazy-imported, so they ship as optional extras rather than hard
+requirements: if you only generate images or audio, you don't pay for them.
+Without the relevant extra, that command exits 2 with a hint; every other
+command works normally.
 
 Extras are per-feature and additive, so the pattern holds as the CLI grows:
 
 | Install | Enables |
 | --- | --- |
-| `venice-cli` | everything except chat/embed |
+| `venice-cli` | everything except chat/embed and the MCP server |
 | `venice-cli[openai]` | `venice chat`, `venice embed` |
-| `venice-cli[all]` | every extra (currently the same as `[openai]`) |
+| `venice-cli[mcp]` | `venice mcp-serve` (MCP stdio server; needs Python ≥ 3.10) |
+| `venice-cli[all]` | every extra (`openai` + `mcp`) |
+
+The `[mcp]` extra pulls in the [`mcp`](https://pypi.org/project/mcp/) SDK, which
+requires Python ≥ 3.10. The base CLI still supports 3.9 — on 3.9 the extra
+resolves to nothing and only `venice mcp-serve` is unavailable.
 
 Some commands shell out to external binaries when present: `venice master` and
 `venice contact-sheet` use `ffmpeg`/`ffprobe` (and ImageMagick's `montage` if
@@ -499,6 +505,50 @@ venice embed "hello" --json | jq '.usage'
 By default each embedding prints as a JSON array, one per line;
 `--encoding-format base64` requests base64-packed vectors instead of floats.
 
+## MCP server
+
+`venice mcp-serve` runs an [MCP](https://modelcontextprotocol.io) server over
+stdio, exposing venice's generators as tools that an MCP host (Claude Code, or
+any MCP client) can call directly instead of shelling out to the CLI. It needs
+the `[mcp]` extra (Python ≥ 3.10):
+
+```sh
+pip install "venice-cli[mcp]"
+
+# Register it with Claude Code:
+claude mcp add venice -- venice mcp-serve
+```
+
+The server exposes seven tools:
+
+| Tool | Does | Paid? |
+| --- | --- | --- |
+| `venice_image` | generate image(s) → file path(s) | yes (estimated) |
+| `venice_tts` | synthesize speech → audio file | yes (estimated) |
+| `venice_sfx` | sound effect (async queue) → audio file | yes (quoted) |
+| `venice_music` | long-form music/ambience (async queue) → audio file | yes (quoted) |
+| `venice_upscale` | upscale/enhance a local image → image file | yes (dynamic) |
+| `venice_bg_remove` | remove a background → transparent PNG | yes (dynamic) |
+| `venice_chat` | one-shot chat completion → reply text | no |
+
+**Spend gating.** MCP is non-interactive, so instead of a `[y/N]` prompt the
+paid tools gate on cost. A tool call whose estimated cost is at or under the
+auto-approve cap (`VENICE_MCP_MAX_SPEND`, default **$0.10**) runs immediately.
+If the estimate is over the cap — or can't be known up front, as with the
+dynamically-priced `venice_upscale` / `venice_bg_remove` — the tool returns
+`{"status": "confirmation_required", ...}` with the estimate and cap, and the
+host must re-call with `confirm=true` (or a higher `max_spend`). Nothing is
+spent and no file is written on a gated call. `venice_chat` is cheap and not
+gated.
+
+**Output.** Tools write their result to a file and return its **path** (never
+inline base64). Files land in `VENICE_MCP_OUTPUT_DIR` (default: the current
+working directory), or a per-call `output_dir`. The API key is read the usual
+way (`$VENICE_API_KEY` or the credentials file) and is never echoed.
+
+Only stdout carries the JSON-RPC protocol; the server's own diagnostics go to
+stderr. Video and image-edit tools are not exposed yet (tracked separately).
+
 ## Browse the model catalog
 
 ```sh
@@ -551,6 +601,8 @@ The player list (`paplay` -> `aplay` -> `ffplay` -> `mpg123` -> `play`
 |---|---|
 | `VENICE_API_KEY` | overrides the file-based key (no disk read) |
 | `VENICE_BASE_URL` | override the API base URL (testing, proxy) |
+| `VENICE_MCP_MAX_SPEND` | `mcp-serve` auto-approve cap in USD (default `0.10`) |
+| `VENICE_MCP_OUTPUT_DIR` | where `mcp-serve` tools write files (default: cwd) |
 
 ## Commands at a glance
 
@@ -571,6 +623,7 @@ The player list (`paplay` -> `aplay` -> `ffplay` -> `mpg123` -> `play`
 | `venice contact-sheet DIR_OR_GLOB [--cols N] [--cell WxH] [--label] [...]` | tile images into one contact sheet (no API call) |
 | `venice chat MESSAGE [--system S] [--model M] [--web-search on] [...]` | one-shot chat completion (OpenAI SDK) |
 | `venice embed [TEXT] [--from-file PATH] [--model M] [--dimensions N] [--json]` | text embeddings (OpenAI SDK) |
+| `venice mcp-serve` | run an MCP server (stdio) exposing venice tools (needs `[mcp]`) |
 
 ## Tests
 
