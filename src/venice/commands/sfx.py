@@ -4,7 +4,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from .. import audio_post, billing, config
+from .. import audio_post, billing, config, userconfig
 from ..client import VeniceAPIError
 from . import _audio, _queue, _shared
 
@@ -37,7 +37,7 @@ def register(subparsers) -> None:
     play_grp = p.add_mutually_exclusive_group()
     play_grp.add_argument("--play", dest="play", action="store_true", default=None)
     play_grp.add_argument("--no-play", dest="play", action="store_false")
-    p.add_argument("--yes", "-y", action="store_true")
+    p.add_argument("--yes", "-y", action="store_true", default=None)
     p.add_argument("--background", action="store_true")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--no-cleanup", action="store_true")
@@ -97,6 +97,7 @@ def _clamp_duration(model: str, duration: int) -> int:
 
 
 def _run_generate(args) -> int:
+    userconfig.apply_defaults(args, "sfx")
     if not args.prompt:
         print("sfx: prompt required (or use: venice sfx-status <id>)", file=sys.stderr)
         return 2

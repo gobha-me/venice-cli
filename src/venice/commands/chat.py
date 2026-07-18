@@ -15,7 +15,7 @@ import json
 import sys
 from typing import Optional
 
-from .. import auth
+from .. import auth, userconfig
 from ..client import build_client_from_auth
 from . import _models, _openai
 
@@ -187,6 +187,7 @@ def _print_usage(usage) -> None:
 
 
 def _run(args) -> int:
+    userconfig.apply_defaults(args, "chat")
     message = _resolve_message(args)
     if not message:
         print("chat: no message (pass an argument or pipe stdin)", file=sys.stderr)

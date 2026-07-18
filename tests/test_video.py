@@ -53,6 +53,13 @@ def _build_args(**overrides):
 class TestVideoFlow(unittest.TestCase):
 
     def setUp(self):
+        # Hermetic: never read the developer's real ~/.config/venice/config.json.
+        _cfg = mock.patch(
+            "venice.userconfig.load_config",
+            lambda *a, **k: {"version": 1, "mcpServers": {}, "defaults": {}},
+        )
+        _cfg.start()
+        self.addCleanup(_cfg.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.cwd = os.getcwd()
         os.chdir(self.tmp.name)

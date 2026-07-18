@@ -133,6 +133,13 @@ def _complete():
 class TestMusicFlow(unittest.TestCase):
 
     def setUp(self):
+        # Hermetic: never read the developer's real ~/.config/venice/config.json.
+        _cfg = mock.patch(
+            "venice.userconfig.load_config",
+            lambda *a, **k: {"version": 1, "mcpServers": {}, "defaults": {}},
+        )
+        _cfg.start()
+        self.addCleanup(_cfg.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.cwd = os.getcwd()
         os.chdir(self.tmp.name)
@@ -189,6 +196,34 @@ class TestMusicFlow(unittest.TestCase):
             rc = music._run_generate(_build_args(max_spend=0.001))
 
         self.assertEqual(rc, 1)
+
+    def test_config_default_max_spend_aborts(self):
+        from venice.commands import music
+
+        cfg = {"version": 1, "mcpServers": {}, "defaults": {"max_spend": 0.001}}
+        urlopen = _router(_models_payload(), [_quote(0.5)])
+
+        with mock.patch("venice.userconfig.load_config", lambda *a, **k: cfg), \
+             mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.client.urllib.request.urlopen", urlopen):
+            rc = music._run_generate(_build_args(max_spend=None))
+
+        self.assertEqual(rc, 1)
+
+    def test_explicit_max_spend_overrides_config_default(self):
+        from venice.commands import music
+
+        # config would abort at 0.001, but the explicit --max-spend 5.0 wins;
+        # dry-run then stops cleanly after the quote.
+        cfg = {"version": 1, "mcpServers": {}, "defaults": {"max_spend": 0.001}}
+        urlopen = _router(_models_payload(), [_quote(0.5)])
+
+        with mock.patch("venice.userconfig.load_config", lambda *a, **k: cfg), \
+             mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.client.urllib.request.urlopen", urlopen):
+            rc = music._run_generate(_build_args(max_spend=5.0, dry_run=True))
+
+        self.assertEqual(rc, 0)
 
     def test_duration_out_of_range_errors_before_quote(self):
         from venice.commands import music

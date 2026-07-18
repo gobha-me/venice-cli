@@ -6,6 +6,7 @@ HOME = Path(os.environ.get("HOME", str(Path.home())))
 CONFIG_DIR = HOME / ".config" / "venice"
 CREDS_FILE = CONFIG_DIR / "credentials"
 PRESETS_FILE = CONFIG_DIR / "image_presets.json"
+CONFIG_FILE = CONFIG_DIR / "config.json"
 
 ENV_API_KEY = "VENICE_API_KEY"
 ENV_BASE_URL = "VENICE_BASE_URL"

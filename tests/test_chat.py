@@ -107,6 +107,15 @@ def _fake_openai(result):
 
 class TestChat(unittest.TestCase):
 
+    def setUp(self):
+        # Hermetic: never read the developer's real ~/.config/venice/config.json.
+        _cfg = mock.patch(
+            "venice.userconfig.load_config",
+            lambda *a, **k: {"version": 1, "mcpServers": {}, "defaults": {}},
+        )
+        _cfg.start()
+        self.addCleanup(_cfg.stop)
+
     def _run(self, args, result, stdout=None, stderr=None):
         from venice.commands import chat
         fake, captured = _fake_openai(result)
@@ -128,6 +137,28 @@ class TestChat(unittest.TestCase):
         # default model resolved from the `default`-trait catalog entry
         self.assertEqual(captured["model"], "llama-3.3-70b")
         self.assertEqual(captured["messages"][-1], {"role": "user", "content": "hi"})
+
+    def test_config_default_model_applied(self):
+        cfg = {"version": 1, "mcpServers": {},
+               "defaults": {"chat": {"model": "venice-uncensored"}}}
+        with mock.patch("venice.userconfig.load_config", lambda *a, **k: cfg):
+            rc, fake, captured = self._run(
+                _args(message="hi", stream=False), FakeCompletion("ok")
+            )
+        self.assertEqual(rc, 0)
+        # config default used instead of the catalog `default`-trait model
+        self.assertEqual(captured["model"], "venice-uncensored")
+
+    def test_explicit_model_overrides_config_default(self):
+        cfg = {"version": 1, "mcpServers": {},
+               "defaults": {"chat": {"model": "venice-uncensored"}}}
+        with mock.patch("venice.userconfig.load_config", lambda *a, **k: cfg):
+            rc, fake, captured = self._run(
+                _args(message="hi", model="llama-3.3-70b", stream=False),
+                FakeCompletion("ok"),
+            )
+        self.assertEqual(rc, 0)
+        self.assertEqual(captured["model"], "llama-3.3-70b")
 
     def test_system_prompt_and_model(self):
         rc, fake, captured = self._run(

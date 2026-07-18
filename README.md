@@ -549,6 +549,54 @@ way (`$VENICE_API_KEY` or the credentials file) and is never echoed.
 Only stdout carries the JSON-RPC protocol; the server's own diagnostics go to
 stderr. Video and image-edit tools are not exposed yet (tracked separately).
 
+## Config
+
+`venice config` manages a persistent, non-secret config file at
+`~/.config/venice/config.json` (created mode 0600). It holds two things: an
+**MCP server registry** (for a future `venice chat --mcp` host) and **default
+flag values** so you stop repeating `--model` / `-o` / `--yes` / `--max-spend`.
+
+```sh
+# MCP server registry (like `claude mcp add`)
+venice config add venice --command venice --arg mcp-serve      # stdio server
+venice config add remote --url https://host/mcp --header 'Authorization: Bearer T'
+venice config list
+venice config show [NAME]
+venice config remove venice
+
+# Default flag values (dotted keys)
+venice config set defaults.chat.model llama-3.3-70b
+venice config set defaults.max_spend 0.50
+venice config get defaults.chat.model
+venice config unset defaults.chat.model
+```
+
+The file looks like:
+
+```json
+{
+  "version": 1,
+  "mcpServers": {
+    "venice": { "command": "venice", "args": ["mcp-serve"] }
+  },
+  "defaults": {
+    "output_dir": "~/venice-out",
+    "max_spend": 0.50,
+    "chat": { "model": "llama-3.3-70b", "web_search": "auto" }
+  }
+}
+```
+
+Global keys under `defaults` (`output_dir`, `max_spend`, `yes`) apply to any
+command that has the flag; a per-command section (e.g. `defaults.chat`)
+overrides them. **Precedence for any flag is: explicit CLI flag > environment
+variable > config file > built-in default** — so a config default never shadows
+something you pass on the command line or set in the environment.
+
+The **API key is never stored here** — it stays in
+`~/.config/venice/credentials`. Unknown keys are preserved on write, so the
+schema is forward-compatible.
+
 ## Browse the model catalog
 
 ```sh
@@ -624,6 +672,8 @@ The player list (`paplay` -> `aplay` -> `ffplay` -> `mpg123` -> `play`
 | `venice chat MESSAGE [--system S] [--model M] [--web-search on] [...]` | one-shot chat completion (OpenAI SDK) |
 | `venice embed [TEXT] [--from-file PATH] [--model M] [--dimensions N] [--json]` | text embeddings (OpenAI SDK) |
 | `venice mcp-serve` | run an MCP server (stdio) exposing venice tools (needs `[mcp]`) |
+| `venice config add\|list\|remove\|show` | manage the MCP server registry |
+| `venice config get\|set\|unset KEY [VALUE]` | manage default flag values |
 
 ## Tests
 
@@ -660,7 +710,9 @@ The API key is stored **plaintext on disk** at
 `~/.config/venice/credentials` (mode 0600, inside a 0700 directory).
 There is no OS keychain integration -- file permissions are the only
 protection, so anything that can read your home directory can read the
-key.
+key. The `venice config` file (`~/.config/venice/config.json`) is written
+mode 0600 for the same reason -- an MCP `env`/`headers` entry can carry a
+bearer token -- but the API key itself is never written there.
 
 - In CI or any shared environment, prefer `$VENICE_API_KEY` (it
   overrides the file) sourced from that system's secret store, and
