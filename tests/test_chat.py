@@ -26,6 +26,8 @@ def _args(**ov):
         # --- agent / tools (#15) ---
         tools=None, tool=None, max_tool_calls=None,
         max_spend=None, yes=None, output=None,
+        # --- interactive / REPL (#22) ---
+        interactive=False, resume=None,
     )
     base.update(ov)
     return argparse.Namespace(**base)
@@ -251,11 +253,12 @@ class TestChat(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(captured["messages"][-1]["content"], "from pipe")
 
-    def test_no_message_exit_2(self):
-        fake_stdin = mock.MagicMock()
-        fake_stdin.isatty.return_value = True
+    def test_no_message_non_tty_exit_2(self):
+        # No positional message and stdin is not a TTY with nothing piped: there
+        # is nothing to send and it isn't interactive, so exit 2. (No message on
+        # a *TTY* now drops into the REPL instead -- see test_repl.py.)
         err = io.StringIO()
-        with mock.patch.object(sys, "stdin", fake_stdin):
+        with mock.patch.object(sys, "stdin", io.StringIO("")):
             rc, fake, captured = self._run(
                 _args(message=None), FakeCompletion("x"), stderr=err
             )

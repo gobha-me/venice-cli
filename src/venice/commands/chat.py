@@ -18,7 +18,7 @@ from typing import Optional
 
 from .. import auth, userconfig
 from ..client import build_client_from_auth
-from . import _agent, _models, _openai
+from . import _agent, _models, _openai, _repl
 
 
 def register(subparsers) -> None:
@@ -59,6 +59,21 @@ def register(subparsers) -> None:
     p.add_argument(
         "--json", action="store_true",
         help="Print the raw response object (forces --no-stream).",
+    )
+
+    # --- Interactive multi-turn / REPL (#22) ---
+    it = p.add_argument_group("Interactive")
+    it.add_argument(
+        "--interactive", "-i", action="store_true", dest="interactive",
+        default=False,
+        help="Multi-turn REPL: hold a conversation across turns (also entered "
+        "automatically when no message is given on a terminal). Slash-commands: "
+        "/system /model /reset /save /exit.",
+    )
+    it.add_argument(
+        "--resume", default=None, metavar="FILE", dest="resume",
+        help="Load a saved transcript JSON and continue it interactively "
+        "(pairs with /save).",
     )
 
     # --- Venice extensions -> venice_parameters ---
@@ -157,13 +172,14 @@ def _venice_parameters(args) -> dict:
     return vp
 
 
-def _build_kwargs(args, model: str, message: str) -> dict:
-    messages = []
-    if args.system:
-        messages.append({"role": "system", "content": args.system})
-    messages.append({"role": "user", "content": message})
+def _gen_kwargs(args) -> dict:
+    """Per-turn generation kwargs (temperature/max_tokens/venice_parameters).
 
-    kwargs: dict = {"model": model, "messages": messages}
+    No `model`/`messages` -- those are supplied per call. Shared by the one-shot
+    path (`_build_kwargs`) and the interactive REPL, which re-applies these on
+    every turn against a persistent message history.
+    """
+    kwargs: dict = {}
     if args.temperature is not None:
         kwargs["temperature"] = args.temperature
     if args.max_tokens is not None:
@@ -172,6 +188,14 @@ def _build_kwargs(args, model: str, message: str) -> dict:
     if vp:
         kwargs["extra_body"] = {"venice_parameters": vp}
     return kwargs
+
+
+def _build_kwargs(args, model: str, message: str) -> dict:
+    messages = []
+    if args.system:
+        messages.append({"role": "system", "content": args.system})
+    messages.append({"role": "user", "content": message})
+    return {"model": model, "messages": messages, **_gen_kwargs(args)}
 
 
 def _as_dict(value) -> Optional[dict]:
@@ -214,10 +238,20 @@ def _print_usage(usage) -> None:
         print(f"usage: prompt={pt} completion={ct} total={tt}", file=sys.stderr)
 
 
+def _is_interactive(args, message) -> bool:
+    """REPL when explicitly requested (`-i` / `--resume`) or when there is no
+    message and stdin is an interactive terminal. A piped or `-` message is
+    always one-shot."""
+    if getattr(args, "interactive", False) or getattr(args, "resume", None):
+        return True
+    return message is None and sys.stdin.isatty()
+
+
 def _run(args) -> int:
     userconfig.apply_defaults(args, "chat")
     message = _resolve_message(args)
-    if not message:
+    interactive = _is_interactive(args, message)
+    if not interactive and not message:
         print("chat: no message (pass an argument or pipe stdin)", file=sys.stderr)
         return 2
 
@@ -239,6 +273,10 @@ def _run(args) -> int:
         return rc
 
     oai = _openai.build_openai(openai, client)
+
+    if interactive:
+        return _repl.run(args, oai, openai, client, models, model, initial=message)
+
     kwargs = _build_kwargs(args, model, message)
 
     if getattr(args, "tools", None):
@@ -256,10 +294,14 @@ def _run(args) -> int:
         return _openai.status_to_exit(openai, e, "chat")
 
 
-def _run_agent(args, oai, openai, client, models, model, kwargs) -> Optional[int]:
-    """Run the tool-calling loop. Returns an exit code, or None to signal the
-    caller to fall through to plain (non-tool) chat because the model can't do
-    function calling."""
+def _tools_for(args, client, models, model):
+    """Resolve the built-in tool list for `model` (shared by one-shot + REPL).
+
+    Returns ``(tools, None)`` on success; ``(None, None)`` when the model can't do
+    function calling (caller degrades to plain chat); ``(None, 2)`` when the
+    requested ``--tool`` subset is invalid. Prints the same capability notes the
+    one-shot path always did.
+    """
     supported = _agent.supports_function_calling(models, model)
     if supported is False:
         print(
@@ -267,16 +309,13 @@ def _run_agent(args, oai, openai, client, models, model, kwargs) -> Optional[int
             "running without tools",
             file=sys.stderr,
         )
-        return None
+        return None, None
     if supported is None:
         print(
             f"chat: could not verify function-calling support for {model}; "
             "attempting tools",
             file=sys.stderr,
         )
-    if args.stream and not args.json:
-        print("chat: --tools implies non-streamed output for now", file=sys.stderr)
-
     try:
         tools = _agent.builtin_tools(
             client,
@@ -286,7 +325,20 @@ def _run_agent(args, oai, openai, client, models, model, kwargs) -> Optional[int
         )
     except ValueError as e:
         print(f"chat: {e}", file=sys.stderr)
-        return 2
+        return None, 2
+    return tools, None
+
+
+def _run_agent(args, oai, openai, client, models, model, kwargs) -> Optional[int]:
+    """Run the tool-calling loop. Returns an exit code, or None to signal the
+    caller to fall through to plain (non-tool) chat because the model can't do
+    function calling."""
+    tools, rc = _tools_for(args, client, models, model)
+    if tools is None:
+        return rc  # None -> degrade to plain chat; 2 -> invalid --tool subset
+
+    if args.stream and not args.json:
+        print("chat: --tools implies non-streamed output for now", file=sys.stderr)
 
     messages = kwargs.pop("messages")
     kwargs.pop("model", None)
@@ -315,15 +367,16 @@ def _run_once(oai, kwargs: dict, as_json: bool) -> int:
     return 0
 
 
-def _run_stream(oai, kwargs: dict) -> int:
-    kwargs = dict(kwargs)
-    kwargs["stream"] = True
-    kwargs["stream_options"] = {"include_usage": True}
-    stream = oai.chat.completions.create(**kwargs)
+def _consume_stream(stream) -> str:
+    """Write streamed deltas to stdout as they arrive; return the full reply text.
 
+    Citations/usage are printed to stderr. Shared by the one-shot `_run_stream`
+    and the REPL turn helper, which needs the accumulated text to append the
+    assistant turn to its persistent history.
+    """
     citations = None
     usage = None
-    wrote_any = False
+    parts: list = []
     for chunk in stream:
         vp = getattr(chunk, "venice_parameters", None)
         if vp is not None and citations is None:
@@ -335,9 +388,17 @@ def _run_stream(oai, kwargs: dict) -> int:
             if piece:
                 sys.stdout.write(piece)
                 sys.stdout.flush()
-                wrote_any = True
-    if wrote_any:
+                parts.append(piece)
+    if parts:
         sys.stdout.write("\n")
     _print_citations(citations)
     _print_usage(usage)
+    return "".join(parts)
+
+
+def _run_stream(oai, kwargs: dict) -> int:
+    kwargs = dict(kwargs)
+    kwargs["stream"] = True
+    kwargs["stream_options"] = {"include_usage": True}
+    _consume_stream(oai.chat.completions.create(**kwargs))
     return 0
