@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 from typing import Optional, Tuple
 
-from .. import audio_player, auth, billing, config
+from .. import audio_player, auth, billing, config, userconfig
 from ..client import VeniceAPIError, build_client_from_auth
 
 # Slugs verified against /models?type=tts on 2026-05-22.
@@ -99,7 +99,7 @@ def register(subparsers) -> None:
     play_grp = p.add_mutually_exclusive_group()
     play_grp.add_argument("--play", dest="play", action="store_true", default=None)
     play_grp.add_argument("--no-play", dest="play", action="store_false")
-    p.add_argument("--yes", "-y", action="store_true")
+    p.add_argument("--yes", "-y", action="store_true", default=None)
     p.add_argument("--dry-run", action="store_true",
                    help="Estimate cost and exit; don't call /audio/speech.")
     p.add_argument(
@@ -281,6 +281,7 @@ def _validate_speed(speed: Optional[float]) -> Optional[int]:
 
 
 def _run(args) -> int:
+    userconfig.apply_defaults(args, "tts")
     rc = _validate_speed(args.speed)
     if rc is not None:
         return rc

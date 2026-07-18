@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from .. import auth
+from .. import auth, userconfig
 from ..client import build_client_from_auth
 from ._shared import (
     confirm_or_exit,
@@ -78,7 +78,7 @@ def register(subparsers) -> None:
     )
     p.add_argument("--output", "-o", type=Path, default=None,
                    help="Output file or directory. Default: cwd/<input>-upscaled.png.")
-    p.add_argument("--yes", "-y", action="store_true")
+    p.add_argument("--yes", "-y", action="store_true", default=None)
     p.add_argument("--dry-run", action="store_true",
                    help="Show the planned output and exit; don't call the API.")
     p.add_argument(
@@ -147,6 +147,7 @@ def _fmt_scale(scale: float) -> str:
 
 
 def _run(args) -> int:
+    userconfig.apply_defaults(args, "upscale")
     rc = _validate(args)
     if rc is not None:
         return rc

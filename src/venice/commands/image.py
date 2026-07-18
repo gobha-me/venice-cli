@@ -29,7 +29,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from .. import auth, billing, config
+from .. import auth, billing, config, userconfig
 from ..client import VeniceAPIError, build_client_from_auth
 from ._shared import (
     confirm_or_exit as _confirm_or_exit,
@@ -180,7 +180,7 @@ def register(subparsers) -> None:
         "reproducible replay via --from-json (with --variants>1, only the "
         "first, reproducible variant gets one).",
     )
-    p.add_argument("--yes", "-y", action="store_true")
+    p.add_argument("--yes", "-y", action="store_true", default=None)
     p.add_argument("--dry-run", action="store_true",
                    help="Estimate cost and exit; don't call /image/generate.")
     p.add_argument(
@@ -544,6 +544,7 @@ def _resolve_preset(args) -> Optional[int]:
 # ---- main flow ---------------------------------------------------------------
 
 def _run(args) -> int:
+    userconfig.apply_defaults(args, "image")
     if args.from_json is not None:
         merged = _apply_replay(args)
         if isinstance(merged, int):

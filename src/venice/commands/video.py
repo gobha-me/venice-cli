@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from .. import billing, config
+from .. import billing, config, userconfig
 from ..client import VeniceAPIError
 from . import _models, _queue, _shared
 
@@ -69,7 +69,7 @@ def register(subparsers) -> None:
         help="Disable audio (models that support it generate audio by default).",
     )
     p.add_argument("--output", "-o", type=Path, default=None)
-    p.add_argument("--yes", "-y", action="store_true")
+    p.add_argument("--yes", "-y", action="store_true", default=None)
     p.add_argument("--background", action="store_true")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--no-cleanup", action="store_true")
@@ -132,6 +132,7 @@ def _shared_params(args) -> dict:
 
 
 def _run_generate(args) -> int:
+    userconfig.apply_defaults(args, "video")
     if not args.prompt:
         print("video: prompt required (or use: venice video-status <id>)", file=sys.stderr)
         return 2
