@@ -2,8 +2,9 @@
 
 Two things live here:
 
-- ``mcpServers`` -- an MCP server registry (like ``claude mcp add``) that
-  ``venice chat --mcp`` (#15) will load.
+- ``mcpServers`` -- an MCP server registry (like ``claude mcp add``) that the
+  ``venice chat --mcp`` external-MCP client (#21) will load. (The built-in
+  tool-calling loop, #15, is in-process and needs no registry.)
 - ``defaults`` -- config-backed default flag values so users stop repeating
   ``--model`` / ``-o`` / ``--yes`` / ``--max-spend`` on every call (#17).
 
@@ -198,6 +199,8 @@ _COMMAND_MAP = {
         "max_tokens": ("max_tokens", int),
         "web_search": ("web_search", str),
         "character": ("character", str),
+        "tools": ("tools", _as_bool),
+        "max_tool_calls": ("max_tool_calls", int),
     },
 }
 

@@ -2,7 +2,7 @@
 
 Two surfaces:
 - MCP server registry (`add`/`list`/`remove`/`show`), modeled on `claude mcp add`,
-  which `venice chat --mcp` (#15) will load.
+  which the `venice chat --mcp` external-MCP client (#21) will load.
 - Default flag values (`get`/`set`/`unset`) so users stop repeating flags (#17).
 
 The API key is never stored here; it stays in ~/.config/venice/credentials.

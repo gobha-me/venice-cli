@@ -13,11 +13,12 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
 from typing import Optional
 
 from .. import auth, userconfig
 from ..client import build_client_from_auth
-from . import _models, _openai
+from . import _agent, _models, _openai
 
 
 def register(subparsers) -> None:
@@ -95,6 +96,33 @@ def register(subparsers) -> None:
         "--x-search", action="store_true", dest="x_search",
         help="Enable xAI web+X search (extra ~$0.01/search; grok models).",
     )
+
+    # --- Agent / tool calling (#15) ---
+    ag = p.add_argument_group("Agent / tools")
+    ag.add_argument(
+        "--tools", "--agent", action="store_true", dest="tools", default=None,
+        help="Let the model call venice's own tools (image/tts/sfx/music/upscale/"
+        "bg-remove/chat) in a loop. Requires a function-calling model; degrades to "
+        "plain chat otherwise. Implies non-streamed output for now.",
+    )
+    ag.add_argument(
+        "--tool", action="append", dest="tool", default=None, metavar="NAME",
+        help="Restrict the tool set to this tool (repeatable). Default: all seven.",
+    )
+    ag.add_argument(
+        "--max-tool-calls", type=int, default=None, dest="max_tool_calls",
+        metavar="N", help="Cap tool invocations before forcing a final answer "
+        "(default: 8).",
+    )
+    ag.add_argument(
+        "--max-spend", type=float, default=None, metavar="USD",
+        help="Per-call auto-approve cap for paid tools (default: $0.10 / "
+        "$VENICE_MCP_MAX_SPEND). Over-cap calls prompt on a TTY.",
+    )
+    ag.add_argument("--yes", "-y", action="store_true", default=None,
+                    help="Auto-approve every paid tool call (skips the cap).")
+    ag.add_argument("--output", "-o", type=Path, default=None,
+                    help="Directory tools write generated files to. Default: cwd.")
     p.set_defaults(handler=_run)
 
 
@@ -213,11 +241,62 @@ def _run(args) -> int:
     oai = _openai.build_openai(openai, client)
     kwargs = _build_kwargs(args, model, message)
 
+    if getattr(args, "tools", None):
+        rc = _run_agent(args, oai, openai, client, models, model, kwargs)
+        if rc is not None:
+            return rc
+        # else: model can't do function calling -> fall through to plain chat
+
     stream = args.stream and not args.json
     try:
         if stream:
             return _run_stream(oai, kwargs)
         return _run_once(oai, kwargs, args.json)
+    except openai.OpenAIError as e:
+        return _openai.status_to_exit(openai, e, "chat")
+
+
+def _run_agent(args, oai, openai, client, models, model, kwargs) -> Optional[int]:
+    """Run the tool-calling loop. Returns an exit code, or None to signal the
+    caller to fall through to plain (non-tool) chat because the model can't do
+    function calling."""
+    supported = _agent.supports_function_calling(models, model)
+    if supported is False:
+        print(
+            f"chat: model {model} does not support function calling; "
+            "running without tools",
+            file=sys.stderr,
+        )
+        return None
+    if supported is None:
+        print(
+            f"chat: could not verify function-calling support for {model}; "
+            "attempting tools",
+            file=sys.stderr,
+        )
+    if args.stream and not args.json:
+        print("chat: --tools implies non-streamed output for now", file=sys.stderr)
+
+    try:
+        tools = _agent.builtin_tools(
+            client,
+            max_spend=args.max_spend,
+            output_dir=str(args.output) if args.output else None,
+            only=set(args.tool) if args.tool else None,
+        )
+    except ValueError as e:
+        print(f"chat: {e}", file=sys.stderr)
+        return 2
+
+    messages = kwargs.pop("messages")
+    kwargs.pop("model", None)
+    try:
+        return _agent.run_loop(
+            oai, model, messages, kwargs, tools,
+            max_tool_calls=(args.max_tool_calls or 8),
+            yes=bool(args.yes),
+            json_out=args.json,
+        )
     except openai.OpenAIError as e:
         return _openai.status_to_exit(openai, e, "chat")
 

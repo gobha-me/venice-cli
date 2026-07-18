@@ -5,6 +5,7 @@ Mocks the OpenAI client (chat completions) and the free /models catalog GET
 (pip install -e ".[openai]").
 """
 import argparse
+import copy
 import io
 import json
 import os
@@ -22,6 +23,9 @@ def _args(**ov):
         web_search=None, web_citations=False, web_scraping=False,
         character=None, no_venice_system_prompt=False,
         strip_thinking=False, no_thinking=False, x_search=False,
+        # --- agent / tools (#15) ---
+        tools=None, tool=None, max_tool_calls=None,
+        max_spend=None, yes=None, output=None,
     )
     base.update(ov)
     return argparse.Namespace(**base)
@@ -71,21 +75,24 @@ class FakeChunk:
 
 # --- catalog GET mock: two text models, one with the `default` trait ---
 
-def _text_payload():
+def _text_payload(fc=True):
+    """Catalog with a `default`-trait model. `fc` sets supportsFunctionCalling."""
     return json.dumps({
         "object": "list",
         "data": [
             {"id": "llama-3.3-70b", "type": "text",
-             "model_spec": {"traits": ["default"]}},
+             "model_spec": {"traits": ["default"],
+                            "capabilities": {"supportsFunctionCalling": fc}}},
             {"id": "venice-uncensored", "type": "text",
-             "model_spec": {"traits": []}},
+             "model_spec": {"traits": [],
+                            "capabilities": {"supportsFunctionCalling": False}}},
         ],
     }).encode()
 
 
-def _urlopen_ok():
+def _urlopen_ok(fc=True):
     def _u(req, timeout=None):
-        return FakeResp(200, _text_payload(), "application/json")
+        return FakeResp(200, _text_payload(fc), "application/json")
     return _u
 
 
@@ -103,6 +110,64 @@ def _fake_openai(result):
 
     fake.chat.completions.create.side_effect = _create
     return fake, captured
+
+
+# --- fakes for the tool-calling (agent) loop ---
+
+class _FnRef:
+    def __init__(self, name, arguments):
+        self.name = name
+        self.arguments = arguments
+
+
+class _FnCall:
+    def __init__(self, id, name, arguments):
+        self.id = id
+        self.type = "function"
+        self.function = _FnRef(name, arguments)
+
+
+class _ToolMsg:
+    def __init__(self, content=None, tool_calls=None):
+        self.content = content
+        self.tool_calls = tool_calls
+
+
+class _ToolChoice:
+    def __init__(self, msg):
+        self.message = msg
+
+
+class FakeToolCompletion:
+    """A completion whose message may carry tool_calls (None => a final answer)."""
+
+    def __init__(self, content=None, tool_calls=None, venice_parameters=None):
+        self.choices = [_ToolChoice(_ToolMsg(content, tool_calls))]
+        self.venice_parameters = venice_parameters
+
+    def model_dump(self):
+        return {"choices": [{"message": {"content": self.choices[0].message.content}}]}
+
+
+def _fake_openai_seq(results):
+    """create() returns successive `results`; records every call's kwargs.
+
+    `messages` is deep-copied per call because the loop mutates one list in place,
+    so a shallow record would show every call the final state.
+    """
+    calls = []
+    fake = mock.MagicMock()
+    seq = list(results)
+
+    def _create(**kwargs):
+        snap = dict(kwargs)
+        if "messages" in snap:
+            snap["messages"] = copy.deepcopy(snap["messages"])
+        calls.append(snap)
+        return seq.pop(0)
+
+    fake.chat.completions.create.side_effect = _create
+    return fake, calls
 
 
 class TestChat(unittest.TestCase):
@@ -292,6 +357,197 @@ class TestChat(unittest.TestCase):
             rc = chat._run(_args(message="hi"))
         self.assertEqual(rc, 2)
         self.assertIn("openai", err.getvalue())
+
+
+class TestChatAgent(unittest.TestCase):
+    """The `--tools` function-calling agent loop (#15)."""
+
+    def setUp(self):
+        _cfg = mock.patch(
+            "venice.userconfig.load_config",
+            lambda *a, **k: {"version": 1, "mcpServers": {}, "defaults": {}},
+        )
+        _cfg.start()
+        self.addCleanup(_cfg.stop)
+
+    def _run_seq(self, args, results, stdout=None, stderr=None, urlopen=None):
+        from venice.commands import chat
+        fake, calls = _fake_openai_seq(results)
+        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.client.urllib.request.urlopen",
+                        urlopen or _urlopen_ok()), \
+             mock.patch("openai.OpenAI", return_value=fake), \
+             mock.patch.object(sys, "stdout", stdout or io.StringIO()), \
+             mock.patch.object(sys, "stderr", stderr or io.StringIO()):
+            rc = chat._run(args)
+        return rc, fake, calls
+
+    def test_two_step_tool_loop(self):
+        out = io.StringIO()
+        seq = [
+            FakeToolCompletion(tool_calls=[
+                _FnCall("call_1", "venice_chat", '{"message": "say hola"}')]),
+            FakeToolCompletion("final answer"),
+        ]
+        with mock.patch(
+            "venice.commands._mcp.chat_tool",
+            return_value={"status": "ok", "content": "hola", "model": "m"},
+        ) as stub:
+            rc, fake, calls = self._run_seq(
+                _args(message="hi", tools=True, stream=False), seq, stdout=out
+            )
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.getvalue().strip(), "final answer")
+        # the tool impl received the model's parsed arguments
+        _pos, kw = stub.call_args
+        self.assertEqual(kw.get("message"), "say hola")
+        # first turn advertised tools + tool_choice=auto
+        self.assertIn("tools", calls[0])
+        self.assertEqual(calls[0]["tool_choice"], "auto")
+        # second turn carries the tool result with the matching id
+        tool_msgs = [m for m in calls[1]["messages"] if m.get("role") == "tool"]
+        self.assertEqual(len(tool_msgs), 1)
+        self.assertEqual(tool_msgs[0]["tool_call_id"], "call_1")
+        self.assertIn("hola", tool_msgs[0]["content"])
+
+    def test_capability_degrade_to_plain_chat(self):
+        err = io.StringIO()
+        rc, fake, calls = self._run_seq(
+            _args(message="hi", tools=True, stream=False),
+            [FakeCompletion("plain reply")],
+            stderr=err, urlopen=_urlopen_ok(fc=False),
+        )
+        self.assertEqual(rc, 0)
+        # loop not entered: the single create advertised no tools
+        self.assertNotIn("tools", calls[0])
+        self.assertIn("does not support function calling", err.getvalue())
+
+    def test_max_tool_calls_cap(self):
+        out, err = io.StringIO(), io.StringIO()
+        seq = [
+            FakeToolCompletion(tool_calls=[
+                _FnCall("c1", "venice_chat", '{"message": "x"}')]),
+            FakeToolCompletion(tool_calls=[
+                _FnCall("c2", "venice_chat", '{"message": "x"}')]),
+            FakeToolCompletion("done"),
+        ]
+        with mock.patch(
+            "venice.commands._mcp.chat_tool",
+            return_value={"status": "ok", "content": "x"},
+        ) as stub:
+            rc, fake, calls = self._run_seq(
+                _args(message="hi", tools=True, stream=False, max_tool_calls=2),
+                seq, stdout=out, stderr=err,
+            )
+        self.assertEqual(rc, 0)
+        self.assertEqual(stub.call_count, 2)
+        self.assertEqual(calls[-1]["tool_choice"], "none")  # forced final answer
+        self.assertEqual(out.getvalue().strip(), "done")
+        self.assertIn("max-tool-calls", err.getvalue())
+
+    def test_spend_gate_yes_auto_approves(self):
+        seq = [
+            FakeToolCompletion(tool_calls=[
+                _FnCall("c1", "venice_image", '{"prompt": "a cat"}')]),
+            FakeToolCompletion("described the cat"),
+        ]
+        with mock.patch(
+            "venice.commands._mcp.image_tool",
+            return_value={"status": "ok", "paths": ["/x.png"]},
+        ) as stub:
+            rc, fake, calls = self._run_seq(
+                _args(message="hi", tools=True, stream=False, yes=True), seq
+            )
+        self.assertEqual(rc, 0)
+        _pos, kw = stub.call_args
+        self.assertTrue(kw.get("confirm"))  # --yes -> confirm=True
+        self.assertEqual(kw.get("prompt"), "a cat")
+
+    def test_spend_gate_non_tty_feeds_confirmation_back(self):
+        seq = [
+            FakeToolCompletion(tool_calls=[
+                _FnCall("c1", "venice_image", '{"prompt": "a cat"}')]),
+            FakeToolCompletion("could not afford it"),
+        ]
+        gate = {"status": "confirmation_required", "message": "over cap",
+                "estimated_cost_usd": 5.0, "max_spend_usd": 0.1}
+        fake_stdin = mock.MagicMock()
+        fake_stdin.isatty.return_value = False
+        with mock.patch(
+            "venice.commands._mcp.image_tool", return_value=gate
+        ) as stub, mock.patch.object(sys, "stdin", fake_stdin):
+            rc, fake, calls = self._run_seq(
+                _args(message="hi", tools=True, stream=False), seq
+            )
+        self.assertEqual(rc, 0)
+        self.assertEqual(stub.call_count, 1)  # not re-invoked without approval
+        tool_msgs = [m for m in calls[1]["messages"] if m.get("role") == "tool"]
+        self.assertIn("confirmation_required", tool_msgs[0]["content"])
+
+    def test_paid_tool_schema_excludes_control_kwargs(self):
+        rc, fake, calls = self._run_seq(
+            _args(message="hi", tools=True, stream=False),
+            [FakeToolCompletion("no tools needed")],
+        )
+        self.assertEqual(rc, 0)
+        tools = calls[0]["tools"]
+        for t in tools:
+            props = t["function"]["parameters"].get("properties", {})
+            for banned in ("confirm", "max_spend", "output_dir"):
+                self.assertNotIn(
+                    banned, props,
+                    f"{t['function']['name']} leaks control kwarg {banned}",
+                )
+        names = {t["function"]["name"] for t in tools}
+        self.assertEqual(len(names), 7)  # all seven built-ins advertised
+
+    def test_tool_error_surfaced_not_fatal(self):
+        seq = [
+            FakeToolCompletion(tool_calls=[
+                _FnCall("c1", "venice_chat", '{"message": "x"}')]),
+            FakeToolCompletion("recovered"),
+        ]
+        with mock.patch(
+            "venice.commands._mcp.chat_tool",
+            return_value={"status": "error", "message": "boom"},
+        ):
+            rc, fake, calls = self._run_seq(
+                _args(message="hi", tools=True, stream=False), seq
+            )
+        self.assertEqual(rc, 0)
+        tool_msgs = [m for m in calls[1]["messages"] if m.get("role") == "tool"]
+        self.assertIn("boom", tool_msgs[0]["content"])
+
+    def test_openai_error_is_fatal(self):
+        import openai
+        from venice.commands import chat
+        err = io.StringIO()
+        fake = mock.MagicMock()
+        fake.chat.completions.create.side_effect = openai.OpenAIError("boom")
+        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.client.urllib.request.urlopen", _urlopen_ok()), \
+             mock.patch("openai.OpenAI", return_value=fake), \
+             mock.patch.object(sys, "stdout", io.StringIO()), \
+             mock.patch.object(sys, "stderr", err):
+            rc = chat._run(_args(message="hi", tools=True, stream=False))
+        self.assertEqual(rc, 5)
+
+    def test_unknown_tool_subset_exit_2(self):
+        err = io.StringIO()
+        rc, fake, calls = self._run_seq(
+            _args(message="hi", tools=True, stream=False, tool=["venice_nope"]),
+            [FakeToolCompletion("unused")], stderr=err,
+        )
+        self.assertEqual(rc, 2)
+        self.assertEqual(len(calls), 0)  # never reached the model
+        self.assertIn("venice_nope", err.getvalue())
+
+    def test_tools_off_leaves_one_shot_unchanged(self):
+        rc, fake, calls = self._run_seq(
+            _args(message="hi", stream=False), [FakeCompletion("plain")]
+        )
+        self.assertEqual(rc, 0)
+        self.assertNotIn("tools", calls[0])
 
 
 if __name__ == "__main__":
