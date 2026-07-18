@@ -475,6 +475,53 @@ venice chat "Latest posts about Venice?" --model grok-4-20 --x-search
 Chat pricing is dynamic (per token, model-dependent), so there's no pre-call
 quote; pass `--json` or watch the `usage:` line on stderr to see token counts.
 
+### Agent / tool calling
+
+With `--tools` (alias `--agent`), `venice chat` becomes a **self-contained agent**:
+the model can call venice's own endpoints as in-process function tools and the
+completion runs in a loop (model → tool call → tool result → repeat) until it
+produces a final answer. These are the same seven capabilities `venice mcp-serve`
+exposes — but here they run **in-process on the `[openai]` extra alone** (no `mcp`
+SDK, no subprocess):
+
+`venice_image`, `venice_tts`, `venice_sfx`, `venice_music`, `venice_upscale`,
+`venice_bg_remove`, and `venice_chat` (a sub-completion / subagent primitive).
+
+```sh
+# One command, multiple steps: the model generates an image, then critiques it.
+venice chat --tools "Generate a fire-elemental trading card, then critique it."
+
+# Text-only agentic reasoning via the venice_chat subagent tool (no paid media).
+venice chat --tools "Use venice_chat to draft a haiku, then improve it."
+
+# Restrict the toolset and cap the number of tool calls.
+venice chat --tools --tool venice_image --max-tool-calls 3 "Draw three logo ideas."
+```
+
+Details and safety:
+
+- **Capability guard.** Tools are offered only if the chosen model advertises
+  `supportsFunctionCalling`; on a non-tool model the command prints a note and
+  degrades to a plain one-shot chat. Without `--tools`, `venice chat` is unchanged.
+- **Spend gating** (paid tools) reuses the MCP rails: each paid call auto-approves
+  under a per-call cap (`--max-spend`, default `$0.10` / `$VENICE_MCP_MAX_SPEND`).
+  An over-cap call prompts `[y/N]` on a TTY; non-interactively (or if you decline)
+  the block is handed back to the model, which adapts. `--yes` auto-approves every
+  paid call (this bypasses the per-call cap — `--max-tool-calls` still bounds the
+  count). The model itself can never raise its spending authority.
+- `--output DIR` sets where generated files are written (default: cwd).
+- **Non-streamed in v1.** The tool path buffers each turn, so `--stream` is ignored
+  when `--tools` is on; `--json` prints the final completion object.
+
+| flag | effect |
+|---|---|
+| `--tools` / `--agent` | enable the in-process tool-calling loop |
+| `--tool NAME` | restrict to this tool (repeatable; default: all seven) |
+| `--max-tool-calls N` | cap tool invocations before forcing an answer (default 8) |
+| `--max-spend USD` | per-call auto-approve cap for paid tools |
+| `--yes` / `-y` | auto-approve every paid tool call |
+| `--output DIR` / `-o` | directory for generated files |
+
 ## Embeddings
 
 Turn text into embedding vectors with a Venice embedding model (`/embeddings`,
