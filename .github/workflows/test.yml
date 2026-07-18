@@ -27,14 +27,16 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
-      # The chat/embed/shared_openai tests import the OpenAI SDK (they mock the
-      # client, but the module must be importable), so CI installs the [openai]
-      # extra. No system packages are needed: ffmpeg/montage shell-outs are
-      # mocked at subprocess/shutil.which.
+      # The chat/embed/shared_openai tests import the OpenAI SDK, and the
+      # mcp-server wiring test imports the `mcp` SDK (both mock their clients,
+      # but the modules must be importable), so CI installs the [all] extra. On
+      # 3.9 the `mcp` marker resolves to nothing and those wiring tests skip;
+      # the pure-logic MCP tests still run. No system packages are needed:
+      # ffmpeg/montage shell-outs are mocked at subprocess/shutil.which.
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[openai]"
+          pip install -e ".[all]"
 
       - name: Lint
         run: make lint
@@ -71,12 +73,17 @@ jobs:
           venice --help
 
       # register_all imports every command module eagerly, so the two steps
-      # above already exercised the whole command graph. If openai is absent
-      # and they passed, the base really is stdlib-only.
-      - name: Base install must not pull in openai
+      # above already exercised the whole command graph. If openai/mcp are
+      # absent and they passed, the base really is stdlib-only. The mcp check
+      # guards the most likely regression: a module-scope `import mcp` sneaking
+      # into mcp_serve/_mcp (which must stay import-clean so the base install,
+      # and Python 3.9 where the mcp SDK can't install, keep working).
+      - name: Base install must not pull in openai or mcp
         run: |
-          if python -c "import openai" 2>/dev/null; then
-            echo "::error::openai is importable after a base install -- a base command imports it at module scope"
-            exit 1
-          fi
-          echo "ok: base install is openai-free"
+          for mod in openai mcp; do
+            if python -c "import $mod" 2>/dev/null; then
+              echo "::error::$mod is importable after a base install -- a base command imports it at module scope"
+              exit 1
+            fi
+          done
+          echo "ok: base install is openai-free and mcp-free"
