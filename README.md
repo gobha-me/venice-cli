@@ -18,8 +18,8 @@ Ships working `venice login`, `venice sfx` (sound-effect generation),
 `venice tts` (text-to-speech), `venice image` (image generation),
 `venice upscale` / `venice bg-remove` (image post-processing),
 `venice master` (audio mastering), `venice contact-sheet` (montage grids of
-generated images), `venice chat` (one-shot chat completions with Venice
-extensions), `venice embed` (text embeddings), `venice balance` (budget
+generated images), `venice chat` (one-shot or interactive chat completions with
+Venice extensions), `venice embed` (text embeddings), `venice balance` (budget
 tracking), and `venice models` (catalog browser).
 
 ## Install
@@ -413,10 +413,11 @@ the queue id — pass it back via `venice video-status <id> --download-url <url>
 
 ## Chat
 
-One-shot `POST /chat/completions` via the OpenAI SDK (see
-[Optional dependency](#optional-dependency)). Streams the reply by default;
-`--model` is validated against `/models?type=text` (a free GET) before the
-paid call, and defaults to the catalog's `default`-trait text model.
+`POST /chat/completions` via the OpenAI SDK (see
+[Optional dependency](#optional-dependency)) — one-shot, or an interactive
+multi-turn REPL (see [Interactive mode](#interactive-mode)). Streams the reply by
+default; `--model` is validated against `/models?type=text` (a free GET) before
+the paid call, and defaults to the catalog's `default`-trait text model.
 
 ```sh
 # Simplest: message as an argument, streamed to stdout.
@@ -433,6 +434,28 @@ git log --oneline -20 | venice chat - --system "Group these into release notes."
 # Raw response object for scripting (forces --no-stream).
 venice chat "ping" --json | jq '.choices[0].message.content'
 ```
+
+### Interactive mode
+
+With `-i`/`--interactive` — or simply no message on a terminal — `venice chat`
+drops into a REPL that holds the conversation in memory across turns. All the
+Venice extensions and `--tools` (each turn becomes an
+[agent](#agent--tool-calling) turn) carry over. Transcripts are plain message JSON, so sessions are scriptable and
+survive restarts.
+
+```sh
+# Start a conversation (or just run `venice chat` on a TTY).
+venice chat -i --system "You are a terse assistant."
+
+# Resume a saved transcript and keep going.
+venice chat --resume session.json
+```
+
+In-REPL slash-commands: `/system [text]` (show/set the system prompt),
+`/model [name]` (switch model), `/reset` (clear history, keep the system
+prompt), `/save [file]` (write the transcript JSON; defaults to the `--resume`
+file), `/help`, and `/exit` (or `/quit`, or Ctrl-D). Ctrl-C aborts the current
+turn without ending the session.
 
 ### Venice extensions
 
@@ -717,6 +740,7 @@ The player list (`paplay` -> `aplay` -> `ffplay` -> `mpg123` -> `play`
 | `venice master INPUT [--loop] [--lufs N] [--bit-depth N] [...]` | master audio to WAV (48k/24-bit, LUFS/true-peak) |
 | `venice contact-sheet DIR_OR_GLOB [--cols N] [--cell WxH] [--label] [...]` | tile images into one contact sheet (no API call) |
 | `venice chat MESSAGE [--system S] [--model M] [--web-search on] [...]` | one-shot chat completion (OpenAI SDK) |
+| `venice chat [-i] [--resume FILE]` | interactive multi-turn REPL (conversation state, `/`-commands, transcripts) |
 | `venice embed [TEXT] [--from-file PATH] [--model M] [--dimensions N] [--json]` | text embeddings (OpenAI SDK) |
 | `venice mcp-serve` | run an MCP server (stdio) exposing venice tools (needs `[mcp]`) |
 | `venice config add\|list\|remove\|show` | manage the MCP server registry |
