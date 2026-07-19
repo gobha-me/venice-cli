@@ -19,7 +19,8 @@ Ships working `venice login`, `venice sfx` (sound-effect generation),
 `venice upscale` / `venice bg-remove` (image post-processing),
 `venice master` (audio mastering), `venice contact-sheet` (montage grids of
 generated images), `venice chat` (one-shot or interactive chat completions with
-Venice extensions), `venice embed` (text embeddings), `venice balance` (budget
+Venice extensions), `venice embed` (text embeddings), `venice index` /
+`venice search` (project semantic search), `venice balance` (budget
 tracking), and `venice models` (catalog browser).
 
 ## Install
@@ -503,12 +504,14 @@ quote; pass `--json` or watch the `usage:` line on stderr to see token counts.
 With `--tools` (alias `--agent`), `venice chat` becomes a **self-contained agent**:
 the model can call venice's own endpoints as in-process function tools and the
 completion runs in a loop (model → tool call → tool result → repeat) until it
-produces a final answer. These are the same seven capabilities `venice mcp-serve`
-exposes — but here they run **in-process on the `[openai]` extra alone** (no `mcp`
-SDK, no subprocess):
+produces a final answer. These run **in-process on the `[openai]` extra alone**
+(no `mcp` SDK, no subprocess):
 
 `venice_image`, `venice_tts`, `venice_sfx`, `venice_music`, `venice_upscale`,
-`venice_bg_remove`, and `venice_chat` (a sub-completion / subagent primitive).
+`venice_bg_remove`, and `venice_chat` (a sub-completion / subagent primitive) —
+the same seven capabilities `venice mcp-serve` exposes — plus `project_search`,
+a read-only [semantic search](#semantic-search) over the project's local
+`venice index` for locating code by meaning before acting on it.
 
 ```sh
 # One command, multiple steps: the model generates an image, then critiques it.
@@ -539,7 +542,7 @@ Details and safety:
 | flag | effect |
 |---|---|
 | `--tools` / `--agent` | enable the in-process tool-calling loop |
-| `--tool NAME` | restrict to this tool (repeatable; default: all seven) |
+| `--tool NAME` | restrict to this tool (repeatable; default: all of them) |
 | `--max-tool-calls N` | cap tool invocations before forcing an answer (default 8) |
 | `--max-spend USD` | per-call auto-approve cap for paid tools |
 | `--yes` / `-y` | auto-approve every paid tool call |
@@ -593,6 +596,64 @@ venice embed --embed-base-url http://localhost:1234/v1 \
 The URL can also come from `$VENICE_EMBED_BASE_URL`, and a key (if the backend
 needs one) from `$VENICE_EMBED_API_KEY` — env only, never `config.json`. Both
 are config-backable per-flag via `defaults.embed.*` (see `venice config`).
+
+## Semantic search
+
+`venice index` builds a local semantic index of a project tree, and `venice
+search` finds the chunks most relevant to a natural-language query by meaning
+rather than by keyword. Both use the same embedding machinery as `venice embed`
+(the `[openai]` extra, Venice **or** a local backend); the vector store and the
+cosine search are pure-stdlib, so no extra dependency is needed.
+
+```sh
+# Index the current tree. Venice has no default embedding model, so pass one
+# (or set defaults.index.model). Vectors land in ./.venice/index/.
+venice index . --model text-embedding-bge-m3
+
+# Search it from anywhere in the tree (walks up to find .venice/index).
+venice search "where is the retry/backoff logic"
+
+# Top-3 results as JSON (path, line range, score, preview).
+venice search "jwt refresh handling" -k 3 --json
+```
+
+Text output is one hit per line as `SCORE  path:start-end`, followed by a short
+preview of the matched lines:
+
+```
+0.8137  src/venice/client.py:88-120
+    def post_for_bytes_or_json(self, path, body, ...):
+```
+
+**Incremental.** Re-running `venice index` re-embeds only the files whose
+contents changed (keyed on a SHA-256 of each file); unchanged files keep their
+vectors and deleted files are dropped. `--rebuild` forces a full re-index — also
+required if you switch model/dimensions/backend, since vectors from different
+embedding spaces are not comparable.
+
+**What gets indexed.** UTF-8 text files under the tree, chunked into overlapping
+line windows (`--chunk-lines` / `--chunk-overlap`). The walker skips binaries,
+oversized files, `.git`/`node_modules`/virtualenvs and similar, and honors a
+simple top-level `.gitignore` plus any `--exclude GLOB`. Credential- and
+secret-shaped files (`.env`, `credentials`, `*.pem`, `*.key`, `id_rsa*`) are
+**never** indexed, and symlinks pointing outside the tree are ignored.
+
+**Local backend.** As with `venice embed`, `--embed-base-url` (+ `--embed-model`,
+or `$VENICE_EMBED_BASE_URL` / `$VENICE_EMBED_API_KEY`) points indexing at a local
+OpenAI-compatible server — cheap for embedding a whole tree, and needs no Venice
+key:
+
+```sh
+venice index . --embed-base-url http://localhost:1234/v1 --embed-model bge-m3
+venice search "parse the queue response"   # uses the index's own backend/model
+```
+
+The index is machine-generated: `venice index` drops a self-ignoring
+`.venice/.gitignore`, so it won't be committed even if your repo doesn't already
+ignore `.venice/`. Config-backable per-flag via `defaults.index.*` /
+`defaults.search.*`. `venice search` is also exposed to the chat agent as the
+`project_search` tool (see **Agent / tool calling**), so a `venice chat --tools`
+session can locate code by meaning before acting on it.
 
 ## MCP server
 
