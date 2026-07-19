@@ -4,6 +4,7 @@ Drives `chat._run` in interactive mode with scripted `input()` lines and a fake
 OpenAI client, exactly like `test_chat.py` (no network, no real key). Reuses that
 module's fakes so the two stay in lock-step.
 """
+import contextlib
 import copy
 import io
 import json
@@ -18,7 +19,9 @@ from tests.test_chat import (
     FakeChunk,
     FakeToolCompletion,
     _FnCall,
+    _fake_attach_cm,
     _fake_openai_seq,
+    _fake_tool,
     _urlopen_ok,
     _args,
 )
@@ -27,20 +30,26 @@ _EMPTY_CFG = {"version": 1, "mcpServers": {}, "defaults": {}}
 
 
 def _run_repl(args, results, inputs, *, stdout=None, stderr=None,
-              urlopen=None, stdin=None):
+              urlopen=None, stdin=None, cfg=None, attach=None):
     """Run the REPL: `results` are returned by successive create() calls,
-    `inputs` are fed to input(). Returns (rc, fake_client, recorded_calls)."""
+    `inputs` are fed to input(). Returns (rc, fake_client, recorded_calls).
+
+    `cfg` overrides the (empty) config doc; `attach` patches the MCP client seam."""
     from venice.commands import chat
     fake, calls = _fake_openai_seq(results)
-    with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
-         mock.patch("venice.userconfig.load_config", lambda *a, **k: _EMPTY_CFG), \
-         mock.patch("venice.client.urllib.request.urlopen",
-                    urlopen or _urlopen_ok()), \
-         mock.patch("openai.OpenAI", return_value=fake), \
-         mock.patch("builtins.input", side_effect=inputs), \
-         mock.patch.object(sys, "stdin", stdin or io.StringIO("")), \
-         mock.patch.object(sys, "stdout", stdout or io.StringIO()), \
-         mock.patch.object(sys, "stderr", stderr or io.StringIO()):
+    with contextlib.ExitStack() as st:
+        st.enter_context(mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}))
+        st.enter_context(mock.patch("venice.userconfig.load_config",
+                                    lambda *a, **k: cfg or _EMPTY_CFG))
+        st.enter_context(mock.patch("venice.client.urllib.request.urlopen",
+                                    urlopen or _urlopen_ok()))
+        st.enter_context(mock.patch("openai.OpenAI", return_value=fake))
+        st.enter_context(mock.patch("builtins.input", side_effect=inputs))
+        st.enter_context(mock.patch.object(sys, "stdin", stdin or io.StringIO("")))
+        st.enter_context(mock.patch.object(sys, "stdout", stdout or io.StringIO()))
+        st.enter_context(mock.patch.object(sys, "stderr", stderr or io.StringIO()))
+        if attach is not None:
+            st.enter_context(mock.patch("venice.commands._mcp_client.attach", attach))
         rc = chat._run(args)
     return rc, fake, calls
 
@@ -217,6 +226,30 @@ class TestRepl(unittest.TestCase):
         tool_msgs = [m for m in calls[1]["messages"] if m.get("role") == "tool"]
         self.assertEqual(len(tool_msgs), 1)
         self.assertIn("hola", tool_msgs[0]["content"])
+
+    def test_mcp_repl_attaches_external_tools(self):
+        # `--mcp NAME` turns the REPL into an agent session; the remote tool is
+        # advertised alongside the built-ins and its result flows back.
+        out = io.StringIO()
+        seq = [
+            FakeToolCompletion(tool_calls=[
+                _FnCall("c1", "fs__read", '{"path": "/x"}')]),
+            FakeToolCompletion("done"),
+        ]
+        cfg = {"version": 1, "mcpServers": {"fs": {"command": "srv"}}, "defaults": {}}
+        attach = _fake_attach_cm(
+            [_fake_tool("fs__read", {"status": "ok", "content": "data"})]
+        )
+        rc, fake, calls = _run_repl(
+            _args(interactive=True, mcp=["fs"]),
+            seq, ["do it", "/exit"], stdout=out, cfg=cfg, attach=attach,
+        )
+        self.assertEqual(rc, 0)
+        names = {t["function"]["name"] for t in calls[0]["tools"]}
+        self.assertIn("fs__read", names)
+        self.assertIn("venice_image", names)
+        tool_msgs = [m for m in calls[1]["messages"] if m.get("role") == "tool"]
+        self.assertIn("data", tool_msgs[0]["content"])
 
     def test_ctrl_c_aborts_turn_keeps_session(self):
         # First turn is interrupted mid-flight; the session survives and the
