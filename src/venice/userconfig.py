@@ -202,6 +202,13 @@ _COMMAND_MAP = {
         "tools": ("tools", _as_bool),
         "max_tool_calls": ("max_tool_calls", int),
     },
+    "embed": {
+        "model": ("model", str),
+        "dimensions": ("dimensions", int),
+        "encoding_format": ("encoding_format", str),
+        "embed_base_url": ("embed_base_url", str),
+        "embed_model": ("embed_model", str),
+    },
 }
 
 

@@ -575,6 +575,25 @@ venice embed "hello" --json | jq '.usage'
 By default each embedding prints as a JSON array, one per line;
 `--encoding-format base64` requests base64-packed vectors instead of floats.
 
+### Local / alternate backend
+
+Because `venice embed` rides on the OpenAI SDK, it can point at **any**
+OpenAI-compatible embeddings endpoint — including a local one (llama.cpp,
+Ollama, text-embeddings-inference). Pass `--embed-base-url` (with
+`--embed-model`, since the alternate server has its own catalog) to swap
+backends; this skips the Venice catalog and needs no Venice key. Venice stays
+the default when the flag is absent.
+
+```sh
+# Embed against a local server -- no Venice key required.
+venice embed --embed-base-url http://localhost:1234/v1 \
+    --embed-model my-local-model "the quick brown fox"
+```
+
+The URL can also come from `$VENICE_EMBED_BASE_URL`, and a key (if the backend
+needs one) from `$VENICE_EMBED_API_KEY` — env only, never `config.json`. Both
+are config-backable per-flag via `defaults.embed.*` (see `venice config`).
+
 ## MCP server
 
 `venice mcp-serve` runs an [MCP](https://modelcontextprotocol.io) server over
@@ -719,6 +738,8 @@ The player list (`paplay` -> `aplay` -> `ffplay` -> `mpg123` -> `play`
 |---|---|
 | `VENICE_API_KEY` | overrides the file-based key (no disk read) |
 | `VENICE_BASE_URL` | override the API base URL (testing, proxy) |
+| `VENICE_EMBED_BASE_URL` | `embed` alternate OpenAI-compatible endpoint (local backend) |
+| `VENICE_EMBED_API_KEY` | key for `VENICE_EMBED_BASE_URL` (if the backend needs one) |
 | `VENICE_MCP_MAX_SPEND` | `mcp-serve` auto-approve cap in USD (default `0.10`) |
 | `VENICE_MCP_OUTPUT_DIR` | where `mcp-serve` tools write files (default: cwd) |
 
@@ -741,7 +762,7 @@ The player list (`paplay` -> `aplay` -> `ffplay` -> `mpg123` -> `play`
 | `venice contact-sheet DIR_OR_GLOB [--cols N] [--cell WxH] [--label] [...]` | tile images into one contact sheet (no API call) |
 | `venice chat MESSAGE [--system S] [--model M] [--web-search on] [...]` | one-shot chat completion (OpenAI SDK) |
 | `venice chat [-i] [--resume FILE]` | interactive multi-turn REPL (conversation state, `/`-commands, transcripts) |
-| `venice embed [TEXT] [--from-file PATH] [--model M] [--dimensions N] [--json]` | text embeddings (OpenAI SDK) |
+| `venice embed [TEXT] [--from-file PATH] [--model M] [--dimensions N] [--json] [--embed-base-url URL --embed-model M]` | text embeddings (OpenAI SDK; alt/local backend) |
 | `venice mcp-serve` | run an MCP server (stdio) exposing venice tools (needs `[mcp]`) |
 | `venice config add\|list\|remove\|show` | manage the MCP server registry |
 | `venice config get\|set\|unset KEY [VALUE]` | manage default flag values |
