@@ -33,8 +33,16 @@ def import_openai(label: str):
     return openai
 
 
-def build_openai(module, client):
-    """Build an SDK client pointed at Venice, borrowing the lean client's auth."""
+def build_openai(module, client=None, *, base_url=None, api_key=None):
+    """Build an SDK client pointed at Venice, borrowing the lean client's auth.
+
+    When `base_url` is given (an alternate OpenAI-compatible backend, e.g. a
+    local embeddings server), use it and `api_key` directly instead of the
+    Venice client -- which may then be None. Local servers usually need no key,
+    so `api_key` falls back to a placeholder the SDK accepts.
+    """
+    if base_url is not None:
+        return module.OpenAI(api_key=api_key or "not-needed", base_url=base_url)
     return module.OpenAI(api_key=client.api_key, base_url=client.base_url)
 
 

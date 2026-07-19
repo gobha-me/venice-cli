@@ -12,6 +12,13 @@ ENV_API_KEY = "VENICE_API_KEY"
 ENV_BASE_URL = "VENICE_BASE_URL"
 DEFAULT_BASE_URL = "https://api.venice.ai/api/v1"
 
+# `venice embed` can target an alternate OpenAI-compatible embeddings endpoint
+# (e.g. a local llama.cpp/Ollama/TEI server). These mirror the Venice pair above
+# for that opt-in backend; the key is env-only (never config -- local servers
+# usually need none, and secrets don't belong in config.json).
+ENV_EMBED_BASE_URL = "VENICE_EMBED_BASE_URL"
+ENV_EMBED_API_KEY = "VENICE_EMBED_API_KEY"
+
 SFX_POLL_INTERVAL_SEC = 2.0
 SFX_POLL_MAX_WAIT_SEC = 300
 

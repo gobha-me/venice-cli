@@ -164,6 +164,21 @@ class TestBuildOpenAI(unittest.TestCase):
             stub.built, {"api_key": "k", "base_url": "https://api.example/v1"}
         )
 
+    def test_base_url_override_uses_given_key(self):
+        stub = _StubOpenAI()
+        # No lean client needed for an alternate OpenAI-compatible backend.
+        _openai.build_openai(stub, base_url="http://localhost:1234/v1", api_key="lk")
+        self.assertEqual(
+            stub.built, {"api_key": "lk", "base_url": "http://localhost:1234/v1"}
+        )
+
+    def test_base_url_override_without_key_uses_placeholder(self):
+        stub = _StubOpenAI()
+        _openai.build_openai(stub, base_url="http://localhost:1234/v1")
+        self.assertEqual(
+            stub.built, {"api_key": "not-needed", "base_url": "http://localhost:1234/v1"}
+        )
+
 
 class TestStatusToExit(unittest.TestCase):
 

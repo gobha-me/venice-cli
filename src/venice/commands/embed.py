@@ -13,9 +13,10 @@ response object (model, data, usage) instead.
 from __future__ import annotations
 
 import json
+import os
 import sys
 
-from .. import auth
+from .. import auth, config, userconfig
 from ..client import build_client_from_auth
 from . import _models, _openai
 
@@ -48,6 +49,27 @@ def register(subparsers) -> None:
         "-m",
         default=None,
         help="Embedding model id (default: the catalog's 'default'-trait model).",
+    )
+    p.add_argument(
+        "--embed-base-url",
+        dest="embed_base_url",
+        default=None,
+        metavar="URL",
+        help=(
+            "Target an alternate OpenAI-compatible embeddings endpoint (e.g. a "
+            "local llama.cpp/Ollama/TEI server) instead of Venice. Skips the "
+            "Venice catalog and needs no Venice key; also $VENICE_EMBED_BASE_URL."
+        ),
+    )
+    p.add_argument(
+        "--embed-model",
+        dest="embed_model",
+        default=None,
+        metavar="NAME",
+        help=(
+            "Model id for --embed-base-url (required with it; the alternate "
+            "server has its own catalog, so it is taken as given)."
+        ),
     )
     p.add_argument(
         "--dimensions",
@@ -116,29 +138,64 @@ def _build_kwargs(args, model: str, inputs) -> dict:
     return kwargs
 
 
-def _run(args) -> int:
-    inputs, rc = _resolve_inputs(args)
-    if rc is not None:
-        return rc
+def _resolve_backend(openai, args) -> tuple:
+    """Return (oai_client, model, exit_code). exit_code is None on success.
 
-    openai = _openai.import_openai("embed")
-    if openai is None:
-        return 2
+    When --embed-base-url is set, build the SDK client against that alternate
+    OpenAI-compatible endpoint and take --embed-model as given -- no Venice auth
+    or catalog. Otherwise use the Venice path (auth + free catalog GET that
+    validates --model or picks the 'default'-trait model).
+    """
+    if args.embed_base_url:
+        model = args.embed_model
+        if not model:
+            print(
+                "embed: --embed-model is required with --embed-base-url",
+                file=sys.stderr,
+            )
+            return None, None, 2
+        oai = _openai.build_openai(
+            openai,
+            base_url=args.embed_base_url,
+            api_key=os.environ.get(config.ENV_EMBED_API_KEY),
+        )
+        return oai, model, None
 
     try:
         client = build_client_from_auth()
     except auth.AuthError as e:
         print(str(e), file=sys.stderr)
-        return 2
+        return None, None, 2
 
     models = _models.catalog(client, "embedding")
     model, rc = _models.resolve_model(
         args.model, models, label="embed", noun="embedding model"
     )
     if rc is not None:
+        return None, None, rc
+
+    return _openai.build_openai(openai, client), model, None
+
+
+def _run(args) -> int:
+    inputs, rc = _resolve_inputs(args)
+    if rc is not None:
         return rc
 
-    oai = _openai.build_openai(openai, client)
+    # Backend flags follow CLI > env > config: layer env in before
+    # apply_defaults, which only fills a dest that is still None.
+    if args.embed_base_url is None:
+        args.embed_base_url = os.environ.get(config.ENV_EMBED_BASE_URL)
+    userconfig.apply_defaults(args, "embed")
+
+    openai = _openai.import_openai("embed")
+    if openai is None:
+        return 2
+
+    oai, model, rc = _resolve_backend(openai, args)
+    if rc is not None:
+        return rc
+
     kwargs = _build_kwargs(args, model, inputs)
 
     try:

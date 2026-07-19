@@ -20,9 +20,15 @@ def _args(**ov):
     base = dict(
         text=None, from_file=None, model=None,
         dimensions=None, encoding_format=None, json=False,
+        embed_base_url=None, embed_model=None,
     )
     base.update(ov)
     return argparse.Namespace(**base)
+
+
+def _clean_doc():
+    """A defaults-free config doc so apply_defaults is a no-op (hermetic)."""
+    return {"version": 1, "mcpServers": {}, "defaults": {}}
 
 
 # --- fake OpenAI embeddings response objects ---
@@ -90,12 +96,45 @@ class TestEmbed(unittest.TestCase):
         from venice.commands import embed
         fake, captured = _fake_openai(result)
         with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.userconfig.load_config", return_value=_clean_doc()), \
              mock.patch("venice.client.urllib.request.urlopen", _urlopen_ok()), \
              mock.patch("openai.OpenAI", return_value=fake), \
              mock.patch.object(sys, "stdout", stdout or io.StringIO()), \
              mock.patch.object(sys, "stderr", stderr or io.StringIO()):
             rc = embed._run(args)
         return rc, fake, captured
+
+    def _run_alt(self, args, result, *, extra_env=None, doc=None,
+                 stdout=None, stderr=None):
+        """Run the alternate-backend path. VENICE_API_KEY and the embed env
+        vars are stripped (extra_env re-adds what a case needs), so a passing
+        run proves no Venice key was required. `built` captures the OpenAI()
+        constructor kwargs; `urlopen` asserts the Venice catalog GET is skipped.
+        """
+        from venice.commands import embed
+        fake, captured = _fake_openai(result)
+        built = {}
+
+        def _ctor(**kwargs):
+            built.update(kwargs)
+            return fake
+
+        urlopen = mock.MagicMock()
+        env = {
+            k: v for k, v in os.environ.items()
+            if k not in ("VENICE_API_KEY", "VENICE_EMBED_BASE_URL",
+                         "VENICE_EMBED_API_KEY")
+        }
+        env.update(extra_env or {})
+        with mock.patch.dict(os.environ, env, clear=True), \
+             mock.patch("venice.userconfig.load_config",
+                        return_value=doc or _clean_doc()), \
+             mock.patch("venice.client.urllib.request.urlopen", urlopen), \
+             mock.patch("openai.OpenAI", side_effect=_ctor), \
+             mock.patch.object(sys, "stdout", stdout or io.StringIO()), \
+             mock.patch.object(sys, "stderr", stderr or io.StringIO()):
+            rc = embed._run(args)
+        return rc, built, captured, urlopen
 
     def test_single_text_ndjson(self):
         out = io.StringIO()
@@ -212,11 +251,86 @@ class TestEmbed(unittest.TestCase):
         from venice.commands import embed
         err = io.StringIO()
         with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.userconfig.load_config", return_value=_clean_doc()), \
              mock.patch.dict(sys.modules, {"openai": None}), \
              mock.patch.object(sys, "stderr", err):
             rc = embed._run(_args(text="hi"))
         self.assertEqual(rc, 2)
         self.assertIn("openai", err.getvalue())
+
+    # --- alternate / local OpenAI-compatible backend (#23) ---
+
+    def test_alt_backend_skips_catalog_and_needs_no_venice_key(self):
+        out = io.StringIO()
+        rc, built, captured, urlopen = self._run_alt(
+            _args(text="hi", embed_base_url="http://localhost:1234/v1",
+                  embed_model="local-embed"),
+            FakeEmbeddings([(0, [0.1, 0.2])]), stdout=out,
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.getvalue().strip(), "[0.1, 0.2]")
+        # SDK pointed at the alt endpoint, model taken as given...
+        self.assertEqual(built["base_url"], "http://localhost:1234/v1")
+        self.assertEqual(captured["model"], "local-embed")
+        # ...no key needed -> placeholder; and no Venice catalog GET happened.
+        self.assertEqual(built["api_key"], "not-needed")
+        self.assertEqual(urlopen.call_count, 0)
+
+    def test_alt_backend_requires_embed_model_exit_2(self):
+        err = io.StringIO()
+        rc, built, captured, urlopen = self._run_alt(
+            _args(text="hi", embed_base_url="http://localhost:1234/v1"),
+            FakeEmbeddings([(0, [1.0])]), stderr=err,
+        )
+        self.assertEqual(rc, 2)
+        self.assertIn("--embed-model is required", err.getvalue())
+        self.assertEqual(built, {})  # SDK never constructed
+        self.assertEqual(urlopen.call_count, 0)
+
+    def test_embed_base_url_from_env_selects_alt_path(self):
+        rc, built, captured, urlopen = self._run_alt(
+            _args(text="hi", embed_model="local-embed"),  # no CLI base url
+            FakeEmbeddings([(0, [1.0])]),
+            extra_env={"VENICE_EMBED_BASE_URL": "http://env-host/v1"},
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(built["base_url"], "http://env-host/v1")
+        self.assertEqual(urlopen.call_count, 0)
+
+    def test_embed_api_key_from_env_reaches_sdk(self):
+        rc, built, captured, urlopen = self._run_alt(
+            _args(text="hi", embed_base_url="http://localhost:1234/v1",
+                  embed_model="local-embed"),
+            FakeEmbeddings([(0, [1.0])]),
+            extra_env={"VENICE_EMBED_API_KEY": "local-test-key"},
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(built["api_key"], "local-test-key")
+
+    def test_cli_base_url_beats_env_and_config(self):
+        doc = {"version": 1, "mcpServers": {},
+               "defaults": {"embed": {"embed_base_url": "http://config-host/v1"}}}
+        rc, built, captured, urlopen = self._run_alt(
+            _args(text="hi", embed_base_url="http://cli-host/v1",
+                  embed_model="local-embed"),
+            FakeEmbeddings([(0, [1.0])]),
+            extra_env={"VENICE_EMBED_BASE_URL": "http://env-host/v1"},
+            doc=doc,
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(built["base_url"], "http://cli-host/v1")
+
+    def test_config_default_supplies_alt_backend(self):
+        doc = {"version": 1, "mcpServers": {}, "defaults": {"embed": {
+            "embed_base_url": "http://config-host/v1", "embed_model": "cfg-embed"}}}
+        rc, built, captured, urlopen = self._run_alt(
+            _args(text="hi"),  # nothing on CLI or env
+            FakeEmbeddings([(0, [1.0])]), doc=doc,
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(built["base_url"], "http://config-host/v1")
+        self.assertEqual(captured["model"], "cfg-embed")
+        self.assertEqual(urlopen.call_count, 0)
 
 
 if __name__ == "__main__":
