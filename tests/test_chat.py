@@ -559,6 +559,12 @@ class TestChatAgent(unittest.TestCase):
 
 # --- external MCP client wiring (#21) ---
 
+# A truthy stand-in for the `mcp` SDK module so wiring tests are independent of
+# whether the real SDK is installed (it isn't on Python 3.9). `import_mcp` is
+# patched to return this; the wiring never uses the module beyond a None check.
+_MCP_PRESENT = object()
+
+
 def _fake_tool(name, result, *, paid=False):
     from venice.commands import _agent
     return _agent.Tool(
@@ -585,7 +591,7 @@ class TestChatMcp(unittest.TestCase):
             "mcpServers": {"fs": {"command": "srv", "args": []}},
             "defaults": {}}
 
-    def _run_seq(self, args, results, *, cfg=None, attach=None,
+    def _run_seq(self, args, results, *, cfg=None, attach=None, mcp_probe=_MCP_PRESENT,
                  stdin_tty=None, stdout=None, stderr=None, urlopen=None):
         from venice.commands import chat
         fake, calls = _fake_openai_seq(results)
@@ -597,6 +603,9 @@ class TestChatMcp(unittest.TestCase):
             st.enter_context(mock.patch("venice.client.urllib.request.urlopen",
                                         urlopen or _urlopen_ok()))
             st.enter_context(mock.patch("openai.OpenAI", return_value=fake))
+            # SDK-independent: pretend the [mcp] extra is (or isn't) present.
+            st.enter_context(mock.patch("venice.commands._mcp.import_mcp",
+                                        return_value=mcp_probe))
             st.enter_context(mock.patch.object(sys, "stdout", stdout or io.StringIO()))
             st.enter_context(mock.patch.object(sys, "stderr", stderr or io.StringIO()))
             if attach is not None:
@@ -659,11 +668,10 @@ class TestChatMcp(unittest.TestCase):
 
     def test_missing_mcp_extra_exits_2(self):
         err = io.StringIO()
-        with mock.patch("venice.commands._mcp.import_mcp", return_value=None):
-            rc, fake, calls = self._run_seq(
-                _args(message="hi", mcp=["fs"], stream=False),
-                [FakeToolCompletion("unreached")], stderr=err,
-            )
+        rc, fake, calls = self._run_seq(
+            _args(message="hi", mcp=["fs"], stream=False),
+            [FakeToolCompletion("unreached")], stderr=err, mcp_probe=None,
+        )
         self.assertEqual(rc, 2)
         self.assertEqual(len(calls), 0)
 

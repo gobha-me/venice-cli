@@ -19,6 +19,7 @@ from tests.test_chat import (
     FakeChunk,
     FakeToolCompletion,
     _FnCall,
+    _MCP_PRESENT,
     _fake_attach_cm,
     _fake_openai_seq,
     _fake_tool,
@@ -30,11 +31,12 @@ _EMPTY_CFG = {"version": 1, "mcpServers": {}, "defaults": {}}
 
 
 def _run_repl(args, results, inputs, *, stdout=None, stderr=None,
-              urlopen=None, stdin=None, cfg=None, attach=None):
+              urlopen=None, stdin=None, cfg=None, attach=None, mcp_probe=_MCP_PRESENT):
     """Run the REPL: `results` are returned by successive create() calls,
     `inputs` are fed to input(). Returns (rc, fake_client, recorded_calls).
 
-    `cfg` overrides the (empty) config doc; `attach` patches the MCP client seam."""
+    `cfg` overrides the (empty) config doc; `attach` patches the MCP client seam;
+    `mcp_probe` is what `import_mcp` returns (SDK-independent, like test_chat)."""
     from venice.commands import chat
     fake, calls = _fake_openai_seq(results)
     with contextlib.ExitStack() as st:
@@ -44,6 +46,8 @@ def _run_repl(args, results, inputs, *, stdout=None, stderr=None,
         st.enter_context(mock.patch("venice.client.urllib.request.urlopen",
                                     urlopen or _urlopen_ok()))
         st.enter_context(mock.patch("openai.OpenAI", return_value=fake))
+        st.enter_context(mock.patch("venice.commands._mcp.import_mcp",
+                                    return_value=mcp_probe))
         st.enter_context(mock.patch("builtins.input", side_effect=inputs))
         st.enter_context(mock.patch.object(sys, "stdin", stdin or io.StringIO("")))
         st.enter_context(mock.patch.object(sys, "stdout", stdout or io.StringIO()))

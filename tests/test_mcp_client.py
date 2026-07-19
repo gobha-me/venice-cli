@@ -8,9 +8,9 @@ Three layers:
 - A real end-to-end `attach()` test spawns a tiny stdio MCP server subprocess; it is
   skipped unless the `mcp` SDK is importable (absent on Python 3.9).
 """
-import importlib
 import importlib.util
 import os
+import subprocess
 import sys
 import unittest
 from unittest import mock
@@ -128,17 +128,24 @@ class TestPureHelpers(unittest.TestCase):
 
 class TestImportClean(unittest.TestCase):
     def test_imports_without_the_mcp_sdk(self):
-        """A fresh import with `mcp` blocked must succeed -- proving no module-scope
-        `import mcp`. Guards the CI base-install purity assertion."""
-        saved = sys.modules.pop("venice.commands._mcp_client", None)
-        try:
-            with mock.patch.dict(sys.modules, {"mcp": None}):
-                mod = importlib.import_module("venice.commands._mcp_client")
-                self.assertTrue(hasattr(mod, "attach"))
-                self.assertTrue(hasattr(mod, "resolve_specs"))
-        finally:
-            if saved is not None:
-                sys.modules["venice.commands._mcp_client"] = saved
+        """A fresh interpreter with `mcp` unavailable must still import
+        `_mcp_client` -- proving no module-scope `import mcp` (guards the CI
+        base-install purity assertion). Runs in a subprocess so it never perturbs
+        this process's `sys.modules` for other tests."""
+        src = os.path.join(os.path.dirname(os.path.dirname(__file__)), "src")
+        code = (
+            "import sys; sys.modules['mcp'] = None;"
+            "import venice.commands._mcp_client as m;"
+            "assert hasattr(m, 'attach') and hasattr(m, 'resolve_specs');"
+            "print('import-clean-ok')"
+        )
+        proc = subprocess.run(
+            [sys.executable, "-c", code],
+            env={**os.environ, "PYTHONPATH": src},
+            capture_output=True, text=True,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("import-clean-ok", proc.stdout)
 
 
 @unittest.skipUnless(_HAS_MCP, "mcp SDK not installed (expected on Python 3.9)")
