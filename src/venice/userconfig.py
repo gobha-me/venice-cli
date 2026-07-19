@@ -184,6 +184,14 @@ def _as_bool(v):
     return bool(v)
 
 
+def _as_list(v):
+    """A config default that feeds an ``action="append"`` flag: pass a JSON list
+    through, wrap a bare string as a single-element list."""
+    if isinstance(v, list):
+        return [str(x) for x in v]
+    return [str(v)]
+
+
 # config key -> (argparse dest, coercer). Globals apply to any command that
 # declares the flag; a per-command section overrides them.
 _GLOBAL_MAP = {
@@ -201,6 +209,7 @@ _COMMAND_MAP = {
         "character": ("character", str),
         "tools": ("tools", _as_bool),
         "max_tool_calls": ("max_tool_calls", int),
+        "mcp": ("mcp", _as_list),
     },
     "embed": {
         "model": ("model", str),

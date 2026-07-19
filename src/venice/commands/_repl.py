@@ -23,6 +23,7 @@ content; it never echoes the API key. A saved transcript holds only the
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import sys
 from pathlib import Path
@@ -236,39 +237,48 @@ def run(args, oai, openai, client, models, model, initial=None) -> int:
 
     gen_kwargs = chat._gen_kwargs(args)
 
-    tools_on = bool(getattr(args, "tools", None))
-    tools = None
-    if tools_on:
-        tools, rc = chat._tools_for(args, client, models, model)
-        if tools is None:
-            if rc is not None:
-                return rc      # invalid --tool subset
-            tools_on = False   # model lacks function calling -> plain chat
-    state = {"model": model, "tools": tools, "tools_on": tools_on}
+    # `--mcp NAME` (like `--tools`) turns the REPL into an agent session. The MCP
+    # servers stay attached for the whole session via the ExitStack, torn down on
+    # exit. `_tools_session` also builds the built-in tools + runs the capability
+    # guard, mirroring the one-shot path.
+    tools_on = bool(getattr(args, "tools", None)) or bool(
+        chat._requested_mcp_servers(args)
+    )
+    with contextlib.ExitStack() as stack:
+        tools = None
+        if tools_on:
+            tools, rc = stack.enter_context(
+                chat._tools_session(args, client, models, model)
+            )
+            if tools is None:
+                if rc is not None:
+                    return rc      # invalid --tool subset / MCP attach error
+                tools_on = False   # model lacks function calling -> plain chat
+        state = {"model": model, "tools": tools, "tools_on": tools_on}
 
-    _banner(model, tools_on, getattr(args, "resume", None), messages)
+        _banner(model, tools_on, getattr(args, "resume", None), messages)
 
-    # An explicit message (e.g. `venice chat -i "hello"`) becomes the first turn.
-    if initial:
-        _do_turn(oai, openai, chat, initial, messages, gen_kwargs, state, args)
+        # An explicit message (`venice chat -i "hello"`) becomes the first turn.
+        if initial:
+            _do_turn(oai, openai, chat, initial, messages, gen_kwargs, state, args)
 
-    while True:
-        try:
-            line = input(_PROMPT)
-        except EOFError:
-            print(file=sys.stderr)  # newline after ^D
-            return 0
-        except KeyboardInterrupt:
-            print(file=sys.stderr)  # ^C at the prompt: discard the line, re-prompt
-            continue
-        line = line.strip()
-        if not line:
-            continue
-        if line.startswith("/"):
-            if _dispatch_slash(line, messages, state, args, models) == "exit":
+        while True:
+            try:
+                line = input(_PROMPT)
+            except EOFError:
+                print(file=sys.stderr)  # newline after ^D
                 return 0
-            continue
-        _do_turn(oai, openai, chat, line, messages, gen_kwargs, state, args)
+            except KeyboardInterrupt:
+                print(file=sys.stderr)  # ^C at the prompt: discard the line, re-prompt
+                continue
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("/"):
+                if _dispatch_slash(line, messages, state, args, models) == "exit":
+                    return 0
+                continue
+            _do_turn(oai, openai, chat, line, messages, gen_kwargs, state, args)
 
 
 def _banner(model, tools_on, resume, messages) -> None:

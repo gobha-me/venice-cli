@@ -11,6 +11,7 @@ mirrors the guard pattern in `venice music`.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import sys
 from pathlib import Path
@@ -18,7 +19,7 @@ from typing import Optional
 
 from .. import auth, userconfig
 from ..client import build_client_from_auth
-from . import _agent, _models, _openai, _repl
+from . import _agent, _mcp, _mcp_client, _models, _openai, _repl
 
 
 def register(subparsers) -> None:
@@ -135,9 +136,24 @@ def register(subparsers) -> None:
         "$VENICE_MCP_MAX_SPEND). Over-cap calls prompt on a TTY.",
     )
     ag.add_argument("--yes", "-y", action="store_true", default=None,
-                    help="Auto-approve every paid tool call (skips the cap).")
+                    help="Auto-approve every paid tool call and every side-effecting "
+                    "external MCP tool (skips the confirm gate).")
     ag.add_argument("--output", "-o", type=Path, default=None,
                     help="Directory tools write generated files to. Default: cwd.")
+
+    # --- External MCP servers (#21) ---
+    mc = p.add_argument_group("External MCP tools")
+    mc.add_argument(
+        "--mcp", action="append", dest="mcp", default=None, metavar="NAME",
+        help="Attach a registered MCP server's tools (repeatable). Register servers "
+        'first with `venice config add`. Implies the agent loop. Needs the [mcp] '
+        'extra: pip install "venice-cli[mcp]". Side-effecting (non-read-only) tools '
+        "prompt for confirmation unless --yes.",
+    )
+    mc.add_argument(
+        "--no-mcp", action="store_true", dest="no_mcp", default=False,
+        help="Attach no MCP servers, overriding any configured defaults.chat.mcp.",
+    )
     p.set_defaults(handler=_run)
 
 
@@ -279,7 +295,7 @@ def _run(args) -> int:
 
     kwargs = _build_kwargs(args, model, message)
 
-    if getattr(args, "tools", None):
+    if getattr(args, "tools", None) or _requested_mcp_servers(args):
         rc = _run_agent(args, oai, openai, client, models, model, kwargs)
         if rc is not None:
             return rc
@@ -329,28 +345,87 @@ def _tools_for(args, client, models, model):
     return tools, None
 
 
+def _requested_mcp_servers(args) -> list:
+    """Server names to attach: none if --no-mcp, else --mcp NAMEs (or the config
+    default that apply_defaults already filled onto args.mcp)."""
+    if getattr(args, "no_mcp", False):
+        return []
+    return list(getattr(args, "mcp", None) or [])
+
+
+@contextlib.contextmanager
+def _tools_session(args, client, models, model):
+    """Yield ``(tools, rc)`` = built-in tools plus any external MCP tools, holding
+    the MCP servers open for the whole ``with`` block. Shared by the one-shot agent
+    path and the REPL so wiring MCP once covers both.
+
+    ``(tools, None)`` on success; ``(None, None)`` to degrade to plain chat (model
+    can't do function calling); ``(None, 2)`` for a bad ``--tool`` subset, a missing
+    ``[mcp]`` extra, or an unknown ``--mcp`` server. MCP is never opened on the
+    degrade path.
+    """
+    tools, rc = _tools_for(args, client, models, model)
+    if tools is None:
+        yield None, rc
+        return
+
+    requested = _requested_mcp_servers(args)
+    if not requested:
+        yield tools, None  # base path untouched -- no probe, no [mcp] extra needed
+        return
+
+    mcp = _mcp.import_mcp("chat --mcp")
+    if mcp is None:
+        yield None, 2
+        return
+    try:
+        specs = _mcp_client.resolve_specs(requested, userconfig.load_config())
+    except ValueError as e:
+        print(f"chat: {e}", file=sys.stderr)
+        yield None, 2
+        return
+
+    # Enter attach() via an ExitStack so setup failure -> rc 2 while a failure in
+    # the with-body (run_loop) still propagates and still tears the servers down.
+    stack = contextlib.ExitStack()
+    try:
+        remote = stack.enter_context(_mcp_client.attach(specs))
+    except Exception as e:  # noqa: BLE001 - a server that won't start
+        print(f"chat: could not attach MCP server(s): {e}", file=sys.stderr)
+        yield None, 2
+        return
+    with stack:
+        if remote:
+            print(
+                f"chat: attached {len(remote)} MCP tool(s) from "
+                f"{', '.join(n for n, _ in specs)}",
+                file=sys.stderr,
+            )
+        yield tools + remote, None
+
+
 def _run_agent(args, oai, openai, client, models, model, kwargs) -> Optional[int]:
     """Run the tool-calling loop. Returns an exit code, or None to signal the
     caller to fall through to plain (non-tool) chat because the model can't do
     function calling."""
-    tools, rc = _tools_for(args, client, models, model)
-    if tools is None:
-        return rc  # None -> degrade to plain chat; 2 -> invalid --tool subset
+    with _tools_session(args, client, models, model) as (tools, rc):
+        if tools is None:
+            return rc  # None -> degrade to plain chat; 2 -> invalid subset / MCP error
 
-    if args.stream and not args.json:
-        print("chat: --tools implies non-streamed output for now", file=sys.stderr)
+        if args.stream and not args.json:
+            print("chat: tools imply non-streamed output for now", file=sys.stderr)
 
-    messages = kwargs.pop("messages")
-    kwargs.pop("model", None)
-    try:
-        return _agent.run_loop(
-            oai, model, messages, kwargs, tools,
-            max_tool_calls=(args.max_tool_calls or 8),
-            yes=bool(args.yes),
-            json_out=args.json,
-        )
-    except openai.OpenAIError as e:
-        return _openai.status_to_exit(openai, e, "chat")
+        messages = kwargs.pop("messages")
+        kwargs.pop("model", None)
+        try:
+            return _agent.run_loop(
+                oai, model, messages, kwargs, tools,
+                max_tool_calls=(args.max_tool_calls or 8),
+                yes=bool(args.yes),
+                json_out=args.json,
+            )
+        except openai.OpenAIError as e:
+            return _openai.status_to_exit(openai, e, "chat")
 
 
 def _run_once(oai, kwargs: dict, as_json: bool) -> int:

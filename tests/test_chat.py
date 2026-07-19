@@ -5,6 +5,7 @@ Mocks the OpenAI client (chat completions) and the free /models catalog GET
 (pip install -e ".[openai]").
 """
 import argparse
+import contextlib
 import copy
 import io
 import json
@@ -26,6 +27,8 @@ def _args(**ov):
         # --- agent / tools (#15) ---
         tools=None, tool=None, max_tool_calls=None,
         max_spend=None, yes=None, output=None,
+        # --- external MCP client (#21) ---
+        mcp=None, no_mcp=False,
         # --- interactive / REPL (#22) ---
         interactive=False, resume=None,
     )
@@ -552,6 +555,172 @@ class TestChatAgent(unittest.TestCase):
         )
         self.assertEqual(rc, 0)
         self.assertNotIn("tools", calls[0])
+
+
+# --- external MCP client wiring (#21) ---
+
+def _fake_tool(name, result, *, paid=False):
+    from venice.commands import _agent
+    return _agent.Tool(
+        name=name, description="fake mcp tool",
+        parameters={"type": "object", "properties": {}},
+        invoke=lambda arguments, *, confirm=False: result, paid=paid,
+    )
+
+
+def _fake_attach_cm(tools):
+    """A stand-in for `_mcp_client.attach`: a context manager yielding `tools`."""
+    @contextlib.contextmanager
+    def _attach(specs, **kwargs):
+        _attach.specs = specs
+        yield tools
+    _attach.specs = None
+    return _attach
+
+
+class TestChatMcp(unittest.TestCase):
+    """`venice chat --mcp NAME` attaches external tools behind the agent loop."""
+
+    _CFG = {"version": 1,
+            "mcpServers": {"fs": {"command": "srv", "args": []}},
+            "defaults": {}}
+
+    def _run_seq(self, args, results, *, cfg=None, attach=None,
+                 stdin_tty=None, stdout=None, stderr=None, urlopen=None):
+        from venice.commands import chat
+        fake, calls = _fake_openai_seq(results)
+        cfg = self._CFG if cfg is None else cfg
+        with contextlib.ExitStack() as st:
+            st.enter_context(mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}))
+            st.enter_context(mock.patch("venice.userconfig.load_config",
+                                        lambda *a, **k: cfg))
+            st.enter_context(mock.patch("venice.client.urllib.request.urlopen",
+                                        urlopen or _urlopen_ok()))
+            st.enter_context(mock.patch("openai.OpenAI", return_value=fake))
+            st.enter_context(mock.patch.object(sys, "stdout", stdout or io.StringIO()))
+            st.enter_context(mock.patch.object(sys, "stderr", stderr or io.StringIO()))
+            if attach is not None:
+                st.enter_context(mock.patch("venice.commands._mcp_client.attach", attach))
+            if stdin_tty is not None:
+                fs = mock.MagicMock()
+                fs.isatty.return_value = stdin_tty
+                st.enter_context(mock.patch.object(sys, "stdin", fs))
+            rc = chat._run(args)
+        return rc, fake, calls
+
+    def _tool_names(self, call):
+        return {t["function"]["name"] for t in call["tools"]}
+
+    def test_mcp_tools_concatenated_and_dispatched(self):
+        # --mcp alone (no --tools) still enters the agent loop.
+        seq = [
+            FakeToolCompletion(tool_calls=[
+                _FnCall("c1", "fs__read", '{"path": "/etc/hosts"}')]),
+            FakeToolCompletion("read it"),
+        ]
+        attach = _fake_attach_cm([_fake_tool("fs__read", {"status": "ok", "content": "127.0.0.1"})])
+        out = io.StringIO()
+        rc, fake, calls = self._run_seq(
+            _args(message="hi", mcp=["fs"], stream=False), seq, attach=attach, stdout=out
+        )
+        self.assertEqual(rc, 0)
+        names = self._tool_names(calls[0])
+        self.assertIn("fs__read", names)          # remote tool advertised
+        self.assertIn("venice_image", names)      # alongside the built-ins
+        self.assertEqual(len(names), 9)           # 8 built-ins + 1 remote
+        self.assertEqual(attach.specs, [("fs", {"command": "srv", "args": []})])
+        tool_msgs = [m for m in calls[1]["messages"] if m.get("role") == "tool"]
+        self.assertIn("127.0.0.1", tool_msgs[0]["content"])
+        self.assertEqual(out.getvalue().strip(), "read it")
+
+    def test_no_mcp_disables_attach(self):
+        attach = mock.MagicMock()
+        rc, fake, calls = self._run_seq(
+            _args(message="hi", tools=True, mcp=["fs"], no_mcp=True, stream=False),
+            [FakeToolCompletion("plain agent")], attach=attach,
+        )
+        self.assertEqual(rc, 0)
+        attach.assert_not_called()
+        self.assertEqual(len(self._tool_names(calls[0])), 8)  # built-ins only
+
+    def test_unknown_mcp_server_exits_2_before_model(self):
+        attach = mock.MagicMock()
+        err = io.StringIO()
+        rc, fake, calls = self._run_seq(
+            _args(message="hi", mcp=["ghost"], stream=False),
+            [FakeToolCompletion("unreached")],
+            cfg={"version": 1, "mcpServers": {}, "defaults": {}},
+            attach=attach, stderr=err,
+        )
+        self.assertEqual(rc, 2)
+        self.assertEqual(len(calls), 0)       # never reached the model
+        attach.assert_not_called()
+        self.assertIn("unknown MCP server", err.getvalue())
+
+    def test_missing_mcp_extra_exits_2(self):
+        err = io.StringIO()
+        with mock.patch("venice.commands._mcp.import_mcp", return_value=None):
+            rc, fake, calls = self._run_seq(
+                _args(message="hi", mcp=["fs"], stream=False),
+                [FakeToolCompletion("unreached")], stderr=err,
+            )
+        self.assertEqual(rc, 2)
+        self.assertEqual(len(calls), 0)
+
+    def test_side_effecting_remote_tool_gated_non_tty(self):
+        def se_invoke(arguments, *, confirm=False):
+            return ({"status": "ok", "content": "wrote"} if confirm
+                    else {"status": "confirmation_required", "message": "gate"})
+        from venice.commands import _agent
+        tool = _agent.Tool(name="fs__write", description="w",
+                           parameters={"type": "object", "properties": {}},
+                           invoke=se_invoke, paid=True)
+        seq = [
+            FakeToolCompletion(tool_calls=[
+                _FnCall("c1", "fs__write", '{"path": "/x", "data": "y"}')]),
+            FakeToolCompletion("declined, adapting"),
+        ]
+        rc, fake, calls = self._run_seq(
+            _args(message="hi", mcp=["fs"], stream=False), seq,
+            attach=_fake_attach_cm([tool]), stdin_tty=False,
+        )
+        self.assertEqual(rc, 0)
+        tool_msgs = [m for m in calls[1]["messages"] if m.get("role") == "tool"]
+        self.assertIn("confirmation_required", tool_msgs[0]["content"])
+
+    def test_side_effecting_remote_tool_runs_under_yes(self):
+        seen = {}
+        def se_invoke(arguments, *, confirm=False):
+            seen["confirm"] = confirm
+            return {"status": "ok", "content": "wrote"}
+        from venice.commands import _agent
+        tool = _agent.Tool(name="fs__write", description="w",
+                           parameters={"type": "object", "properties": {}},
+                           invoke=se_invoke, paid=True)
+        seq = [
+            FakeToolCompletion(tool_calls=[
+                _FnCall("c1", "fs__write", '{"path": "/x"}')]),
+            FakeToolCompletion("done"),
+        ]
+        rc, fake, calls = self._run_seq(
+            _args(message="hi", mcp=["fs"], yes=True, stream=False), seq,
+            attach=_fake_attach_cm([tool]),
+        )
+        self.assertEqual(rc, 0)
+        self.assertTrue(seen["confirm"])  # --yes -> confirm=True bypasses the gate
+
+    def test_config_default_mcp_attaches(self):
+        cfg = {"version": 1,
+               "mcpServers": {"fs": {"command": "srv"}},
+               "defaults": {"chat": {"mcp": ["fs"]}}}
+        attach = _fake_attach_cm([_fake_tool("fs__read", {"status": "ok", "content": "x"})])
+        rc, fake, calls = self._run_seq(
+            _args(message="hi", tools=True, stream=False),  # no --mcp on CLI
+            [FakeToolCompletion("hi")], cfg=cfg, attach=attach,
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("fs__read", self._tool_names(calls[0]))
+        self.assertEqual(attach.specs, [("fs", {"command": "srv"})])
 
 
 if __name__ == "__main__":

@@ -38,24 +38,25 @@ keeps the CLI out of your system site-packages.
 
 The base install pulls in **nothing** — every command is stdlib-only except
 `venice chat` and `venice embed`, which use the official OpenAI SDK against
-Venice's OpenAI-compatible API, and `venice mcp-serve`, which uses the MCP SDK.
-Those SDKs are lazy-imported, so they ship as optional extras rather than hard
-requirements: if you only generate images or audio, you don't pay for them.
-Without the relevant extra, that command exits 2 with a hint; every other
-command works normally.
+Venice's OpenAI-compatible API, and `venice mcp-serve` / `venice chat --mcp`,
+which use the MCP SDK. Those SDKs are lazy-imported, so they ship as optional
+extras rather than hard requirements: if you only generate images or audio, you
+don't pay for them. Without the relevant extra, that command exits 2 with a hint;
+every other command works normally.
 
 Extras are per-feature and additive, so the pattern holds as the CLI grows:
 
 | Install | Enables |
 | --- | --- |
-| `venice-cli` | everything except chat/embed and the MCP server |
+| `venice-cli` | everything except chat/embed and the MCP commands |
 | `venice-cli[openai]` | `venice chat`, `venice embed` |
-| `venice-cli[mcp]` | `venice mcp-serve` (MCP stdio server; needs Python ≥ 3.10) |
+| `venice-cli[mcp]` | `venice mcp-serve` (MCP server) and `venice chat --mcp` (MCP client); needs Python ≥ 3.10 |
 | `venice-cli[all]` | every extra (`openai` + `mcp`) |
 
 The `[mcp]` extra pulls in the [`mcp`](https://pypi.org/project/mcp/) SDK, which
 requires Python ≥ 3.10. The base CLI still supports 3.9 — on 3.9 the extra
-resolves to nothing and only `venice mcp-serve` is unavailable.
+resolves to nothing and only `venice mcp-serve` and `venice chat --mcp` are
+unavailable.
 
 Some commands shell out to external binaries when present: `venice master` and
 `venice contact-sheet` use `ffmpeg`/`ffprobe` (and ImageMagick's `montage` if
@@ -545,8 +546,36 @@ Details and safety:
 | `--tool NAME` | restrict to this tool (repeatable; default: all of them) |
 | `--max-tool-calls N` | cap tool invocations before forcing an answer (default 8) |
 | `--max-spend USD` | per-call auto-approve cap for paid tools |
-| `--yes` / `-y` | auto-approve every paid tool call |
+| `--yes` / `-y` | auto-approve every paid tool call and side-effecting MCP tool |
 | `--output DIR` / `-o` | directory for generated files |
+| `--mcp NAME` | attach a registered external MCP server's tools (repeatable) |
+| `--no-mcp` | attach no MCP servers (overrides a configured default) |
+
+#### External MCP tools (`--mcp`)
+
+`--mcp NAME` attaches the tools of an external [MCP](https://modelcontextprotocol.io)
+server (filesystem, git, shell, ...) **alongside** the built-in venice tools, so one
+agent can drive both. Register servers first with
+[`venice config add`](#config) (stdio or http/sse), then name them:
+
+```sh
+venice config add fs --command npx --arg -y --arg @modelcontextprotocol/server-filesystem --arg /work
+venice chat --mcp fs "Summarize the TODOs across the source files."
+```
+
+- **Needs the `[mcp]` extra** (`pip install "venice-cli[mcp]"`, Python ≥ 3.10).
+  `--mcp` implies the agent loop (no separate `--tools` needed); it still requires a
+  function-calling model and degrades to plain chat otherwise.
+- Remote tools are advertised as `server__tool` (namespaced to avoid collisions).
+- **Side-effecting tools are gated.** A remote tool that isn't annotated read-only
+  prompts for confirmation on a TTY (or feeds the request back to the model
+  non-interactively) before it runs; read-only tools run freely. `--yes` bypasses
+  the gate. This rides the same confirm rail as paid built-in tools.
+- Multiple `--mcp` flags attach multiple servers; `--no-mcp` overrides a
+  `defaults.chat.mcp` config default. Attach timeouts: `$VENICE_MCP_CONNECT_TIMEOUT`,
+  `$VENICE_MCP_CALL_TIMEOUT`.
+- Works the same in [interactive mode](#interactive-mode) — servers stay attached for
+  the whole session and are torn down on exit.
 
 ## Embeddings
 
@@ -699,12 +728,16 @@ way (`$VENICE_API_KEY` or the credentials file) and is never echoed.
 Only stdout carries the JSON-RPC protocol; the server's own diagnostics go to
 stderr. Video and image-edit tools are not exposed yet (tracked separately).
 
+The reverse direction — venice as an MCP **client**, calling *other* servers'
+tools inside `venice chat` — is [`venice chat --mcp`](#external-mcp-tools---mcp).
+
 ## Config
 
 `venice config` manages a persistent, non-secret config file at
 `~/.config/venice/config.json` (created mode 0600). It holds two things: an
-**MCP server registry** (for a future `venice chat --mcp` host) and **default
-flag values** so you stop repeating `--model` / `-o` / `--yes` / `--max-spend`.
+**MCP server registry** (attached by [`venice chat --mcp`](#external-mcp-tools---mcp))
+and **default flag values** so you stop repeating `--model` / `-o` / `--yes` /
+`--max-spend`.
 
 ```sh
 # MCP server registry (like `claude mcp add`)
