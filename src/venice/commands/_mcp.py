@@ -25,7 +25,7 @@ from types import SimpleNamespace
 from typing import List, Optional
 
 from ..client import VeniceAPIError
-from . import _audio, _models, _openai, _queue, _shared
+from . import _audio, _index, _models, _openai, _queue, _shared
 from . import bg_remove as _bg
 from . import chat as _chat
 from . import image as _image
@@ -565,3 +565,25 @@ def chat_tool(
     if usage:
         out["usage"] = usage
     return out
+
+
+def search_tool(client, query, *, k: int = 8) -> dict:
+    """Semantic search over the project's local `.venice` index (issue #24).
+
+    Cheap (one query embedding + an in-process cosine scan), so not spend-gated.
+    Discovers the index by walking up from the process cwd; returns the top-`k`
+    chunks as ``{path, start, end, score, preview}``. Never builds an index
+    (indexing is slow/paid) -- if none exists it returns an error telling the
+    caller to run `venice index` first. Requires the `[openai]` extra for the
+    query embedding.
+    """
+    if not query or not str(query).strip():
+        return _err("search: query is required")
+    store_dir = _index.discover_store(None)
+    if store_dir is None:
+        return _err("search: no .venice index found; run `venice index` first")
+    try:
+        results = _index.search_index(store_dir, str(query), k=int(k or 8))
+    except _index.IndexingError as e:
+        return _err(str(e) or f"search: failed (exit {e.exit_code})")
+    return {"status": "ok", "results": results, "count": len(results)}

@@ -172,6 +172,14 @@ _CHAT_SCHEMA = _obj(
     required=["message"],
 )
 
+_SEARCH_SCHEMA = _obj(
+    {
+        "query": _p("string", "Natural-language description of the code/text to find."),
+        "k": _p("integer", "Number of results to return (default 8)."),
+    },
+    required=["query"],
+)
+
 # (tool name, `_mcp` impl attribute, description, schema, paid). The impl is
 # stored by NAME and resolved via getattr(_mcp, ...) at builtin_tools() time, so a
 # single source of truth wins and tests can patch `_mcp.<impl>`.
@@ -233,6 +241,17 @@ _BUILTINS = [
         "Delegate a one-shot sub-completion to a Venice text model (optionally a "
         "different model or character) and return its reply text. Not spend-gated.",
         _CHAT_SCHEMA,
+        False,
+    ),
+    (
+        "project_search",
+        "search_tool",
+        "Semantic search over the current project's local .venice index (built by "
+        "`venice index`) for the chunks most relevant to a natural-language query. "
+        "Returns file paths with line ranges and a short preview -- use it to locate "
+        "code by meaning before reading files. Read-only; not spend-gated. Errors if "
+        "no index exists yet.",
+        _SEARCH_SCHEMA,
         False,
     ),
 ]

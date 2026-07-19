@@ -17,6 +17,10 @@ venice-sfx-*.wav
 venice-sfx-*.flac
 venice-sfx-*.bin
 
+# Semantic-search index (machine-generated vectors; `venice index` also drops a
+# self-ignoring .venice/.gitignore in any project it indexes)
+.venice/
+
 # Editor / IDE
 .vscode/
 .idea/

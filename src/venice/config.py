@@ -19,6 +19,16 @@ DEFAULT_BASE_URL = "https://api.venice.ai/api/v1"
 ENV_EMBED_BASE_URL = "VENICE_EMBED_BASE_URL"
 ENV_EMBED_API_KEY = "VENICE_EMBED_API_KEY"
 
+# `venice index`/`venice search` keep a semantic-search store *project-local*
+# (unlike everything above, which is user-global under ~/.config/venice). The
+# store lives at <project>/.venice/index/ -- resolved against a project root at
+# runtime so this module stays side-effect-free (no cwd binding at import).
+# $VENICE_INDEX_DIR overrides the store location for `search`.
+INDEX_DIRNAME = ".venice"
+INDEX_SUBDIR = "index"
+INDEX_FILENAME = "index.json"
+ENV_INDEX_DIR = "VENICE_INDEX_DIR"
+
 SFX_POLL_INTERVAL_SEC = 2.0
 SFX_POLL_MAX_WAIT_SEC = 300
 

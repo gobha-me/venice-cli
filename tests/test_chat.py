@@ -502,7 +502,8 @@ class TestChatAgent(unittest.TestCase):
                     f"{t['function']['name']} leaks control kwarg {banned}",
                 )
         names = {t["function"]["name"] for t in tools}
-        self.assertEqual(len(names), 7)  # all seven built-ins advertised
+        self.assertEqual(len(names), 8)  # seven media/chat tools + project_search
+        self.assertIn("project_search", names)
 
     def test_tool_error_surfaced_not_fatal(self):
         seq = [

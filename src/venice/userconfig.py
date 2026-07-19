@@ -209,6 +209,18 @@ _COMMAND_MAP = {
         "embed_base_url": ("embed_base_url", str),
         "embed_model": ("embed_model", str),
     },
+    "index": {
+        "model": ("model", str),
+        "dimensions": ("dimensions", int),
+        "embed_base_url": ("embed_base_url", str),
+        "embed_model": ("embed_model", str),
+        "batch": ("batch", int),
+        "chunk_lines": ("chunk_lines", int),
+        "chunk_overlap": ("chunk_overlap", int),
+    },
+    "search": {
+        "top_k": ("top_k", int),
+    },
 }
 
 
