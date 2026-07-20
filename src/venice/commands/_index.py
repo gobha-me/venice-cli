@@ -315,6 +315,46 @@ def _resolves_inside(path: Path, root: Path) -> bool:
 
 
 # --------------------------------------------------------------------------- #
+# Public path-safety API (reused by the coding toolset, commands._code)
+#
+# These bless the security-critical helpers above as a public API so the coding
+# tools depend on a stable name rather than a private one -- a single source of
+# truth for "is this path inside the project?" and "is this file secret-shaped?".
+# --------------------------------------------------------------------------- #
+def resolves_inside(path: Path, root: Path) -> bool:
+    """True if `path` (symlinks resolved) is `root` or a descendant of it.
+
+    The sandbox primitive for the coding tools. `root` must itself be realpath-
+    resolved by the caller, or a symlinked root yields false negatives.
+    """
+    return _resolves_inside(path, root)
+
+
+def is_secret_name(name: str) -> bool:
+    """True if a *basename* is credential/secret-shaped (the index denylist)."""
+    return _is_secret_name(name)
+
+
+def is_secret_path(rel_posix: str) -> bool:
+    """True if any segment of a relative POSIX path is secret-shaped.
+
+    Broader than :func:`is_secret_name` (which is basename-only): catches a
+    nested secret like ``config/secrets/app.key`` that a coding tool might be
+    asked to read or write directly.
+    """
+    return any(is_secret_name(seg) for seg in rel_posix.split("/") if seg)
+
+
+def is_protected_dir_path(rel_posix: str) -> bool:
+    """True if any segment is a denylisted dir (``.git``/``.venice``/vendor/...).
+
+    Lets the coding tools refuse to read or write repo internals and the local
+    index, mirroring what :func:`walk_files` prunes during a tree walk.
+    """
+    return any(seg in _DIR_DENYLIST for seg in rel_posix.split("/") if seg)
+
+
+# --------------------------------------------------------------------------- #
 # Reading + chunking
 # --------------------------------------------------------------------------- #
 def read_text(path: Path) -> Tuple[Optional[bytes], Optional[str]]:
