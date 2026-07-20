@@ -171,8 +171,9 @@ def register(subparsers) -> None:
     grp.add_argument(
         "--assets", action="store_true", dest="assets", default=None,
         help="Also expose the in-process asset-generation tools (venice_image, "
-        "image_edit, sfx, music, tts, upscale, bg_remove) so the agent can create "
-        "images/audio in the project. Paid: each confirms per call unless --auto.",
+        "image_edit, sfx, music, tts, upscale, bg_remove, video) so the agent can "
+        "create images/audio/video in the project. Paid: each confirms per call "
+        "unless --auto.",
     )
 
     it = p.add_argument_group("Interactive")

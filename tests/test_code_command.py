@@ -111,6 +111,7 @@ class TestCodeCommand(unittest.TestCase):
         names = self._exec_tool_names(calls)
         self.assertIn("venice_image", names)
         self.assertIn("venice_image_edit", names)
+        self.assertIn("venice_video", names)
         self.assertNotIn("venice_chat", names)   # excluded by design
 
     def test_assets_absent_by_default(self):
@@ -145,6 +146,27 @@ class TestCodeCommand(unittest.TestCase):
         self.assertTrue(stub.call_args.kwargs.get("confirm"))
         # the model supplied only prompt; control kwargs are injected, not from args
         self.assertEqual(stub.call_args.kwargs.get("prompt"), "a hero sprite")
+
+    def test_video_asset_dispatches_with_confirm_under_auto(self):
+        seq = [
+            FakeToolCompletion("plan"),
+            FakeToolCompletion(tool_calls=[
+                _FnCall("c1", "venice_video",
+                        json.dumps({"prompt": "a koi pond at dawn"}))]),
+            FakeToolCompletion("made the clip"),
+            FakeToolCompletion("ACCEPTANCE: PASS"),
+        ]
+        with mock.patch(
+            "venice.commands._mcp.video_tool",
+            return_value={"status": "ok", "path": "/x.mp4", "bytes": 1},
+        ) as stub:
+            rc, calls = self._run(
+                _code_args(task="film", root=self.root, auto=True, assets=True), seq)
+        self.assertEqual(rc, 0)
+        self.assertEqual(stub.call_count, 1)
+        # --auto -> confirm=True bypasses the spend gate
+        self.assertTrue(stub.call_args.kwargs.get("confirm"))
+        self.assertEqual(stub.call_args.kwargs.get("prompt"), "a koi pond at dawn")
 
     def test_acceptance_fail_returns_1(self):
         seq = [

@@ -18,7 +18,7 @@ def _tools(root, **kw):
 
 _ASSET_NAMES = {
     "venice_image", "venice_image_edit", "venice_sfx", "venice_music",
-    "venice_tts", "venice_upscale", "venice_bg_remove",
+    "venice_tts", "venice_upscale", "venice_bg_remove", "venice_video",
 }
 
 
@@ -242,9 +242,9 @@ class TestCodeFactory(unittest.TestCase):
     def test_assets_present_when_enabled(self):
         names = {t.name for t in _code.code_tools("/tmp", client=object(),
                                                   assets=True)}
-        self.assertTrue(_ASSET_NAMES <= names)   # all 7 folded in
+        self.assertTrue(_ASSET_NAMES <= names)   # all 8 folded in
         self.assertNotIn("venice_chat", names)   # excluded by design
-        self.assertNotIn("venice_video", names)  # deferred
+        self.assertIn("venice_video", names)
 
     def test_asset_tools_are_paid(self):
         by = {t.name: t for t in _code.code_tools("/tmp", client=object(),
