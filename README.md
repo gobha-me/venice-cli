@@ -14,7 +14,7 @@ pip install venice-cli
 > [venice.ai](https://venice.ai).
 
 Ships working `venice login`, `venice sfx` (sound-effect generation),
-`venice music` (long-form ambience/music), `venice video` (text-to-video),
+`venice music` (long-form ambience/music), `venice video` (text/image-to-video),
 `venice tts` (text-to-speech), `venice image` (image generation),
 `venice upscale` / `venice bg-remove` (image post-processing),
 `venice master` (audio mastering), `venice contact-sheet` (montage grids of
@@ -414,12 +414,13 @@ is required only for `--loop`.
 
 ## Video
 
-Text-to-video on the same async queue as `sfx`/`music`
-(`/video/quote` → `/video/queue` → `/video/retrieve` → `/video/complete`),
-writing an mp4 to `venice-video-<id>.mp4`. Generation runs minutes, not
-seconds, so it polls less often and waits longer by default (`--poll-interval`
-5s, `--max-wait` 900s). `--model` defaults to the catalog's `default`-trait
-video model; available durations, resolutions, and aspect ratios vary by model.
+Text-to-video (and image-to-video, see below) on the same async queue as
+`sfx`/`music` (`/video/quote` → `/video/queue` → `/video/retrieve` →
+`/video/complete`), writing an mp4 to `venice-video-<id>.mp4`. Generation runs
+minutes, not seconds, so it polls less often and waits longer by default
+(`--poll-interval` 5s, `--max-wait` 900s). `--model` defaults to the catalog's
+`default`-trait video model; available durations, resolutions, aspect ratios,
+and the media-input modes below all vary by model.
 
 ```sh
 # Quote only -- no spend.
@@ -436,6 +437,42 @@ venice video "neon city flythrough" --model seedance-2-0-text-to-video \
 ID=$(venice video "storm clouds timelapse" --duration 10s --background)
 venice video-status "$ID"
 ```
+
+### Media inputs (image-to-video & references)
+
+For models that support them, the generation can be conditioned on media.
+Every media flag accepts **a local file path or an `http(s)`/`data:` URL** —
+local files are read, size-checked, and encoded to a `data:` URL for you.
+
+```sh
+# Image-to-video: animate a still (optionally with an end frame).
+venice video "slow zoom out from the figure" --image hero.png --yes
+venice video "morph A into B" --image a.png --end-image b.png --yes
+
+# Reference images for character/style consistency (repeatable, up to 9).
+venice video "the same knight, new scene" \
+  --reference-image knight1.png --reference-image knight2.png --yes
+
+# Video-to-video / upscale, and reference videos (repeatable, up to 3). The
+# aggregate reference-video duration feeds the *quote* so R2V pricing is right.
+venice video "restyle this clip" --video source.mp4 \
+  --reference-video ref.mp4 --reference-video-duration 5 --yes
+
+# Advanced @Element composition (Kling O3): pass each element as a JSON object.
+# Local paths inside the JSON are encoded just like the flags above.
+venice video "@Element1 greets @Element2 at @Image1" \
+  --element '{"frontal_image_url":"alice.png"}' \
+  --element '{"frontal_image_url":"bob.png"}' \
+  --scene-image plaza.png --yes
+```
+
+Full media flags: `--image`, `--end-image`, `--video`, `--audio` (background
+music, distinct from `--no-audio`), `--reference-image` (≤9),
+`--reference-video` (≤3), `--reference-audio` (≤3), `--scene-image` (≤4),
+`--reference-video-duration`, and `--element` (JSON, ≤4). Image/reference
+inputs condition generation and are sent only on `/video/queue`; `--video` and
+`--reference-video-duration` also reach `/video/quote` because they change the
+price. Per-model support varies — the API rejects an unsupported combination.
 
 Some (VPS-backed) models return a presigned `download_url` at queue time and
 stream nothing back from `/video/retrieve`; the CLI fetches the mp4 from that
@@ -957,7 +994,7 @@ The player list (`paplay` -> `aplay` -> `ffplay` -> `mpg123` -> `play`
 | `venice image PROMPT [--variants N] [--name NAME] [--max-spend USD] [...]` | generate image(s) (sync) |
 | `venice image --from-file PATH [...]` | batch-generate a card set |
 | `venice music PROMPT [--duration N] [--master] [--loop] [...]` | generate long-form ambience/music |
-| `venice video PROMPT [--duration 5s] [--resolution R] [--aspect-ratio A] [...]` | generate a video (async queue, mp4) |
+| `venice video PROMPT [--duration 5s] [--resolution R] [--aspect-ratio A] [--image F] [--reference-image F ...] [--element JSON] [...]` | generate a video (async queue, mp4); text- or image-to-video with reference inputs |
 | `venice video-status QUEUE_ID [--download-url URL]` | fetch a backgrounded video job |
 | `venice master INPUT [--loop] [--lufs N] [--bit-depth N] [...]` | master audio to WAV (48k/24-bit, LUFS/true-peak) |
 | `venice contact-sheet DIR_OR_GLOB [--cols N] [--cell WxH] [--label] [...]` | tile images into one contact sheet (no API call) |

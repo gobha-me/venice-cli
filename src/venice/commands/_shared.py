@@ -7,6 +7,8 @@ independent of any one command's argument shape.
 """
 from __future__ import annotations
 
+import base64
+import mimetypes
 import sys
 from pathlib import Path
 from typing import List, Optional
@@ -23,6 +25,19 @@ def resolve_output(arg_output: Optional[Path], default_name: str) -> Path:
     if arg_output.is_dir():
         return arg_output / default_name
     return arg_output
+
+
+def encode_data_url(path: Path, *, default_mime: str = "application/octet-stream") -> str:
+    """Read a local file and return a `data:<mime>;base64,<b64>` URL.
+
+    The MIME type is sniffed from the filename; callers pass `default_mime` as
+    the fallback for extensions `mimetypes` doesn't recognise. Unlike the raw
+    base64 that `bg-remove`/`image-edit` send in an `image` field, the Venice
+    `/video` media inputs want a full data URL, so this prepends the prefix.
+    """
+    mime = mimetypes.guess_type(str(path))[0] or default_mime
+    b64 = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:{mime};base64,{b64}"
 
 
 def print_estimate(cost: Optional[float], label: str) -> None:
