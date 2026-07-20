@@ -12,6 +12,7 @@ A free `/models?type=video` catalog GET (via the lean client) validates
 """
 from __future__ import annotations
 
+import json
 import sys
 import time
 from pathlib import Path
@@ -26,6 +27,23 @@ VIDEO_EXT_BY_CTYPE = {
     "video/webm": ".webm",
     "video/quicktime": ".mov",
 }
+
+# Media inputs (issue #18): a value is passed through when it is already an
+# http(s)/data URL, otherwise it is treated as a local file, size-checked, and
+# encoded to a `data:` URL via `_shared.encode_data_url`. Size caps and array
+# caps below mirror the `/video/queue` (`QueueVideoRequest`) schema.
+MEDIA_LIMITS = {
+    "image": 25 * 1024 * 1024,  # image inputs < 25 MB
+    "video": 50 * 1024 * 1024,  # reference/input video <= 50 MB per clip
+    "audio": 15 * 1024 * 1024,  # audio inputs <= 15 MB
+}
+DEFAULT_MIME = {"image": "image/png", "video": "video/mp4", "audio": "audio/mpeg"}
+REF_IMAGE_MAX = 9
+REF_VIDEO_MAX = 3
+REF_AUDIO_MAX = 3
+SCENE_MAX = 4
+ELEMENTS_MAX = 4
+ELEMENT_REF_IMAGE_MAX = 3
 
 DEFAULT_VIDEO_DURATION = "5s"
 DURATION_CHOICES = (
@@ -67,6 +85,56 @@ def register(subparsers) -> None:
         action="store_true",
         dest="no_audio",
         help="Disable audio (models that support it generate audio by default).",
+    )
+    # Media inputs (#18). Each accepts a local file path OR an http(s)/data URL;
+    # local files are encoded to a `data:` URL. See _collect_media below.
+    p.add_argument(
+        "--image", default=None, metavar="PATH|URL",
+        help="Start-frame image for image-to-video (local file or URL).",
+    )
+    p.add_argument(
+        "--end-image", default=None, dest="end_image", metavar="PATH|URL",
+        help="End-frame image for models that support transitions.",
+    )
+    p.add_argument(
+        "--video", default=None, metavar="PATH|URL",
+        help="Input video for video-to-video / upscale models.",
+    )
+    p.add_argument(
+        "--audio", default=None, dest="audio_input", metavar="PATH|URL",
+        help="Background-music audio input, e.g. WAV/MP3 (distinct from --no-audio).",
+    )
+    p.add_argument(
+        "--reference-image", action="append", default=None, dest="reference_image",
+        metavar="PATH|URL",
+        help=f"Reference image for character/style consistency (repeatable, up to {REF_IMAGE_MAX}).",
+    )
+    p.add_argument(
+        "--reference-video", action="append", default=None, dest="reference_video",
+        metavar="PATH|URL",
+        help=f"Reference video (repeatable, up to {REF_VIDEO_MAX}).",
+    )
+    p.add_argument(
+        "--reference-audio", action="append", default=None, dest="reference_audio",
+        metavar="PATH|URL",
+        help=f"Reference audio (repeatable, up to {REF_AUDIO_MAX}); must accompany a "
+             "reference image or video.",
+    )
+    p.add_argument(
+        "--scene-image", action="append", default=None, dest="scene_image",
+        metavar="PATH|URL",
+        help=f"Scene reference image (@Image1.., repeatable, up to {SCENE_MAX}).",
+    )
+    p.add_argument(
+        "--reference-video-duration", type=float, default=None,
+        dest="reference_video_duration", metavar="SECONDS",
+        help="Aggregate reference-video duration (s); sent to the quote for R2V pricing.",
+    )
+    p.add_argument(
+        "--element", action="append", default=None, metavar="JSON",
+        help="Advanced @Element as a JSON object (frontal_image_url / "
+             f"reference_image_urls / video_url), repeatable up to {ELEMENTS_MAX}. "
+             "Local paths inside are encoded like the other media flags.",
     )
     p.add_argument("--output", "-o", type=Path, default=None)
     p.add_argument("--yes", "-y", action="store_true", default=None)
@@ -131,6 +199,148 @@ def _shared_params(args) -> dict:
     return extra
 
 
+def _is_url(value: str) -> bool:
+    return value.startswith(("http://", "https://", "data:"))
+
+
+def _resolve_media(value: str, *, kind: str):
+    """Resolve one media input to a URL string. A value that is already an
+    http(s)/data URL passes through; anything else is a local file that is
+    size-checked and encoded to a `data:` URL. Returns (url_or_None, rc_or_None).
+    """
+    if _is_url(value):
+        return value, None
+    path = Path(value)
+    if not path.is_file():
+        print(f"video: input file not found: {value}", file=sys.stderr)
+        return None, 2
+    size = path.stat().st_size
+    if size == 0:
+        print(f"video: input {value} is empty", file=sys.stderr)
+        return None, 2
+    limit = MEDIA_LIMITS[kind]
+    if size > limit:
+        print(
+            f"video: input {value} is {size} bytes; {kind} inputs must be "
+            f"< {limit // (1024 * 1024)} MB",
+            file=sys.stderr,
+        )
+        return None, 2
+    return _shared.encode_data_url(path, default_mime=DEFAULT_MIME[kind]), None
+
+
+def _resolve_media_list(values, *, kind: str, cap: int, flag: str):
+    """Resolve a repeatable media flag. Returns (list_or_None, rc_or_None);
+    (None, None) when the flag was not given."""
+    if values is None:
+        return None, None
+    if len(values) > cap:
+        print(f"video: at most {cap} {flag}", file=sys.stderr)
+        return None, 2
+    out = []
+    for value in values:
+        url, rc = _resolve_media(value, kind=kind)
+        if rc is not None:
+            return None, rc
+        out.append(url)
+    return out, None
+
+
+def _resolve_elements(raw_list):
+    """Parse `--element` JSON objects, resolving any media paths inside. Returns
+    (list_or_None, rc_or_None). Unknown keys pass through verbatim so the JSON
+    escape hatch stays forward-compatible with the schema."""
+    if raw_list is None:
+        return None, None
+    if len(raw_list) > ELEMENTS_MAX:
+        print(f"video: at most {ELEMENTS_MAX} --element", file=sys.stderr)
+        return None, 2
+    out = []
+    for raw in raw_list:
+        try:
+            el = json.loads(raw)
+        except (ValueError, TypeError) as e:
+            print(f"video: --element is not valid JSON: {e}", file=sys.stderr)
+            return None, 2
+        if not isinstance(el, dict):
+            print("video: --element must be a JSON object", file=sys.stderr)
+            return None, 2
+        resolved = dict(el)  # keep any unknown keys as-is
+        for key, kind in (("frontal_image_url", "image"), ("video_url", "video")):
+            if el.get(key) is not None:
+                url, rc = _resolve_media(el[key], kind=kind)
+                if rc is not None:
+                    return None, rc
+                resolved[key] = url
+        refs = el.get("reference_image_urls")
+        if refs is not None:
+            if not isinstance(refs, list):
+                print("video: element reference_image_urls must be a list", file=sys.stderr)
+                return None, 2
+            urls, rc = _resolve_media_list(
+                refs, kind="image", cap=ELEMENT_REF_IMAGE_MAX,
+                flag="element reference_image_urls",
+            )
+            if rc is not None:
+                return None, rc
+            resolved["reference_image_urls"] = urls
+        out.append(resolved)
+    return out, None
+
+
+def _collect_media(args):
+    """Resolve every media input up front (before any spend). Returns
+    (quote_media, queue_media, rc). `quote_media` holds fields valid on
+    /video/quote (video_url + reference_video_total_duration); `queue_media`
+    holds the /video/queue-only fields. On any failure returns (None, None, rc).
+    """
+    quote_media: dict = {}
+    queue_media: dict = {}
+
+    # Single-value inputs: (arg attr, kind, queue field, also-in-quote?)
+    for attr, kind, field, in_quote in (
+        ("image", "image", "image_url", False),
+        ("end_image", "image", "end_image_url", False),
+        ("audio_input", "audio", "audio_url", False),
+        ("video", "video", "video_url", True),  # valid on both endpoints
+    ):
+        value = getattr(args, attr, None)
+        if value is None:
+            continue
+        url, rc = _resolve_media(value, kind=kind)
+        if rc is not None:
+            return None, None, rc
+        queue_media[field] = url
+        if in_quote:
+            quote_media[field] = url
+
+    # Repeatable array inputs (queue-only): (arg attr, kind, cap, flag, field)
+    for attr, kind, cap, flag, field in (
+        ("reference_image", "image", REF_IMAGE_MAX, "--reference-image", "reference_image_urls"),
+        ("reference_video", "video", REF_VIDEO_MAX, "--reference-video", "reference_video_urls"),
+        ("reference_audio", "audio", REF_AUDIO_MAX, "--reference-audio", "reference_audio_urls"),
+        ("scene_image", "image", SCENE_MAX, "--scene-image", "scene_image_urls"),
+    ):
+        urls, rc = _resolve_media_list(getattr(args, attr, None), kind=kind, cap=cap, flag=flag)
+        if rc is not None:
+            return None, None, rc
+        if urls is not None:
+            queue_media[field] = urls
+
+    elements, rc = _resolve_elements(getattr(args, "element", None))
+    if rc is not None:
+        return None, None, rc
+    if elements is not None:
+        queue_media["elements"] = elements
+
+    # Reference-video total duration -> quote only (R2V pricing tier).
+    dur = getattr(args, "reference_video_duration", None)
+    if dur is not None:
+        quote_media["reference_video_total_duration"] = dur
+
+    return quote_media, queue_media, None
+
+
 def _run_generate(args) -> int:
     userconfig.apply_defaults(args, "video")
     if not args.prompt:
@@ -148,9 +358,14 @@ def _run_generate(args) -> int:
     if rc is not None:
         return rc
 
+    quote_media, queue_media, rc = _collect_media(args)
+    if rc is not None:
+        return rc
+
     extra = _shared_params(args)
     quote_body = {"model": model, "duration": args.duration}
     quote_body.update(extra)
+    quote_body.update(quote_media)
     try:
         quote = client.post_json("/video/quote", quote_body)
     except VeniceAPIError as e:
@@ -184,6 +399,7 @@ def _run_generate(args) -> int:
     queue_body.update(extra)
     if args.negative_prompt:
         queue_body["negative_prompt"] = args.negative_prompt
+    queue_body.update(queue_media)
 
     try:
         queued = client.post_json("/video/queue", queue_body)
