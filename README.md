@@ -576,7 +576,8 @@ produces a final answer. These run **in-process on the `[openai]` extra alone**
 
 `venice_image`, `venice_tts`, `venice_sfx`, `venice_music`, `venice_upscale`,
 `venice_bg_remove`, and `venice_chat` (a sub-completion / subagent primitive) —
-the same seven capabilities `venice mcp-serve` exposes — plus `project_search`,
+seven of the capabilities `venice mcp-serve` exposes (which adds `venice_video`
+and `venice_image_edit`) — plus `project_search`,
 a read-only [semantic search](#semantic-search) over the project's local
 `venice index` for locating code by meaning before acting on it.
 
@@ -841,7 +842,7 @@ pip install "venice-cli[mcp]"
 claude mcp add venice -- venice mcp-serve
 ```
 
-The server exposes seven tools:
+The server exposes nine tools:
 
 | Tool | Does | Paid? |
 | --- | --- | --- |
@@ -849,15 +850,17 @@ The server exposes seven tools:
 | `venice_tts` | synthesize speech → audio file | yes (estimated) |
 | `venice_sfx` | sound effect (async queue) → audio file | yes (quoted) |
 | `venice_music` | long-form music/ambience (async queue) → audio file | yes (quoted) |
+| `venice_video` | text/image-to-video (async queue, long-running) → video file | yes (quoted) |
 | `venice_upscale` | upscale/enhance a local image → image file | yes (dynamic) |
 | `venice_bg_remove` | remove a background → transparent PNG | yes (dynamic) |
+| `venice_image_edit` | edit/inpaint an image (+ optional mask layers) → image file | yes (dynamic) |
 | `venice_chat` | one-shot chat completion → reply text | no |
 
 **Spend gating.** MCP is non-interactive, so instead of a `[y/N]` prompt the
 paid tools gate on cost. A tool call whose estimated cost is at or under the
 auto-approve cap (`VENICE_MCP_MAX_SPEND`, default **$0.10**) runs immediately.
 If the estimate is over the cap — or can't be known up front, as with the
-dynamically-priced `venice_upscale` / `venice_bg_remove` — the tool returns
+dynamically-priced `venice_upscale` / `venice_bg_remove` / `venice_image_edit` — the tool returns
 `{"status": "confirmation_required", ...}` with the estimate and cap, and the
 host must re-call with `confirm=true` (or a higher `max_spend`). Nothing is
 spent and no file is written on a gated call. `venice_chat` is cheap and not

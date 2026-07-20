@@ -10,7 +10,7 @@ Do NOT add `from __future__ import annotations` here: FastMCP builds each tool's
 input schema via typing.get_type_hints, so the annotations must stay concrete
 (`typing.Optional[int]`, not stringized `int | None`).
 """
-from typing import Optional
+from typing import List, Optional
 
 from mcp.server.fastmcp import FastMCP
 
@@ -162,6 +162,75 @@ def build_server(client) -> FastMCP:
         return _mcp.chat_tool(
             client, message, model=model, system=system, temperature=temperature,
             max_tokens=max_tokens, web_search=web_search, character=character,
+        )
+
+    @server.tool()
+    def venice_video(
+        prompt: str,
+        model: Optional[str] = None,
+        duration: str = _mcp._video.DEFAULT_VIDEO_DURATION,
+        negative_prompt: Optional[str] = None,
+        resolution: Optional[str] = None,
+        aspect_ratio: Optional[str] = None,
+        no_audio: bool = False,
+        image_url: Optional[str] = None,
+        end_image_url: Optional[str] = None,
+        video_url: Optional[str] = None,
+        audio_url: Optional[str] = None,
+        reference_image_urls: Optional[List[str]] = None,
+        reference_video_urls: Optional[List[str]] = None,
+        reference_audio_urls: Optional[List[str]] = None,
+        scene_image_urls: Optional[List[str]] = None,
+        reference_video_duration: Optional[float] = None,
+        output_dir: Optional[str] = None,
+        confirm: bool = False,
+        max_spend: Optional[float] = None,
+        max_wait: float = _mcp._video.config.VIDEO_POLL_MAX_WAIT_SEC,
+    ) -> dict:
+        """Generate a video via Venice's async /video queue and return the file path.
+        Text-to-video (prompt) plus optional image/reference conditioning: each *_url
+        takes an http(s)/data URL or a local path. LONG-RUNNING -- blocks while polling
+        up to max_wait seconds (a host may time out). Paid: a quote is fetched first;
+        over-cap or dynamic quotes need confirm=true."""
+        return _mcp.video_tool(
+            client, prompt, model=model, duration=duration,
+            negative_prompt=negative_prompt, resolution=resolution,
+            aspect_ratio=aspect_ratio, no_audio=no_audio, image_url=image_url,
+            end_image_url=end_image_url, video_url=video_url, audio_url=audio_url,
+            reference_image_urls=reference_image_urls,
+            reference_video_urls=reference_video_urls,
+            reference_audio_urls=reference_audio_urls,
+            scene_image_urls=scene_image_urls,
+            reference_video_duration=reference_video_duration,
+            output_dir=output_dir, confirm=confirm, max_spend=max_spend,
+            max_wait=max_wait,
+        )
+
+    @server.tool()
+    def venice_image_edit(
+        prompt: str,
+        input_path: Optional[str] = None,
+        image_url: Optional[str] = None,
+        layer_paths: Optional[List[str]] = None,
+        model: Optional[str] = None,
+        aspect_ratio: Optional[str] = None,
+        resolution: Optional[str] = None,
+        output_format: Optional[str] = None,
+        no_safe_mode: bool = False,
+        output_dir: Optional[str] = None,
+        confirm: bool = False,
+        max_spend: Optional[float] = None,
+    ) -> dict:
+        """Edit/inpaint an image via Venice /image/edit and return the file path. Base
+        image is a local input_path OR an image_url; one or two layer_paths (masks/
+        overlays) route to /image/multi-edit. Pricing is dynamic (no up-front estimate),
+        so this ALWAYS requires confirm=true."""
+        return _mcp.image_edit_tool(
+            client, prompt, input_path=input_path, image_url=image_url,
+            layer_paths=layer_paths, model=model, aspect_ratio=aspect_ratio,
+            resolution=resolution, output_format=output_format,
+            no_safe_mode=no_safe_mode, output_dir=output_dir, confirm=confirm,
+            max_spend=max_spend,
         )
 
     return server
