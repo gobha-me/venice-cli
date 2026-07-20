@@ -16,6 +16,7 @@ _HAS_MCP = importlib.util.find_spec("mcp") is not None
 EXPECTED_TOOLS = {
     "venice_image", "venice_tts", "venice_sfx", "venice_music",
     "venice_upscale", "venice_bg_remove", "venice_chat",
+    "venice_video", "venice_image_edit",
 }
 
 
@@ -33,7 +34,7 @@ class TestMissingExtra(unittest.TestCase):
 
 @unittest.skipUnless(_HAS_MCP, "mcp SDK not installed (expected on Python 3.9)")
 class TestServerWiring(unittest.TestCase):
-    def test_build_server_exposes_exactly_seven_tools(self):
+    def test_build_server_exposes_exactly_nine_tools(self):
         from venice.mcp_server import build_server
 
         class FakeClient:

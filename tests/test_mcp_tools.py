@@ -37,6 +37,13 @@ def _price_doc(model, usd):
     ).encode()
 
 
+def _video_catalog(model="seedance-2-0-text-to-video"):
+    """A /models?type=video catalog whose first id carries the 'default' trait."""
+    return json.dumps(
+        {"data": [{"id": model, "model_spec": {"traits": ["default"]}}]}
+    ).encode()
+
+
 class _ToolTest(unittest.TestCase):
     """Base with a persistent temp output dir (survives until tearDown) and a
     stdout-empty guard usable around any tool call."""
@@ -298,6 +305,142 @@ class TestChatTool(_ToolTest):
         self.assertEqual(res["status"], "ok")
         self.assertEqual(res["content"], "hi there")
         self.assertEqual(res["model"], "venice-uncensored")
+
+
+class TestVideoTool(_ToolTest):
+    def test_ok_queue_poll_save(self):
+        responses = _seq(
+            FakeResp(200, _video_catalog()),               # /models?type=video
+            FakeResp(200, b'{"quote": 0.5}'),              # /video/quote
+            FakeResp(200, b'{"queue_id": "vidq123"}'),     # /video/queue
+            FakeResp(200, json.dumps({"status": "PROCESSING"}).encode()),
+            FakeResp(200, b"MP4BYTES", "video/mp4"),       # /video/retrieve
+            FakeResp(200, b'{"ok": true}'),                # /video/complete
+        )
+        with mock.patch("venice.client.urllib.request.urlopen", responses), \
+             mock.patch("venice.client.time.sleep"), self.stdout_guard():
+            res = _mcp.video_tool(
+                _client(), "a koi pond at dawn",
+                output_dir=self.td, confirm=True, max_wait=10,
+            )
+        self.assertEqual(res["status"], "ok")
+        self.assertEqual(res["queue_id"], "vidq123")
+        self.assertEqual(Path(res["path"]).read_bytes(), b"MP4BYTES")
+        self.assertTrue(res["path"].endswith(".mp4"))
+        self.assertEqual(res["cost_estimate_usd"], 0.5)
+
+    def test_vps_model_fetches_download_url(self):
+        url = "https://cdn.example.com/presigned?sig=abc"
+        responses = _seq(
+            FakeResp(200, _video_catalog()),
+            FakeResp(200, b'{"quote": 0.5}'),
+            FakeResp(200, json.dumps({"queue_id": "vpsq1", "download_url": url}).encode()),
+            FakeResp(200, json.dumps({"status": "COMPLETED"}).encode()),
+            FakeResp(200, b"PRESIGNEDMP4", "video/mp4"),   # get_url_bytes
+            FakeResp(200, b'{"ok": true}'),
+        )
+        seen = []
+
+        def fake(req, timeout=None):
+            seen.append(req.full_url)
+            return responses(req, timeout)
+
+        with mock.patch("venice.client.urllib.request.urlopen", fake), \
+             mock.patch("venice.client.time.sleep"), self.stdout_guard():
+            res = _mcp.video_tool(
+                _client(), "a koi pond", output_dir=self.td, confirm=True, max_wait=10
+            )
+        self.assertEqual(res["status"], "ok")
+        self.assertEqual(Path(res["path"]).read_bytes(), b"PRESIGNEDMP4")
+        self.assertIn(url, seen)  # presigned URL fetched verbatim
+
+    def test_gate_blocks_before_queue(self):
+        seen = []
+
+        def fake(req, timeout=None):
+            seen.append(req.full_url)
+            if "type=video" in req.full_url:
+                return FakeResp(200, _video_catalog())
+            if req.full_url.endswith("/video/quote"):
+                return FakeResp(200, b'{"quote": 2.50}')
+            raise AssertionError(f"unexpected call past the gate: {req.full_url}")
+
+        with mock.patch("venice.client.urllib.request.urlopen", fake):
+            res = _mcp.video_tool(
+                _client(), "a koi pond",
+                output_dir=self.td, confirm=False, max_spend=0.10,
+            )
+        self.assertEqual(res["status"], "confirmation_required")
+        self.assertTrue(all("/video/queue" not in u for u in seen))
+
+    def test_empty_prompt_is_error(self):
+        res = _mcp.video_tool(_client(), "   ", confirm=True)
+        self.assertEqual(res["status"], "error")
+
+
+class TestImageEditTool(_ToolTest):
+    def _png(self):
+        ip = Path(self.td) / "base.png"
+        ip.write_bytes(b"\x89PNG\r\n" + b"x" * 16)
+        return ip
+
+    def test_needs_confirm(self):
+        ip = self._png()
+
+        def boom(*a, **kw):
+            raise AssertionError("must not hit the network without confirm")
+
+        with mock.patch("venice.client.urllib.request.urlopen", boom):
+            res = _mcp.image_edit_tool(
+                _client(), "make it blue", input_path=str(ip),
+                output_dir=self.td, confirm=False,
+            )
+        self.assertEqual(res["status"], "confirmation_required")
+        self.assertIsNone(res["estimated_cost_usd"])
+
+    def test_edit_ok_with_confirm(self):
+        ip = self._png()
+        captured = {}
+
+        def fake(req, timeout=None):
+            captured["url"] = req.full_url
+            captured["body"] = json.loads(req.data.decode())
+            return FakeResp(200, b"EDITED", "image/png")
+
+        with mock.patch("venice.client.urllib.request.urlopen", fake), self.stdout_guard():
+            res = _mcp.image_edit_tool(
+                _client(), "make it blue", input_path=str(ip),
+                output_dir=self.td, confirm=True,
+            )
+        self.assertEqual(res["status"], "ok")
+        self.assertEqual(Path(res["path"]).read_bytes(), b"EDITED")
+        self.assertTrue(captured["url"].endswith("/image/edit"))
+        self.assertIn("image", captured["body"])  # single-edit sends "image"
+        self.assertEqual(base64.b64decode(captured["body"]["image"]), ip.read_bytes())
+
+    def test_multi_edit_with_layers(self):
+        ip = self._png()
+        layer = Path(self.td) / "mask.png"
+        layer.write_bytes(b"\x89PNG\r\nMASK")
+        captured = {}
+
+        def fake(req, timeout=None):
+            captured["url"] = req.full_url
+            captured["body"] = json.loads(req.data.decode())
+            return FakeResp(200, b"MULTI", "image/png")
+
+        with mock.patch("venice.client.urllib.request.urlopen", fake), self.stdout_guard():
+            res = _mcp.image_edit_tool(
+                _client(), "composite the mask", input_path=str(ip),
+                layer_paths=[str(layer)], output_dir=self.td, confirm=True,
+            )
+        self.assertEqual(res["status"], "ok")
+        self.assertTrue(captured["url"].endswith("/image/multi-edit"))
+        self.assertEqual(len(captured["body"]["images"]), 2)  # base + 1 layer
+
+    def test_missing_source_is_error(self):
+        res = _mcp.image_edit_tool(_client(), "edit", confirm=True)  # no input/url
+        self.assertEqual(res["status"], "error")
 
 
 class TestSpendHelpers(unittest.TestCase):

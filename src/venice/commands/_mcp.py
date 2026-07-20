@@ -28,10 +28,12 @@ from . import _audio, _index, _models, _openai, _queue, _shared
 from . import bg_remove as _bg
 from . import chat as _chat
 from . import image as _image
+from . import image_edit as _image_edit
 from . import music as _music
 from . import sfx as _sfx
 from . import tts as _tts
 from . import upscale as _upscale
+from . import video as _video
 
 
 # ---- lazy SDK probe (mirrors _openai.import_openai) --------------------------
@@ -564,6 +566,168 @@ def chat_tool(
     if usage:
         out["usage"] = usage
     return out
+
+
+def video_tool(
+    client,
+    prompt: str,
+    *,
+    model: Optional[str] = None,
+    duration: str = _video.DEFAULT_VIDEO_DURATION,
+    negative_prompt: Optional[str] = None,
+    resolution: Optional[str] = None,
+    aspect_ratio: Optional[str] = None,
+    no_audio: bool = False,
+    image_url: Optional[str] = None,
+    end_image_url: Optional[str] = None,
+    video_url: Optional[str] = None,
+    audio_url: Optional[str] = None,
+    reference_image_urls: Optional[List[str]] = None,
+    reference_video_urls: Optional[List[str]] = None,
+    reference_audio_urls: Optional[List[str]] = None,
+    scene_image_urls: Optional[List[str]] = None,
+    reference_video_duration: Optional[float] = None,
+    output_dir: Optional[str] = None,
+    confirm: bool = False,
+    max_spend: Optional[float] = None,
+    max_wait: float = _video.config.VIDEO_POLL_MAX_WAIT_SEC,
+) -> dict:
+    """Generate a video via Venice's async /video queue; write a file, return path.
+
+    Text-to-video (prompt only) plus image/reference conditioning (#18): each
+    `*_url` accepts an http(s)/data URL or a local path (encoded to a data URL).
+    Long-running -- blocks while polling up to `max_wait`. Paid: a quote is
+    fetched first; over-cap or dynamic quotes need confirm=true.
+    """
+    if not prompt or not prompt.strip():
+        return _err("video: prompt is required")
+
+    models = _models.catalog(client, "video")
+    model, rc = _models.resolve_model(
+        model, models, label="video", noun="video model"
+    )
+    if rc is not None:
+        return _err(f"video: could not resolve model (exit {rc})")
+
+    ns = SimpleNamespace(
+        image=image_url, end_image=end_image_url, video=video_url,
+        audio_input=audio_url, reference_image=reference_image_urls,
+        reference_video=reference_video_urls, reference_audio=reference_audio_urls,
+        scene_image=scene_image_urls, element=None,
+        reference_video_duration=reference_video_duration,
+        resolution=resolution, aspect_ratio=aspect_ratio, no_audio=no_audio,
+    )
+    quote_media, queue_media, rc = _video._collect_media(ns)  # stderr on bad media
+    if rc is not None:
+        return _err(f"video: invalid media input (exit {rc})")
+
+    extra = _video._shared_params(ns)
+    quote_body = {"model": model, "duration": duration}
+    quote_body.update(extra)
+    quote_body.update(quote_media)
+    try:
+        quote = client.post_json("/video/quote", quote_body)
+    except VeniceAPIError as e:
+        return _err(f"video quote rejected: {e}")
+    quote_value = quote.get("quote", quote)
+
+    gate = check_spend(quote_value, confirm=confirm, max_spend=max_spend, label="video")
+    if gate is not None:
+        return gate
+
+    queue_body = {"model": model, "prompt": prompt.strip(), "duration": duration}
+    queue_body.update(extra)
+    if negative_prompt:
+        queue_body["negative_prompt"] = negative_prompt
+    queue_body.update(queue_media)
+    try:
+        queued = client.post_json("/video/queue", queue_body)
+    except VeniceAPIError as e:
+        return _err(f"video queue failed: {e}")
+    queue_id = queued.get("queue_id") or queued.get("id") or ""
+    if not queue_id:
+        return _err("video: queue response missing queue_id")
+    download_url = queued.get("download_url") or None
+
+    try:
+        ctype, data = _video.retrieve_bytes(
+            client, model, queue_id,
+            poll_interval=_video.config.VIDEO_POLL_INTERVAL_SEC,
+            max_wait=max_wait, download_url=download_url,
+        )
+    except VeniceAPIError as e:
+        return _err(f"video retrieve failed: {e}")
+    except TimeoutError as e:
+        return _err(f"video: {e}; the job {queue_id} may still finish server-side")
+    except _video.NoVideoStream:
+        return _err(f"video: job {queue_id} completed but returned no video stream")
+
+    ext, _unknown = _queue.ext_for(ctype, _video.VIDEO_EXT_BY_CTYPE, default=".mp4")
+    out_path = _queue.resolve_output_path(
+        resolve_output_dir(output_dir), queue_id, ext, prefix="venice-video"
+    )
+    werr = _write(out_path, data)
+    if werr:
+        return _err(f"video: could not write {out_path}: {werr}")
+
+    try:  # best-effort cleanup; the file is already saved
+        client.post_json("/video/complete", {"model": model, "queue_id": queue_id})
+    except VeniceAPIError:
+        pass
+    return {
+        "status": "ok",
+        "path": str(out_path.resolve()),
+        "bytes": len(data),
+        "model": model,
+        "queue_id": queue_id,
+        "cost_estimate_usd": quote_value,
+    }
+
+
+def image_edit_tool(
+    client,
+    prompt: str,
+    *,
+    input_path: Optional[str] = None,
+    image_url: Optional[str] = None,
+    layer_paths: Optional[List[str]] = None,
+    model: Optional[str] = None,
+    aspect_ratio: Optional[str] = None,
+    resolution: Optional[str] = None,
+    output_format: Optional[str] = None,
+    no_safe_mode: bool = False,
+    output_dir: Optional[str] = None,
+    confirm: bool = False,
+    max_spend: Optional[float] = None,
+) -> dict:
+    """Edit/inpaint an image via /image/edit (dynamic price -> needs confirm).
+
+    Base image is a local `input_path` or an `image_url`; one or two
+    `layer_paths` (masks/overlays) route to /image/multi-edit. Writes the
+    result and returns its path.
+    """
+    inp = Path(input_path) if input_path else None
+    layers = [Path(p) for p in (layer_paths or [])]
+    ns = SimpleNamespace(
+        input=inp, image_url=image_url, prompt=prompt, layer=layers or None,
+        model=model, aspect_ratio=aspect_ratio, resolution=resolution,
+        output_format=output_format, no_safe_mode=no_safe_mode,
+    )
+    rc = _image_edit._validate(ns)  # stderr warnings only
+    if rc is not None:
+        return _err(f"image-edit: invalid arguments (exit {rc})")
+
+    base_image = _shared.encode_base64(inp) if inp is not None else image_url
+    layers_b64 = [_shared.encode_base64(p) for p in layers]
+    endpoint, body = _image_edit._build_body(ns, base_image, layers_b64)
+
+    ext = _image_edit.EXT_BY_FORMAT.get(output_format or "png", ".png")
+    name = f"{inp.stem}-edit{ext}" if inp is not None else f"{_image_edit.URL_DEFAULT_STEM}{ext}"
+    out_path = resolve_output_dir(output_dir) / name
+    return _binary_op_tool(
+        client, endpoint=endpoint, body=body, out_path=out_path,
+        label="image-edit", confirm=confirm, max_spend=max_spend,
+    )
 
 
 def search_tool(client, query, *, k: int = 8) -> dict:

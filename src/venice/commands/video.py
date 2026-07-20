@@ -16,7 +16,7 @@ import json
 import sys
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 from .. import billing, config, userconfig
 from ..client import VeniceAPIError
@@ -446,19 +446,53 @@ def _run_status(args) -> int:
     )
 
 
+class NoVideoStream(Exception):
+    """A job reported COMPLETED but returned no video bytes and no `download_url`
+    is known to fetch them from."""
+
+
+def retrieve_bytes(
+    client, model, queue_id, *,
+    poll_interval, max_wait, download_url=None, on_tick=None,
+) -> Tuple[str, bytes]:
+    """Poll /video/retrieve until the video is ready and return (ctype, bytes).
+
+    Print-free core of `_retrieve_and_save`: the bare poll plus the VPS-model
+    download-url fallback, with no stderr, file I/O, or cleanup -- so callers
+    that own stdout (e.g. the MCP stdio server) can reuse it without corrupting
+    their transport. Non-VPS models stream the mp4 straight from /video/retrieve;
+    VPS-backed models report COMPLETED (JSON) and the mp4 is fetched from the
+    presigned `download_url`.
+
+    Raises VeniceAPIError on a terminal API error, TimeoutError on `max_wait`,
+    and NoVideoStream when a COMPLETED job yields no bytes and no download_url.
+    """
+    ctype, payload = client.poll_retrieve(
+        "/video/retrieve",
+        {"model": model, "queue_id": queue_id},
+        interval=poll_interval,
+        max_wait=max_wait,
+        on_tick=on_tick,
+        terminal_statuses=("COMPLETED",),
+    )
+    if isinstance(payload, (bytes, bytearray)):
+        return ctype, bytes(payload)
+    # VPS-backed model: retrieve reported COMPLETED (JSON) -- fetch the mp4.
+    if not download_url:
+        raise NoVideoStream(queue_id)
+    return client.get_url_bytes(download_url)
+
+
 def _retrieve_and_save(
     client, model, queue_id, download_url, out_arg,
     poll_interval, max_wait, no_cleanup,
 ) -> int:
     start = time.monotonic()
     try:
-        ctype, payload = client.poll_retrieve(
-            "/video/retrieve",
-            {"model": model, "queue_id": queue_id},
-            interval=poll_interval,
-            max_wait=max_wait,
-            on_tick=_queue.progress_tick(start),
-            terminal_statuses=("COMPLETED",),
+        ctype, data = retrieve_bytes(
+            client, model, queue_id,
+            poll_interval=poll_interval, max_wait=max_wait,
+            download_url=download_url, on_tick=_queue.progress_tick(start),
         )
     except VeniceAPIError as e:
         sys.stderr.write("\n")
@@ -471,26 +505,17 @@ def _retrieve_and_save(
             file=sys.stderr,
         )
         return 7
+    except NoVideoStream:
+        sys.stderr.write("\n")
+        print(
+            "video: job completed but returned no video stream and no "
+            "download_url is known; re-run `venice video-status "
+            f"{queue_id} --model {model} --download-url <url>` with the URL "
+            "printed when the job was queued.",
+            file=sys.stderr,
+        )
+        return 2
     sys.stderr.write("\n")
-
-    if isinstance(payload, (bytes, bytearray)):
-        data = bytes(payload)
-    else:
-        # VPS-backed model: retrieve reported COMPLETED (JSON) -- fetch the mp4.
-        if not download_url:
-            print(
-                "video: job completed but returned no video stream and no "
-                "download_url is known; re-run `venice video-status "
-                f"{queue_id} --model {model} --download-url <url>` with the URL "
-                "printed when the job was queued.",
-                file=sys.stderr,
-            )
-            return 2
-        try:
-            ctype, data = client.get_url_bytes(download_url)
-        except VeniceAPIError as e:
-            print(f"download failed: {e}", file=sys.stderr)
-            return _queue.status_to_exit(e)
 
     ext, unknown = _queue.ext_for(ctype, VIDEO_EXT_BY_CTYPE, default=".mp4")
     if unknown:
