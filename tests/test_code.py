@@ -16,6 +16,12 @@ def _tools(root, **kw):
     return {t.name: t for t in _code.code_tools(root, **kw)}
 
 
+_ASSET_NAMES = {
+    "venice_image", "venice_image_edit", "venice_sfx", "venice_music",
+    "venice_tts", "venice_upscale", "venice_bg_remove",
+}
+
+
 class TestCodeTools(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -223,6 +229,34 @@ class TestCodeFactory(unittest.TestCase):
         names = {t.name for t in _code.code_tools("/tmp", client=object(),
                                                   include_search=True)}
         self.assertNotIn("project_search", names)  # no .venice index discoverable
+
+    def test_assets_absent_by_default(self):
+        names = {t.name for t in _code.code_tools("/tmp", client=object())}
+        self.assertEqual(names & _ASSET_NAMES, set())
+
+    def test_assets_need_a_client(self):
+        # the flag alone (no client) folds nothing in
+        names = {t.name for t in _code.code_tools("/tmp", assets=True)}
+        self.assertEqual(names & _ASSET_NAMES, set())
+
+    def test_assets_present_when_enabled(self):
+        names = {t.name for t in _code.code_tools("/tmp", client=object(),
+                                                  assets=True)}
+        self.assertTrue(_ASSET_NAMES <= names)   # all 7 folded in
+        self.assertNotIn("venice_chat", names)   # excluded by design
+        self.assertNotIn("venice_video", names)  # deferred
+
+    def test_asset_tools_are_paid(self):
+        by = {t.name: t for t in _code.code_tools("/tmp", client=object(),
+                                                  assets=True)}
+        for n in _ASSET_NAMES:
+            self.assertTrue(by[n].paid, f"{n} should be paid")
+
+    def test_asset_schemas_exclude_control_kwargs(self):
+        for t in _code.code_tools("/tmp", client=object(), assets=True):
+            props = t.parameters.get("properties", {})
+            for banned in ("confirm", "max_spend", "output_dir"):
+                self.assertNotIn(banned, props, f"{t.name} leaks {banned}")
 
     def test_controlled_kwargs_stripped_from_model_args(self):
         # a model that smuggles confirm=True must not self-approve a paid tool

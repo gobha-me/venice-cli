@@ -168,6 +168,12 @@ def register(subparsers) -> None:
         metavar="SECS",
         help=f"Timeout for run/git commands (default: {_code.DEFAULT_EXEC_TIMEOUT}).",
     )
+    grp.add_argument(
+        "--assets", action="store_true", dest="assets", default=None,
+        help="Also expose the in-process asset-generation tools (venice_image, "
+        "image_edit, sfx, music, tts, upscale, bg_remove) so the agent can create "
+        "images/audio in the project. Paid: each confirms per call unless --auto.",
+    )
 
     it = p.add_argument_group("Interactive")
     it.add_argument(
@@ -350,6 +356,7 @@ def _run(args) -> int:
         root, client,
         exec_timeout=args.exec_timeout or _code.DEFAULT_EXEC_TIMEOUT,
         include_search=True,
+        assets=bool(args.assets),
     )
     system = _system_prompt(args, root, tools)
     gen_kwargs = _gen_kwargs(args)

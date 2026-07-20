@@ -238,6 +238,7 @@ _COMMAND_MAP = {
         "system": ("system", str),
         "root": ("root", str),
         "auto": ("auto", _as_bool),
+        "assets": ("assets", _as_bool),
         "max_tool_calls": ("max_tool_calls", int),
         "exec_timeout": ("exec_timeout", int),
     },

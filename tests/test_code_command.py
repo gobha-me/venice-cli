@@ -23,7 +23,7 @@ def _code_args(**ov):
         task=None, root=None, model=None, system=None, temperature=None,
         max_tokens=None, json=False, auto=None, manual=None, yes=None,
         plan_only=False, no_plan=False, no_verify=False, max_tool_calls=None,
-        exec_timeout=None, interactive=False, resume=None,
+        exec_timeout=None, interactive=False, resume=None, assets=None,
     )
     base.update(ov)
     return argparse.Namespace(**base)
@@ -91,6 +91,60 @@ class TestCodeCommand(unittest.TestCase):
         # auto -> confirm=True -> the write actually happened
         with open(os.path.join(self.root, "hello.py")) as f:
             self.assertEqual(f.read(), "def hi():\n    return 1\n")
+
+    # --- --assets exposes the in-process asset tools ---
+    def _exec_tool_names(self, calls):
+        # the execute turn is the one advertising tools with tool_choice="auto"
+        execs = [c for c in calls if c.get("tool_choice") == "auto"]
+        self.assertTrue(execs, "no execute turn recorded")
+        return {t["function"]["name"] for t in execs[0]["tools"]}
+
+    def test_assets_flag_exposes_asset_tools(self):
+        seq = [
+            FakeToolCompletion("plan"),
+            FakeToolCompletion("nothing to do"),           # execute (auto), no calls
+            FakeToolCompletion("ACCEPTANCE: PASS"),
+        ]
+        rc, calls = self._run(
+            _code_args(task="draw", root=self.root, auto=True, assets=True), seq)
+        self.assertEqual(rc, 0)
+        names = self._exec_tool_names(calls)
+        self.assertIn("venice_image", names)
+        self.assertIn("venice_image_edit", names)
+        self.assertNotIn("venice_chat", names)   # excluded by design
+
+    def test_assets_absent_by_default(self):
+        seq = [
+            FakeToolCompletion("plan"),
+            FakeToolCompletion("nothing to do"),
+            FakeToolCompletion("ACCEPTANCE: PASS"),
+        ]
+        rc, calls = self._run(
+            _code_args(task="x", root=self.root, auto=True), seq)
+        self.assertEqual(rc, 0)
+        self.assertNotIn("venice_image", self._exec_tool_names(calls))
+
+    def test_assets_tool_dispatches_with_confirm_under_auto(self):
+        seq = [
+            FakeToolCompletion("plan"),
+            FakeToolCompletion(tool_calls=[
+                _FnCall("c1", "venice_image",
+                        json.dumps({"prompt": "a hero sprite"}))]),
+            FakeToolCompletion("made the sprite"),
+            FakeToolCompletion("ACCEPTANCE: PASS"),
+        ]
+        with mock.patch(
+            "venice.commands._mcp.image_tool",
+            return_value={"status": "ok", "paths": ["/x.png"], "count": 1},
+        ) as stub:
+            rc, calls = self._run(
+                _code_args(task="draw", root=self.root, auto=True, assets=True), seq)
+        self.assertEqual(rc, 0)
+        self.assertEqual(stub.call_count, 1)
+        # --auto -> confirm=True bypasses the spend gate
+        self.assertTrue(stub.call_args.kwargs.get("confirm"))
+        # the model supplied only prompt; control kwargs are injected, not from args
+        self.assertEqual(stub.call_args.kwargs.get("prompt"), "a hero sprite")
 
     def test_acceptance_fail_returns_1(self):
         seq = [
