@@ -27,6 +27,8 @@ from tests.test_chat import (
     _args,
 )
 
+from venice.commands import _repl  # noqa: E402
+
 _EMPTY_CFG = {"version": 1, "mcpServers": {}, "defaults": {}}
 
 
@@ -289,6 +291,126 @@ class TestRepl(unittest.TestCase):
         # the interrupted first turn left no residue -> second call sees only "again"
         self.assertEqual([m["role"] for m in calls[1]["messages"]], ["user"])
         self.assertEqual(calls[1]["messages"][0]["content"], "again")
+
+    # ------------------------------------------------------------------ #
+    # #39: /models listing + bare /model listing
+    # ------------------------------------------------------------------ #
+    def test_slash_models_lists_catalog(self):
+        err = io.StringIO()
+        rc, fake, calls = _run_repl(
+            _args(interactive=True), [], ["/models", "/exit"], stderr=err,
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 0)  # listing never calls the model
+        out = err.getvalue()
+        self.assertIn("llama-3.3-70b", out)
+        self.assertIn("venice-uncensored", out)
+        self.assertIn("(default)", out)           # default-trait model marked
+        self.assertIn("* llama-3.3-70b", out)     # current model marked
+
+    def test_bare_model_shows_current_and_lists(self):
+        err = io.StringIO()
+        rc, fake, calls = _run_repl(
+            _args(interactive=True), [], ["/model", "/exit"], stderr=err,
+        )
+        self.assertEqual(rc, 0)
+        out = err.getvalue()
+        self.assertIn("model: llama-3.3-70b", out)  # current still shown
+        self.assertIn("venice-uncensored", out)     # ...plus the catalog list
+
+
+class _FakeRL:
+    """Minimal readline stand-in: the completer needs only these two hooks."""
+
+    def __init__(self, buffer, begidx, *, doc=""):
+        self._buffer = buffer
+        self._begidx = begidx
+        self.__doc__ = doc
+
+    def get_line_buffer(self):
+        return self._buffer
+
+    def get_begidx(self):
+        return self._begidx
+
+
+_CATALOG = [
+    {"id": "llama-3.3-70b", "model_spec": {"traits": ["default"]}},
+    {"id": "venice-uncensored", "model_spec": {"traits": []}},
+]
+
+
+class TestReplCompletion(unittest.TestCase):
+    """#40: the readline completer (unit-tested via an injected fake rl)."""
+
+    def _complete_all(self, buffer, begidx, text):
+        comp = _repl._make_completer(_CATALOG, _FakeRL(buffer, begidx))
+        out, state = [], 0
+        while (m := comp(text, state)) is not None:
+            out.append(m)
+            state += 1
+        return out
+
+    def test_commands_include_models(self):
+        self.assertIn("/models", _repl._COMMANDS)
+
+    def test_completes_slash_command(self):
+        self.assertEqual(self._complete_all("/mo", 0, "/mo"), ["/model", "/models"])
+
+    def test_completes_model_id_after_model(self):
+        self.assertEqual(
+            self._complete_all("/model ven", 7, "ven"), ["venice-uncensored"]
+        )
+
+    def test_bare_model_space_lists_all_ids(self):
+        self.assertEqual(
+            self._complete_all("/model ", 7, ""),
+            ["llama-3.3-70b", "venice-uncensored"],
+        )
+
+    def test_no_completion_off_slash_lines(self):
+        self.assertEqual(self._complete_all("hello wor", 6, "wor"), [])
+
+    def test_other_commands_get_no_model_ids(self):
+        # after `/save ` we offer nothing (filename completion is deferred)
+        self.assertEqual(self._complete_all("/save ", 6, ""), [])
+
+    def test_completer_tolerates_empty_catalog(self):
+        comp = _repl._make_completer(None, _FakeRL("/model ", 7))
+        self.assertIsNone(comp("", 0))  # no ids, no crash
+
+    def test_install_completer_restores_on_exit(self):
+        class RL:
+            def __init__(self):
+                self.completer = "PREV"
+                self.delims = "PREVDELIMS"
+                self.bound = None
+                self.__doc__ = ""  # not libedit -> "tab: complete"
+
+            def get_completer(self):
+                return self.completer
+
+            def get_completer_delims(self):
+                return self.delims
+
+            def set_completer(self, c):
+                self.completer = c
+
+            def set_completer_delims(self, d):
+                self.delims = d
+
+            def parse_and_bind(self, s):
+                self.bound = s
+
+        rl = RL()
+        with contextlib.ExitStack() as stack:
+            _repl._install_completer(rl, _CATALOG, stack)
+            self.assertTrue(callable(rl.completer))   # our completer is installed
+            self.assertEqual(rl.delims, " \t\n")
+            self.assertEqual(rl.bound, "tab: complete")
+        # leaving the REPL restores the prior completer + delims (no leak)
+        self.assertEqual(rl.completer, "PREV")
+        self.assertEqual(rl.delims, "PREVDELIMS")
 
 
 if __name__ == "__main__":

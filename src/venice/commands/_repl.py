@@ -37,12 +37,19 @@ _PROMPT = "you> "
 _HELP = """\
 Commands:
   /system [text]   show, or set, the system prompt (reseeds the conversation)
-  /model [name]    show, or switch, the model for following turns
+  /model [name]    switch model; with no name, show the current one and list the catalog
+  /models          list the available models (marks the current and default)
   /reset           clear the conversation (keeps the system prompt)
   /save [file]     write the transcript JSON (default: the --resume file)
   /help            show this help
   /exit, /quit     leave the REPL
 Anything else is sent to the model as your next message."""
+
+# Slash-commands, in help order -- the single source of truth for tab-completion
+# (#40). Keep in sync with `_dispatch_slash` and `_HELP`.
+_COMMANDS = (
+    "/system", "/model", "/models", "/reset", "/save", "/help", "/exit", "/quit",
+)
 
 
 class _TranscriptError(Exception):
@@ -112,6 +119,91 @@ def _current_system(messages: List[dict]) -> Optional[str]:
     if messages and messages[0].get("role") == "system":
         return messages[0].get("content")
     return None
+
+
+# --------------------------------------------------------------------------- #
+# Model listing (#39) + tab-completion (#40)
+# --------------------------------------------------------------------------- #
+def _format_model_list(models, current: Optional[str]) -> str:
+    """One id per line for `/models` and bare `/model`.
+
+    Marks the current model with ``*`` and the catalog's default-trait model with
+    a trailing ``(default)``; appends ``model_spec.name`` when present. Reuses the
+    already-fetched `models` list (no catalog re-fetch). Returns a printable block.
+    """
+    if not models:
+        return "(model catalog unavailable; pass --model or /model <id> to switch)"
+    default = _models.default_model(models)
+    lines = []
+    for m in models:
+        if not isinstance(m, dict):
+            continue
+        mid = m.get("id")
+        if not mid:
+            continue
+        spec = m.get("model_spec") if isinstance(m.get("model_spec"), dict) else {}
+        name = spec.get("name")
+        marker = "*" if mid == current else " "
+        tags = " (default)" if mid == default else ""
+        line = f"  {marker} {mid}{tags}"
+        if name:
+            line += f"  -- {name}"
+        lines.append(line)
+    return "\n".join(lines) if lines else "(no models advertised)"
+
+
+def _make_completer(models, rl):
+    """Build a `readline` completer over the slash-commands and model ids (#40).
+
+    `rl` is the readline module (injected so the closure is unit-testable without
+    a real terminal). The returned ``completer(text, state)`` completes the leading
+    ``/command`` token, and model ids after ``/model ``; it is a no-op on non-slash
+    lines so ordinary prose is never auto-completed.
+    """
+    model_ids = [
+        m.get("id") for m in (models or [])
+        if isinstance(m, dict) and m.get("id")
+    ]
+
+    def completer(text, state):
+        buf = rl.get_line_buffer()
+        if not buf.lstrip().startswith("/"):
+            return None
+        # Empty prefix left of the token => we're completing the command word.
+        if not buf[: rl.get_begidx()].strip():
+            candidates = _COMMANDS
+        elif buf.lstrip().split(maxsplit=1)[0].lower() == "/model":
+            candidates = model_ids
+        else:
+            candidates = ()
+        matches = [c for c in candidates if c.startswith(text)]
+        return matches[state] if state < len(matches) else None
+
+    return completer
+
+
+def _install_completer(rl, models, stack) -> None:
+    """Register the tab-completer for the session, restoring the previous one on exit.
+
+    Sets whitespace-only delimiters so a leading ``/command`` is one token, installs
+    the `_make_completer` closure, and binds Tab (libedit vs GNU readline). The
+    `stack` callback restores the prior completer + delims so we never leak into a
+    parent readline context (e.g. a REPL launched from another readline program).
+    """
+    prev_completer = rl.get_completer()
+    prev_delims = rl.get_completer_delims()
+
+    def _restore():
+        rl.set_completer(prev_completer)
+        rl.set_completer_delims(prev_delims)
+
+    stack.callback(_restore)
+    rl.set_completer_delims(" \t\n")
+    rl.set_completer(_make_completer(models, rl))
+    if "libedit" in (getattr(rl, "__doc__", "") or ""):
+        rl.parse_and_bind("bind ^I rl_complete")
+    else:
+        rl.parse_and_bind("tab: complete")
 
 
 # --------------------------------------------------------------------------- #
@@ -195,6 +287,9 @@ def _dispatch_slash(line, messages, state, args, models) -> str:
                 print(f"(model -> {new})", file=sys.stderr)
         else:
             print(f"model: {state['model']}", file=sys.stderr)
+            print(_format_model_list(models, state["model"]), file=sys.stderr)
+    elif cmd == "models":
+        print(_format_model_list(models, state["model"]), file=sys.stderr)
     elif cmd == "save":
         target = rest or getattr(args, "resume", None)
         if not target:
@@ -231,9 +326,9 @@ def run(args, oai, openai, client, models, model, initial=None, *,
     from . import chat  # lazy: chat imports this module at top (avoid a cycle)
 
     try:
-        import readline  # noqa: F401  (line editing + in-session history)
+        import readline as _rl  # line editing + in-session history + completion
     except Exception:  # pragma: no cover - platform without readline
-        pass
+        _rl = None
 
     try:
         messages = _seed_messages(args)
@@ -266,6 +361,9 @@ def run(args, oai, openai, client, models, model, initial=None, *,
                     return rc      # invalid --tool subset / MCP attach error
                 tools_on = False   # model lacks function calling -> plain chat
         state = {"model": model, "tools": tools, "tools_on": tools_on}
+
+        if _rl is not None:
+            _install_completer(_rl, models, stack)
 
         _banner(model, tools_on, getattr(args, "resume", None), messages, label=label)
 
