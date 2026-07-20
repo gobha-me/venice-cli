@@ -108,7 +108,8 @@ class TestDiscovery(_Base):
 
 class TestSearchCLI(_Base):
     def _args(self, **ov):
-        base = dict(query="alpha", index_path=self.root, top_k=None, json=False)
+        base = dict(query="alpha", index_path=self.root, top_k=None, json=False,
+                    embed_ca_bundle=None, embed_insecure=False)
         base.update(ov)
         return argparse.Namespace(**base)
 
@@ -176,6 +177,104 @@ class TestSearchTool(_Base):
         from venice.commands import _mcp
         res = _mcp.search_tool(object(), "  ")
         self.assertEqual(res["status"], "error")
+
+
+class TestSearchTLS(_Base):
+    """#42: TLS override supplied at query time reaches the SDK even though the
+    backend base_url comes from stored index meta (a local-backed index)."""
+
+    def _search_tls(self, *, env=None, stderr=None, **ov):
+        """search_index against the local-backed store with httpx.Client patched
+        to a sentinel; returns (Hx_mock, OAI_mock)."""
+        fake, _ = fake_openai()
+        base_env = _no_key_env()
+        if env:
+            base_env.update(env)
+        with mock.patch("httpx.Client", return_value="httpx-sentinel") as Hx, \
+             mock.patch("openai.OpenAI", return_value=fake) as OAI, \
+             mock.patch.dict(os.environ, base_env, clear=True), \
+             mock.patch.object(sys, "stderr", stderr or io.StringIO()):
+            _index.search_index(self.store, "alpha", **ov)
+        return Hx, OAI
+
+    def test_ca_bundle_reaches_sdk_at_query_time(self):
+        Hx, OAI = self._search_tls(ca_bundle="/ca.pem")
+        Hx.assert_called_once_with(verify="/ca.pem")
+        self.assertEqual(OAI.call_args.kwargs["http_client"], "httpx-sentinel")
+
+    def test_insecure_disables_verification_and_warns(self):
+        err = io.StringIO()
+        Hx, _ = self._search_tls(insecure=True, stderr=err)
+        Hx.assert_called_once_with(verify=False)
+        self.assertIn("TLS verification disabled", err.getvalue())
+
+    def test_no_override_builds_no_http_client(self):
+        Hx, OAI = self._search_tls()
+        Hx.assert_not_called()
+        self.assertNotIn("http_client", OAI.call_args.kwargs)
+
+    def test_env_ca_bundle_picked_up_when_no_arg(self):
+        # The no-CLI project_search path: search_index falls back to the env var so
+        # the agent tool also reaches a self-signed embedder.
+        Hx, _ = self._search_tls(env={"VENICE_EMBED_CA_BUNDLE": "/env-ca.pem"})
+        Hx.assert_called_once_with(verify="/env-ca.pem")
+
+    def test_explicit_ca_bundle_beats_env(self):
+        Hx, _ = self._search_tls(ca_bundle="/arg-ca.pem",
+                                 env={"VENICE_EMBED_CA_BUNDLE": "/env-ca.pem"})
+        Hx.assert_called_once_with(verify="/arg-ca.pem")
+
+    def test_project_search_tool_uses_env_ca_bundle(self):
+        # End-to-end for the agent path: _mcp.search_tool -> search_index picks up
+        # the env CA bundle. Discovery is cwd-based, so chdir into the indexed root.
+        cwd = os.getcwd()
+        self.addCleanup(os.chdir, cwd)
+        os.chdir(self.root)
+        fake, _ = fake_openai()
+        with mock.patch("httpx.Client", return_value="httpx-sentinel") as Hx, \
+             mock.patch("openai.OpenAI", return_value=fake), \
+             mock.patch.dict(os.environ, {**_no_key_env(),
+                                          "VENICE_EMBED_CA_BUNDLE": "/env-ca.pem"},
+                             clear=True), \
+             mock.patch.object(sys, "stderr", io.StringIO()):
+            from venice.commands import _mcp
+            res = _mcp.search_tool(object(), "alpha", k=1)
+        self.assertEqual(res["status"], "ok")
+        Hx.assert_called_once_with(verify="/env-ca.pem")
+
+
+class TestBackendFromMetaGate(unittest.TestCase):
+    """#42: on a Venice-built index the TLS flags don't apply. Explicit flags are
+    rejected (exit 2); a globally-set env CA bundle is ignored, never tripping the
+    gate -- so project_search over a Venice index keeps working."""
+
+    def test_explicit_flags_rejected_on_venice_index(self):
+        import openai
+        err = io.StringIO()
+        with mock.patch.object(sys, "stderr", err):
+            oai, model, rc = _index._backend_from_meta(
+                openai, {"backend": "venice", "model": "m"}, ca_bundle="/ca.pem")
+        self.assertEqual(rc, 2)
+        self.assertIsNone(oai)
+        self.assertIn("only apply to a local-backend index", err.getvalue())
+
+    def test_env_ca_bundle_does_not_trip_venice_gate(self):
+        import openai
+        from venice import auth
+        err = io.StringIO()
+        # env set + no explicit flag: the venice path never consults env, so the
+        # TLS gate is NOT tripped -- we fall through to auth (stubbed to fail).
+        with mock.patch.dict(os.environ, {**_no_key_env(),
+                                          "VENICE_EMBED_CA_BUNDLE": "/env-ca.pem"},
+                             clear=True), \
+             mock.patch("venice.commands._index.build_client_from_auth",
+                        side_effect=auth.AuthError("no key")), \
+             mock.patch.object(sys, "stderr", err):
+            oai, model, rc = _index._backend_from_meta(
+                openai, {"backend": "venice", "model": "m"})
+        self.assertEqual(rc, 2)
+        self.assertNotIn("only apply to a local-backend index", err.getvalue())
+        self.assertIn("no key", err.getvalue())
 
 
 if __name__ == "__main__":

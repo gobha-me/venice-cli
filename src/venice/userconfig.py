@@ -224,12 +224,14 @@ _COMMAND_MAP = {
         "dimensions": ("dimensions", int),
         "embed_base_url": ("embed_base_url", str),
         "embed_model": ("embed_model", str),
+        "embed_ca_bundle": ("embed_ca_bundle", str),
         "batch": ("batch", int),
         "chunk_lines": ("chunk_lines", int),
         "chunk_overlap": ("chunk_overlap", int),
     },
     "search": {
         "top_k": ("top_k", int),
+        "embed_ca_bundle": ("embed_ca_bundle", str),
     },
     "code": {
         "model": ("model", str),

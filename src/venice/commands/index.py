@@ -44,6 +44,17 @@ def register(subparsers) -> None:
         "--embed-model", dest="embed_model", default=None, metavar="NAME",
         help="Model id for --embed-base-url (required with it).",
     )
+    tls = p.add_mutually_exclusive_group()
+    tls.add_argument(
+        "--embed-ca-bundle", dest="embed_ca_bundle", default=None, metavar="PATH",
+        help="CA bundle (PEM) to verify a self-signed --embed-base-url; also "
+             "$VENICE_EMBED_CA_BUNDLE. Alternate backend only.",
+    )
+    tls.add_argument(
+        "--embed-insecure", dest="embed_insecure", action="store_true",
+        help="Disable TLS verification for --embed-base-url (alternate backend "
+             "only). Insecure -- prefer --embed-ca-bundle.",
+    )
     p.add_argument(
         "--dimensions", type=int, default=None,
         help="Truncate embedding vectors to this many dimensions (if supported).",
@@ -77,6 +88,8 @@ def _run(args) -> int:
     # (which only fills a dest still None), same as `venice embed`.
     if args.embed_base_url is None:
         args.embed_base_url = os.environ.get(config.ENV_EMBED_BASE_URL)
+    if args.embed_ca_bundle is None:
+        args.embed_ca_bundle = os.environ.get(config.ENV_EMBED_CA_BUNDLE)
     userconfig.apply_defaults(args, "index")
 
     def _progress(msg: str) -> None:
@@ -95,6 +108,8 @@ def _run(args) -> int:
             chunk_lines=args.chunk_lines or _index.DEFAULT_CHUNK_LINES,
             chunk_overlap=(args.chunk_overlap if args.chunk_overlap is not None
                            else _index.DEFAULT_CHUNK_OVERLAP),
+            ca_bundle=args.embed_ca_bundle,
+            insecure=args.embed_insecure,
             on_progress=_progress,
         )
     except _index.IndexingError as e:

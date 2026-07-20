@@ -68,7 +68,8 @@ def write(root, rel, content, *, binary=False):
 
 def _no_key_env():
     return {k: v for k, v in os.environ.items()
-            if k not in ("VENICE_API_KEY", "VENICE_EMBED_BASE_URL", "VENICE_EMBED_API_KEY")}
+            if k not in ("VENICE_API_KEY", "VENICE_EMBED_BASE_URL",
+                         "VENICE_EMBED_API_KEY", "VENICE_EMBED_CA_BUNDLE")}
 
 
 class _EngineBase(unittest.TestCase):
@@ -323,7 +324,8 @@ class TestMissingOpenai(_EngineBase):
 class TestIndexCLI(unittest.TestCase):
     def _args(self, root, **ov):
         base = dict(path=root, model=None, embed_base_url="http://local/v1",
-                    embed_model="m", dimensions=None, rebuild=False, exclude=None,
+                    embed_model="m", embed_ca_bundle=None, embed_insecure=False,
+                    dimensions=None, rebuild=False, exclude=None,
                     batch=None, chunk_lines=None, chunk_overlap=None)
         base.update(ov)
         return argparse.Namespace(**base)
@@ -344,6 +346,111 @@ class TestIndexCLI(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(out.getvalue().strip(),
                          str(_index.store_file(_index.store_dir_for_root(tmp.name))))
+
+    # --- #42: TLS override reaches the SDK through CLI env/config layering ---
+
+    def _run_tls(self, *, env=None, doc=None, **arg_ov):
+        """Drive index._run against the local backend with httpx.Client patched to
+        a sentinel; returns (rc, Hx_mock) so a test can assert the verify value."""
+        from venice.commands import index
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        write(tmp.name, "a.py", "alpha\n")
+        base_env = _no_key_env()
+        if env:
+            base_env.update(env)
+        fake, _ = fake_openai()
+        with mock.patch("httpx.Client", return_value="httpx-sentinel") as Hx, \
+             mock.patch("openai.OpenAI", return_value=fake), \
+             mock.patch("venice.userconfig.load_config",
+                        return_value=doc or _clean_doc()), \
+             mock.patch.dict(os.environ, base_env, clear=True), \
+             mock.patch.object(sys, "stdout", io.StringIO()), \
+             mock.patch.object(sys, "stderr", io.StringIO()):
+            rc = index._run(self._args(tmp.name, **arg_ov))
+        return rc, Hx
+
+    def test_ca_bundle_from_flag(self):
+        rc, Hx = self._run_tls(embed_ca_bundle="/flag-ca.pem")
+        self.assertEqual(rc, 0)
+        Hx.assert_called_once_with(verify="/flag-ca.pem")
+
+    def test_ca_bundle_from_env(self):
+        rc, Hx = self._run_tls(env={"VENICE_EMBED_CA_BUNDLE": "/env-ca.pem"})
+        self.assertEqual(rc, 0)
+        Hx.assert_called_once_with(verify="/env-ca.pem")
+
+    def test_ca_bundle_from_config(self):
+        doc = {"version": 1, "mcpServers": {}, "defaults": {
+            "index": {"embed_ca_bundle": "/cfg-ca.pem"}}}
+        rc, Hx = self._run_tls(doc=doc)
+        self.assertEqual(rc, 0)
+        Hx.assert_called_once_with(verify="/cfg-ca.pem")
+
+    def test_flag_beats_env(self):
+        rc, Hx = self._run_tls(embed_ca_bundle="/flag-ca.pem",
+                               env={"VENICE_EMBED_CA_BUNDLE": "/env-ca.pem"})
+        self.assertEqual(rc, 0)
+        Hx.assert_called_once_with(verify="/flag-ca.pem")
+
+
+class TestIndexTLS(_EngineBase):
+    """#42: TLS escape hatch on the local embedding backend (engine level)."""
+
+    def _build(self, *, stderr=None, **ov):
+        """build_index on self.root via the local backend, httpx.Client patched to
+        a sentinel. Returns (Hx_mock, OAI_mock); propagates IndexingError."""
+        write(self.root, "a.txt", "alpha\n")
+        fake, _ = fake_openai()
+        kw = dict(embed_base_url="http://local/v1", embed_model="m")
+        kw.update(ov)
+        with mock.patch("httpx.Client", return_value="httpx-sentinel") as Hx, \
+             mock.patch("openai.OpenAI", return_value=fake) as OAI, \
+             mock.patch.dict(os.environ, _no_key_env(), clear=True), \
+             mock.patch.object(sys, "stderr", stderr or io.StringIO()):
+            _index.build_index(self.root, **kw)
+        return Hx, OAI
+
+    def test_ca_bundle_reaches_sdk_on_alt_path(self):
+        Hx, OAI = self._build(ca_bundle="/ca.pem")
+        Hx.assert_called_once_with(verify="/ca.pem")
+        self.assertEqual(OAI.call_args.kwargs["http_client"], "httpx-sentinel")
+
+    def test_insecure_disables_verification_and_warns(self):
+        err = io.StringIO()
+        Hx, OAI = self._build(insecure=True, stderr=err)
+        Hx.assert_called_once_with(verify=False)
+        self.assertEqual(OAI.call_args.kwargs["http_client"], "httpx-sentinel")
+        self.assertIn("TLS verification disabled", err.getvalue())
+
+    def test_no_override_builds_no_http_client(self):
+        Hx, OAI = self._build()
+        Hx.assert_not_called()
+        self.assertNotIn("http_client", OAI.call_args.kwargs)
+
+    def test_insecure_without_base_url_is_rejected(self):
+        err = io.StringIO()
+        with self.assertRaises(_index.IndexingError) as cm:
+            self._build(embed_base_url=None, insecure=True, stderr=err)
+        self.assertEqual(cm.exception.exit_code, 2)
+        self.assertIn("only apply with --embed-base-url", err.getvalue())
+
+    def test_ca_bundle_without_base_url_is_rejected(self):
+        err = io.StringIO()
+        with self.assertRaises(_index.IndexingError) as cm:
+            self._build(embed_base_url=None, ca_bundle="/ca.pem", stderr=err)
+        self.assertEqual(cm.exception.exit_code, 2)
+        self.assertIn("only apply with --embed-base-url", err.getvalue())
+
+    def test_ca_bundle_and_insecure_are_mutually_exclusive(self):
+        from venice.commands import index
+        parser = argparse.ArgumentParser()
+        sub = parser.add_subparsers()
+        index.register(sub)
+        with mock.patch.object(sys, "stderr", io.StringIO()), \
+             self.assertRaises(SystemExit):
+            parser.parse_args(
+                ["index", "--embed-ca-bundle", "/ca.pem", "--embed-insecure"])
 
 
 if __name__ == "__main__":

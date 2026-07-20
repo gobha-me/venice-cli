@@ -8,9 +8,10 @@ lives in the print-free ``commands._index``; this wraps it for the CLI.
 from __future__ import annotations
 
 import json
+import os
 import sys
 
-from .. import userconfig
+from .. import config, userconfig
 from . import _index
 
 
@@ -36,6 +37,17 @@ def register(subparsers) -> None:
         "-k", "--top-k", dest="top_k", type=int, default=None,
         help=f"Number of results to return (default: {_index.DEFAULT_TOP_K}).",
     )
+    tls = p.add_mutually_exclusive_group()
+    tls.add_argument(
+        "--embed-ca-bundle", dest="embed_ca_bundle", default=None, metavar="PATH",
+        help="CA bundle (PEM) to verify a self-signed embedding backend when the "
+             "index was built with --embed-base-url; also $VENICE_EMBED_CA_BUNDLE.",
+    )
+    tls.add_argument(
+        "--embed-insecure", dest="embed_insecure", action="store_true",
+        help="Disable TLS verification for a local-backend index's embedding "
+             "endpoint. Insecure -- prefer --embed-ca-bundle.",
+    )
     p.add_argument(
         "--json", action="store_true",
         help="Print results as a JSON object instead of text.",
@@ -44,6 +56,11 @@ def register(subparsers) -> None:
 
 
 def _run(args) -> int:
+    # Backend TLS flags follow CLI > env > config, same as `venice embed`/`index`;
+    # insecure is CLI-only (no env). The gate against a Venice-built index lives in
+    # the engine (a CA path is machine-local -- never stored in the index meta).
+    if args.embed_ca_bundle is None:
+        args.embed_ca_bundle = os.environ.get(config.ENV_EMBED_CA_BUNDLE)
     userconfig.apply_defaults(args, "search")
 
     store_dir = _index.discover_store(args.index_path)
@@ -55,7 +72,8 @@ def _run(args) -> int:
 
     try:
         results = _index.search_index(
-            store_dir, args.query, k=args.top_k or _index.DEFAULT_TOP_K)
+            store_dir, args.query, k=args.top_k or _index.DEFAULT_TOP_K,
+            ca_bundle=args.embed_ca_bundle, insecure=args.embed_insecure)
     except _index.IndexingError as e:
         if str(e):
             print(f"search: {e}", file=sys.stderr)
