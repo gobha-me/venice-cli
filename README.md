@@ -765,6 +765,26 @@ venice index . --embed-base-url http://localhost:1234/v1 --embed-model bge-m3
 venice search "parse the queue response"   # uses the index's own backend/model
 ```
 
+**Self-signed backends.** Both commands accept the same TLS escape hatches as
+`venice embed` — **applied only to a local backend, never the Venice endpoint**:
+
+```sh
+venice index . --embed-base-url https://embed.local/v1 --embed-model bge-m3 \
+    --embed-ca-bundle /etc/ssl/my-ca.pem        # trust a private CA (or $VENICE_EMBED_CA_BUNDLE)
+venice search "parse the queue response" --embed-ca-bundle /etc/ssl/my-ca.pem
+venice index . --embed-base-url https://embed.local/v1 --embed-model bge-m3 \
+    --embed-insecure                            # disable verification (warns; CLI-only)
+```
+
+`--embed-ca-bundle` reads `$VENICE_EMBED_CA_BUNDLE` and is config-backable
+(`defaults.index.embed_ca_bundle` / `defaults.search.embed_ca_bundle`);
+`--embed-insecure` is CLI-only, mutually exclusive with it, and errors (exit 2) if
+the flags don't apply (no `--embed-base-url` for `index`, or a Venice-built index
+for `search`). For `search` the CA bundle is supplied fresh at query time — it is
+never baked into the index — and the `project_search` agent tool also honours
+`$VENICE_EMBED_CA_BUNDLE`, so a `venice chat`/`venice code` session can search an
+index built against a self-signed embedder.
+
 The index is machine-generated: `venice index` drops a self-ignoring
 `.venice/.gitignore`, so it won't be committed even if your repo doesn't already
 ignore `.venice/`. Config-backable per-flag via `defaults.index.*` /
@@ -1010,7 +1030,7 @@ The player list (`paplay` -> `aplay` -> `ffplay` -> `mpg123` -> `play`
 | `VENICE_BASE_URL` | override the API base URL (testing, proxy) |
 | `VENICE_EMBED_BASE_URL` | `embed` alternate OpenAI-compatible endpoint (local backend) |
 | `VENICE_EMBED_API_KEY` | key for `VENICE_EMBED_BASE_URL` (if the backend needs one) |
-| `VENICE_EMBED_CA_BUNDLE` | CA bundle to trust for `VENICE_EMBED_BASE_URL` TLS (self-signed backend) |
+| `VENICE_EMBED_CA_BUNDLE` | CA bundle to trust for a self-signed embedding backend (`embed`, `index`, `search`, and the `project_search` agent tool) |
 | `VENICE_MCP_MAX_SPEND` | `mcp-serve` auto-approve cap in USD (default `0.10`) |
 | `VENICE_MCP_OUTPUT_DIR` | where `mcp-serve` tools write files (default: cwd) |
 
@@ -1034,7 +1054,7 @@ The player list (`paplay` -> `aplay` -> `ffplay` -> `mpg123` -> `play`
 | `venice chat MESSAGE [--system S] [--model M] [--web-search on] [...]` | one-shot chat completion (OpenAI SDK) |
 | `venice chat [-i] [--resume FILE]` | interactive multi-turn REPL (conversation state, `/`-commands, transcripts) |
 | `venice embed [TEXT] [--from-file PATH] [--model M] [--dimensions N] [--json] [--embed-base-url URL --embed-model M [--embed-ca-bundle PATH \| --embed-insecure]]` | text embeddings (OpenAI SDK; alt/local backend) |
-| `venice index [PATH] [--model M] [...]` / `venice search QUERY [-k N] [--json]` | build / query a local semantic index of a project tree |
+| `venice index [PATH] [--model M] [--embed-base-url URL --embed-model M [--embed-ca-bundle PATH \| --embed-insecure]] [...]` / `venice search QUERY [-k N] [--json] [--embed-ca-bundle PATH \| --embed-insecure]` | build / query a local semantic index of a project tree |
 | `venice code [TASK] [--auto\|--manual] [--plan-only] [-i] [--root DIR] [--json] [...]` | coding agent: plan → accept → edit/run a project (needs `[openai]` + tool-calling model) |
 | `venice mcp-serve` | run an MCP server (stdio) exposing venice tools (needs `[mcp]`) |
 | `venice config add\|list\|remove\|show` | manage the MCP server registry |

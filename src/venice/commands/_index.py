@@ -407,23 +407,46 @@ def _sha256(data: bytes) -> str:
 # --------------------------------------------------------------------------- #
 # Embedding backend resolution + batched embedding
 # --------------------------------------------------------------------------- #
-def _resolve_backend(openai, *, embed_base_url, embed_model, model):
+def _resolve_backend(openai, *, embed_base_url, embed_model, model,
+                     ca_bundle=None, insecure=False):
     """Return (oai_client, model, backend_meta, exit_code). exit_code None on success.
 
     Mirrors ``embed._resolve_backend`` but stdout-free and primitive-arg. Local
     backend (--embed-base-url) skips Venice auth+catalog; Venice path validates
-    --model against the free /models catalog.
+    --model against the free /models catalog. TLS overrides (`ca_bundle`/`insecure`,
+    #42) apply to the local backend only -- the Venice endpoint's TLS is not
+    overridable, so the flags are rejected there.
     """
     if embed_base_url:
         if not embed_model:
             print("index: --embed-model is required with --embed-base-url", file=sys.stderr)
             return None, None, None, 2
+        # TLS override, opt-in and non-Venice only: --embed-insecure wins (the CLI
+        # already blocks passing both), else a CA bundle, else the SDK default.
+        verify = False if insecure else (ca_bundle or None)
+        if verify is False:
+            print(
+                "index: WARNING: TLS verification disabled (--embed-insecure) "
+                f"for {embed_base_url}",
+                file=sys.stderr,
+            )
         oai = _openai.build_openai(
             openai, base_url=embed_base_url,
             api_key=os.environ.get(config.ENV_EMBED_API_KEY),
+            verify=verify,
         )
         meta = {"backend": "local", "model": embed_model, "base_url": embed_base_url}
         return oai, embed_model, meta, None
+
+    # The Venice endpoint's TLS is not overridable -- reject the flags here so they
+    # can't silently no-op against Venice.
+    if insecure or ca_bundle:
+        print(
+            "index: --embed-insecure/--embed-ca-bundle only apply with "
+            "--embed-base-url",
+            file=sys.stderr,
+        )
+        return None, None, None, 2
 
     try:
         client = build_client_from_auth()
@@ -437,19 +460,47 @@ def _resolve_backend(openai, *, embed_base_url, embed_model, model):
     return _openai.build_openai(openai, client), resolved, {"backend": "venice", "model": resolved}, None
 
 
-def _backend_from_meta(openai, meta: dict):
+def _backend_from_meta(openai, meta: dict, *, ca_bundle=None, insecure=False):
     """Rebuild the SDK client for `venice search` from stored index meta.
 
     The query MUST be embedded with the same backend/model/dims as the index, so
     everything comes from meta -- never re-resolved against a (possibly changed)
     catalog. The local-backend key is re-supplied from $VENICE_EMBED_API_KEY.
+
+    TLS overrides (#42) apply to a local-backend index only and are supplied fresh
+    at query time -- a CA path is machine-local, so it is never baked into the
+    store. `ca_bundle` falls back to $VENICE_EMBED_CA_BUNDLE so the no-CLI
+    `project_search` agent tool also reaches a self-signed embedder; `insecure` has
+    no env knob (CLI-only). On a Venice-built index the flags don't apply and are
+    rejected (exit 2) -- but the env fallback is consulted on the local path only,
+    so a globally-set $VENICE_EMBED_CA_BUNDLE never breaks searching a Venice index.
     """
     if meta.get("backend") == "local":
+        if ca_bundle is None:
+            ca_bundle = os.environ.get(config.ENV_EMBED_CA_BUNDLE)
+        verify = False if insecure else (ca_bundle or None)
+        if verify is False:
+            print(
+                "search: WARNING: TLS verification disabled (--embed-insecure) "
+                f"for {meta.get('base_url')}",
+                file=sys.stderr,
+            )
         oai = _openai.build_openai(
             openai, base_url=meta.get("base_url"),
             api_key=os.environ.get(config.ENV_EMBED_API_KEY),
+            verify=verify,
         )
         return oai, meta.get("model"), None
+
+    # Venice-built index: TLS is not overridable. Reject explicitly-passed flags
+    # loudly (parity with embed/index).
+    if insecure or ca_bundle:
+        print(
+            "search: --embed-insecure/--embed-ca-bundle only apply to a "
+            "local-backend index",
+            file=sys.stderr,
+        )
+        return None, None, 2
     try:
         client = build_client_from_auth()
     except auth.AuthError as e:
@@ -504,6 +555,7 @@ def _meta_conflict(old_meta: dict, backend_meta: dict, dimensions: Optional[int]
 def build_index(root, *, model=None, embed_base_url=None, embed_model=None,
                 dimensions=None, rebuild=False, excludes=None, batch=DEFAULT_BATCH,
                 chunk_lines=DEFAULT_CHUNK_LINES, chunk_overlap=DEFAULT_CHUNK_OVERLAP,
+                ca_bundle=None, insecure=False,
                 on_progress: Optional[Callable[[str], None]] = None) -> dict:
     """Build/update the index under `root`. Returns a summary dict on success;
     raises IndexingError(exit_code) on failure. stdout-free (progress -> on_progress
@@ -520,7 +572,8 @@ def build_index(root, *, model=None, embed_base_url=None, embed_model=None,
         raise IndexingError("", 2)
 
     oai, resolved_model, backend_meta, rc = _resolve_backend(
-        openai, embed_base_url=embed_base_url, embed_model=embed_model, model=model)
+        openai, embed_base_url=embed_base_url, embed_model=embed_model, model=model,
+        ca_bundle=ca_bundle, insecure=insecure)
     if rc is not None:
         raise IndexingError("", rc)
 
@@ -687,7 +740,7 @@ def _preview(root: Path, rel: str, start: int, end: int, stored_sha: Optional[st
 
 
 def search_index(store_dir, query: str, *, k: int = DEFAULT_TOP_K,
-                 with_preview: bool = True) -> List[dict]:
+                 with_preview: bool = True, ca_bundle=None, insecure=False) -> List[dict]:
     """Embed `query` with the index's own backend/model and return the top-`k`
     chunks as dicts ``{path, start, end, score[, preview, changed]}``. stdout-free;
     raises IndexingError(exit_code) on failure."""
@@ -702,7 +755,7 @@ def search_index(store_dir, query: str, *, k: int = DEFAULT_TOP_K,
     openai = _openai.import_openai("search")
     if openai is None:
         raise IndexingError("", 2)
-    oai, model, rc = _backend_from_meta(openai, meta)
+    oai, model, rc = _backend_from_meta(openai, meta, ca_bundle=ca_bundle, insecure=insecure)
     if rc is not None:
         raise IndexingError("", rc)
 
