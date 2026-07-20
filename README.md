@@ -872,8 +872,9 @@ working directory), or a per-call `output_dir`. The API key is read the usual
 way (`$VENICE_API_KEY` or the credentials file) and is never echoed.
 
 Only stdout carries the JSON-RPC protocol; the server's own diagnostics go to
-stderr. `venice image-edit` exists as a CLI command, but it and the video tools
-are not exposed over MCP yet (tracked separately).
+stderr. Video generation and image editing are exposed over MCP too: the
+`venice_video` and `venice_image_edit` tools cover the same capabilities as the
+`venice video` and `venice image-edit` CLI commands.
 
 The reverse direction — venice as an MCP **client**, calling *other* servers'
 tools inside `venice chat` — is [`venice chat --mcp`](#external-mcp-tools---mcp).
