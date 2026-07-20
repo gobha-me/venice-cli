@@ -566,5 +566,49 @@ class TestImageFlow(unittest.TestCase):
         self.assertEqual(rc, 2)
 
 
+class TestHideWatermarkConfig(unittest.TestCase):
+    """`--hide-watermark` is tri-state + config-backable (issue #56)."""
+
+    def _parse(self, *argv):
+        from venice.cli import build_parser
+        return build_parser().parse_args(["image", "p", *argv])
+
+    def test_flag_is_tristate(self):
+        self.assertIsNone(self._parse().hide_watermark)          # unset
+        self.assertTrue(self._parse("--hide-watermark").hide_watermark)
+        self.assertFalse(self._parse("--no-hide-watermark").hide_watermark)
+
+    def test_body_none_keeps_watermark(self):
+        from venice.commands import image
+        body = image._build_body("p", _build_args(hide_watermark=None))
+        self.assertEqual(body["hide_watermark"], False)  # None -> keep watermark
+
+    def test_config_default_hides_watermark(self):
+        from venice.commands import image
+        from venice import userconfig
+        doc = {"version": 1, "mcpServers": {},
+               "defaults": {"image": {"hide_watermark": True}}}
+        args = self._parse()  # nothing on the CLI
+        userconfig.apply_defaults(args, "image", doc)
+        self.assertTrue(args.hide_watermark)
+        self.assertEqual(image._build_body("p", args)["hide_watermark"], True)
+
+    def test_cli_no_hide_overrides_config_default(self):
+        from venice import userconfig
+        doc = {"version": 1, "mcpServers": {},
+               "defaults": {"image": {"hide_watermark": True}}}
+        args = self._parse("--no-hide-watermark")  # explicit off wins
+        userconfig.apply_defaults(args, "image", doc)
+        self.assertFalse(args.hide_watermark)
+
+    def test_config_string_value_coerced(self):
+        from venice import userconfig
+        doc = {"version": 1, "mcpServers": {},
+               "defaults": {"image": {"hide_watermark": "true"}}}
+        args = self._parse()
+        userconfig.apply_defaults(args, "image", doc)
+        self.assertTrue(args.hide_watermark)  # _as_bool coerces "true"
+
+
 if __name__ == "__main__":
     unittest.main()

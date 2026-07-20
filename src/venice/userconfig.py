@@ -242,6 +242,11 @@ _COMMAND_MAP = {
         "max_tool_calls": ("max_tool_calls", int),
         "exec_timeout": ("exec_timeout", int),
     },
+    "image": {
+        # `--hide-watermark` is tri-state (default None) so this default can win;
+        # an explicit --hide-watermark/--no-hide-watermark on the CLI still wins.
+        "hide_watermark": ("hide_watermark", _as_bool),
+    },
 }
 
 
