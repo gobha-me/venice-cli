@@ -202,6 +202,21 @@ _IMAGE_EDIT_SCHEMA = _obj(
     required=["prompt"],
 )
 
+_VIDEO_SCHEMA = _obj(
+    {
+        "prompt": _p("string", "What the video should depict."),
+        "model": _p("string", "Video model id (default: the catalog default)."),
+        "duration": _p("string", "Clip length, e.g. '5s'."),
+        "negative_prompt": _p("string"),
+        "resolution": _p("string", "Output resolution tier, e.g. 720p/1080p."),
+        "aspect_ratio": _p("string", "Output aspect ratio, e.g. 16:9."),
+        "no_audio": _p("boolean", "Generate silent video (no soundtrack)."),
+        "image_url": _p("string", "URL of a start/reference image (image-to-video)."),
+        "end_image_url": _p("string", "URL of an end frame to interpolate toward."),
+    },
+    required=["prompt"],
+)
+
 # (tool name, `_mcp` impl attribute, description, schema, paid). The impl is
 # stored by NAME and resolved via getattr(_mcp, ...) at builtin_tools() time, so a
 # single source of truth wins and tests can patch `_mcp.<impl>`.
@@ -290,6 +305,15 @@ _CODE_ASSET_BUILTINS = [
         "/image/multi-edit for masks). Writes the result and returns its path. "
         "Dynamic pricing, so it always needs confirmation.",
         _IMAGE_EDIT_SCHEMA,
+        True,
+    ),
+    (
+        "venice_video",
+        "video_tool",
+        "Generate a short video via Venice's async video queue (blocks with a capped "
+        "wait; can be slow). Optionally image-to-video from image_url. Writes an .mp4 "
+        "and returns its path. Dynamic pricing, so it always needs confirmation.",
+        _VIDEO_SCHEMA,
         True,
     ),
 ]

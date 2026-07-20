@@ -459,7 +459,7 @@ def code_tools(
 
     When `assets` and a `client` are supplied, the in-process asset-generation tools
     (`venice_image`/`venice_image_edit`/`venice_sfx`/`venice_music`/`venice_tts`/
-    `venice_upscale`/`venice_bg_remove`) are folded in via `_agent.builtin_tools`,
+    `venice_upscale`/`venice_bg_remove`/`venice_video`) are folded in via `_agent.builtin_tools`,
     so the agent can create images/audio in the project. They are paid and route
     through the same confirm/spend gate; generated files land in
     ``$VENICE_MCP_OUTPUT_DIR`` or, by default, under `root`.
@@ -534,6 +534,7 @@ def code_tools(
             only={
                 "venice_image", "venice_image_edit", "venice_sfx",
                 "venice_music", "venice_tts", "venice_upscale", "venice_bg_remove",
+                "venice_video",
             },
         ))
     return tools

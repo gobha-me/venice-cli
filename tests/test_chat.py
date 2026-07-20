@@ -760,6 +760,13 @@ class TestBuiltinToolsRegistry(unittest.TestCase):
             self.assertNotIn(banned, props)
         self.assertEqual(_agent._IMAGE_EDIT_SCHEMA.get("required"), ["prompt"])
 
+    def test_video_schema_excludes_controlled(self):
+        from venice.commands import _agent
+        props = _agent._VIDEO_SCHEMA["properties"]
+        for banned in ("confirm", "max_spend", "output_dir"):
+            self.assertNotIn(banned, props)
+        self.assertEqual(_agent._VIDEO_SCHEMA.get("required"), ["prompt"])
+
 
 if __name__ == "__main__":
     unittest.main()
