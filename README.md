@@ -520,10 +520,12 @@ venice chat --resume session.json
 ```
 
 In-REPL slash-commands: `/system [text]` (show/set the system prompt),
-`/model [name]` (switch model), `/reset` (clear history, keep the system
-prompt), `/save [file]` (write the transcript JSON; defaults to the `--resume`
-file), `/help`, and `/exit` (or `/quit`, or Ctrl-D). Ctrl-C aborts the current
-turn without ending the session.
+`/model [name]` (switch model; with no name, show the current one and list the
+catalog), `/models` (list the available models, marking the current and the
+default), `/reset` (clear history, keep the system prompt), `/save [file]`
+(write the transcript JSON; defaults to the `--resume` file), `/help`, and
+`/exit` (or `/quit`, or Ctrl-D). Ctrl-C aborts the current turn without ending
+the session. Tab completes slash-commands (and model ids after `/model `).
 
 ### Venice extensions
 
