@@ -161,7 +161,7 @@ def register(subparsers) -> None:
         "--max-tool-calls", type=int, default=None, dest="max_tool_calls",
         metavar="N",
         help=f"Cap tool invocations before forcing a final answer (default: "
-        f"{_DEFAULT_MAX_TOOL_CALLS}).",
+        f"{_DEFAULT_MAX_TOOL_CALLS}; 0 = unlimited, run until the model stops).",
     )
     grp.add_argument(
         "--exec-timeout", type=int, default=None, dest="exec_timeout",
@@ -372,7 +372,7 @@ def _run(args) -> int:
         return _repl.run(
             args, oai, openai, client, models, model, initial=task,
             tools_session=_code_session(tools), gen_kwargs=gen_kwargs,
-            label="venice code",
+            label="venice code", max_tool_calls=_DEFAULT_MAX_TOOL_CALLS,
         )
 
     return _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task)
@@ -449,7 +449,10 @@ def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task
     # --- Execute ---
     messages.append({"role": "user", "content": _PROCEED_MSG})
     yes = mode == "auto"
-    max_calls = args.max_tool_calls or _DEFAULT_MAX_TOOL_CALLS
+    max_calls = (
+        args.max_tool_calls if args.max_tool_calls is not None
+        else _DEFAULT_MAX_TOOL_CALLS
+    )
     final_text = None
     try:
         if args.json:

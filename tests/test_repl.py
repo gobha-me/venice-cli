@@ -318,6 +318,40 @@ class TestRepl(unittest.TestCase):
         self.assertIn("model: llama-3.3-70b", out)  # current still shown
         self.assertIn("venice-uncensored", out)     # ...plus the catalog list
 
+    # ------------------------------------------------------------------ #
+    # #55: /auto and /manual toggle per-turn auto-accept; banner shows state
+    # ------------------------------------------------------------------ #
+    def test_slash_auto_and_manual_toggle_state(self):
+        state = {"model": "m", "tools": [], "tools_on": True, "yes": False,
+                 "max_tool_calls": 8}
+        err = io.StringIO()
+        with mock.patch.object(sys, "stderr", err):
+            _repl._dispatch_slash("/auto", [], state, _args(interactive=True), [])
+            self.assertTrue(state["yes"])
+            _repl._dispatch_slash("/manual", [], state, _args(interactive=True), [])
+            self.assertFalse(state["yes"])
+        self.assertIn("auto-accept on", err.getvalue())
+        self.assertIn("auto-accept off", err.getvalue())
+
+    def test_slash_auto_noop_without_tools(self):
+        state = {"model": "m", "tools": None, "tools_on": False, "yes": False,
+                 "max_tool_calls": 8}
+        err = io.StringIO()
+        with mock.patch.object(sys, "stderr", err):
+            _repl._dispatch_slash("/auto", [], state, _args(interactive=True), [])
+        self.assertFalse(state["yes"])            # nothing to auto-accept
+        self.assertIn("no tools", err.getvalue())
+
+    def test_banner_shows_auto_off_by_default_with_tools(self):
+        err = io.StringIO()
+        _run_repl(_args(interactive=True, tools=True), [], ["/exit"], stderr=err)
+        self.assertIn("auto-accept off", err.getvalue())
+
+    def test_banner_shows_auto_on_with_yes_flag(self):
+        err = io.StringIO()
+        _run_repl(_args(interactive=True, tools=True, yes=True), [], ["/exit"], stderr=err)
+        self.assertIn("auto-accept on", err.getvalue())
+
 
 class _FakeRL:
     """Minimal readline stand-in: the completer needs only these two hooks."""
@@ -353,6 +387,10 @@ class TestReplCompletion(unittest.TestCase):
 
     def test_commands_include_models(self):
         self.assertIn("/models", _repl._COMMANDS)
+
+    def test_commands_include_auto_manual(self):
+        self.assertIn("/auto", _repl._COMMANDS)
+        self.assertIn("/manual", _repl._COMMANDS)
 
     def test_completes_slash_command(self):
         self.assertEqual(self._complete_all("/mo", 0, "/mo"), ["/model", "/models"])

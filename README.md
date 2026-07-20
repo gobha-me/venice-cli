@@ -522,10 +522,14 @@ venice chat --resume session.json
 In-REPL slash-commands: `/system [text]` (show/set the system prompt),
 `/model [name]` (switch model; with no name, show the current one and list the
 catalog), `/models` (list the available models, marking the current and the
-default), `/reset` (clear history, keep the system prompt), `/save [file]`
-(write the transcript JSON; defaults to the `--resume` file), `/help`, and
-`/exit` (or `/quit`, or Ctrl-D). Ctrl-C aborts the current turn without ending
-the session. Tab completes slash-commands (and model ids after `/model `).
+default), `/auto` and `/manual` (toggle auto-accepting paid/side-effecting tool
+calls for following turns), `/reset` (clear history, keep the system prompt),
+`/save [file]` (write the transcript JSON; defaults to the `--resume` file),
+`/help`, and `/exit` (or `/quit`, or Ctrl-D). Ctrl-C aborts the current turn
+without ending the session. Tab completes slash-commands (and model ids after
+`/model `). At a per-tool confirmation prompt, `a` accepts that call **and**
+auto-accepts the rest of the run. `--max-tool-calls 0` runs until the model
+stops on its own (instead of capping at the default and asking to continue).
 
 ### Venice extensions
 
