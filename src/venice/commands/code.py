@@ -16,7 +16,11 @@ a controlling LLM identically:
    (``--auto`` -> every tool auto-approved) or manual (per-step confirm gate on the
    ``paid=True`` write/edit/run tools).
 4. **Acceptance check.** A final ``tool_choice="none"`` turn reports each criterion
-   met/unmet; ``--json`` emits it structured and the exit code reflects it.
+   met/unmet and ends with an ``ACCEPTANCE: PASS``/``FAIL`` verdict. The parse is
+   format-tolerant and re-prompts once for the verdict line if the first reply lacks
+   it; ``--json`` emits the verdict structured. The exit code reflects it: 0 = pass
+   (or check skipped), 1 = fail, 10 = verdict unparseable even after the re-prompt
+   (the work may still be complete).
 
 Unlike ``venice chat --tools`` (which degrades to plain chat), ``venice code`` errors
 out on a non-tool-calling model -- coding without tools is pointless.
@@ -31,6 +35,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import sys
 from typing import List, Optional
 
@@ -74,6 +79,20 @@ _VERIFY_MSG = (
     "that is exactly 'ACCEPTANCE: PASS' if every criterion is met, or "
     "'ACCEPTANCE: FAIL' otherwise."
 )
+_VERIFY_RETRY_MSG = (
+    "Your reply did not end with the required verdict line. Reply with nothing but a "
+    "single line that is exactly 'ACCEPTANCE: PASS' if every acceptance criterion is "
+    "met, or 'ACCEPTANCE: FAIL' otherwise."
+)
+
+_VERDICT_RE = re.compile(r"ACCEPTANCE:\s*(PASS|FAIL)", re.IGNORECASE)
+
+
+def _parse_verdict(report: Optional[str]) -> Optional[str]:
+    """'pass' / 'fail' from the last ACCEPTANCE sentinel in the report, or None if
+    no recognizable verdict is present (case/whitespace/markdown tolerant)."""
+    m = _VERDICT_RE.findall(report or "")
+    return m[-1].lower() if m else None
 
 
 def register(subparsers) -> None:
@@ -437,18 +456,28 @@ def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task
         return _openai.status_to_exit(openai, e, "code")
 
     # --- Acceptance check ---
-    passed = None
+    verdict = None          # None = skipped; else 'pass' | 'fail' | 'unknown'
     report = None
     if not args.no_verify and not args.no_plan:
         messages.append({"role": "user", "content": _VERIFY_MSG})
         try:
             report = _no_tool_turn(oai, model, messages, gen_kwargs, oai_tools)
+            parsed = _parse_verdict(report)
+            if parsed is None:      # re-prompt ONCE for the exact verdict line
+                messages.append({"role": "assistant", "content": report})
+                messages.append({"role": "user", "content": _VERIFY_RETRY_MSG})
+                retry = _no_tool_turn(oai, model, messages, gen_kwargs, oai_tools)
+                report = f"{report}\n{retry}" if report else retry
+                parsed = _parse_verdict(retry)
         except openai.OpenAIError as e:
             return _openai.status_to_exit(openai, e, "code")
-        passed = "ACCEPTANCE: PASS" in (report or "").upper()
+        verdict = parsed or "unknown"
         if not args.json:
             print("\n=== Acceptance check ===", file=sys.stderr)
             print(report, file=sys.stderr)
+        if verdict == "unknown":
+            print("code: could not parse an ACCEPTANCE verdict from the model "
+                  "(work may be complete) -- exiting 10", file=sys.stderr)
 
     if args.json:
         envelope = {
@@ -456,8 +485,12 @@ def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task
             "final": final_text,
         }
         if report is not None:
-            envelope["acceptance"] = {"passed": passed, "report": report}
+            envelope["acceptance"] = {
+                "verdict": verdict,                                    # pass|fail|unknown
+                "passed": {"pass": True, "fail": False}.get(verdict),  # None when unknown
+                "report": report,
+            }
         json.dump(envelope, sys.stdout, indent=2, default=str)
         sys.stdout.write("\n")
 
-    return 1 if passed is False else 0
+    return {None: 0, "pass": 0, "fail": 1, "unknown": 10}[verdict]
