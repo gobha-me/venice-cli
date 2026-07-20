@@ -128,7 +128,7 @@ def register(subparsers) -> None:
     ag.add_argument(
         "--max-tool-calls", type=int, default=None, dest="max_tool_calls",
         metavar="N", help="Cap tool invocations before forcing a final answer "
-        "(default: 8).",
+        "(default: 8; 0 = unlimited, run until the model stops).",
     )
     ag.add_argument(
         "--max-spend", type=float, default=None, metavar="USD",
@@ -420,7 +420,7 @@ def _run_agent(args, oai, openai, client, models, model, kwargs) -> Optional[int
         try:
             return _agent.run_loop(
                 oai, model, messages, kwargs, tools,
-                max_tool_calls=(args.max_tool_calls or 8),
+                max_tool_calls=(args.max_tool_calls if args.max_tool_calls is not None else 8),
                 yes=bool(args.yes),
                 json_out=args.json,
             )

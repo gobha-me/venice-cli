@@ -294,10 +294,11 @@ class TestCodeCommand(unittest.TestCase):
 
         def _fake_repl_run(args, oai, openai, client, models, model,
                            initial=None, *, tools_session=None, gen_kwargs=None,
-                           label="venice chat"):
+                           label="venice chat", max_tool_calls=8):
             captured["tools_session"] = tools_session
             captured["label"] = label
             captured["initial"] = initial
+            captured["max_tool_calls"] = max_tool_calls
             return 0
 
         stdin = mock.MagicMock()
@@ -316,6 +317,8 @@ class TestCodeCommand(unittest.TestCase):
         self.assertIsNotNone(captured["tools_session"])
         self.assertEqual(captured["label"], "venice code")
         self.assertEqual(captured["initial"], "hi")
+        # code -i gets its higher default budget (25), not the chat REPL's 8
+        self.assertEqual(captured["max_tool_calls"], code._DEFAULT_MAX_TOOL_CALLS)
 
 
 if __name__ == "__main__":

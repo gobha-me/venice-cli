@@ -39,6 +39,8 @@ Commands:
   /system [text]   show, or set, the system prompt (reseeds the conversation)
   /model [name]    switch model; with no name, show the current one and list the catalog
   /models          list the available models (marks the current and default)
+  /auto            auto-accept paid/side-effecting tool calls for following turns
+  /manual          confirm each paid/side-effecting tool call (undo /auto)
   /reset           clear the conversation (keeps the system prompt)
   /save [file]     write the transcript JSON (default: the --resume file)
   /help            show this help
@@ -48,7 +50,8 @@ Anything else is sent to the model as your next message."""
 # Slash-commands, in help order -- the single source of truth for tab-completion
 # (#40). Keep in sync with `_dispatch_slash` and `_HELP`.
 _COMMANDS = (
-    "/system", "/model", "/models", "/reset", "/save", "/help", "/exit", "/quit",
+    "/system", "/model", "/models", "/auto", "/manual", "/reset", "/save",
+    "/help", "/exit", "/quit",
 )
 
 
@@ -229,8 +232,8 @@ def _do_turn(oai, openai, chat, text, messages, gen_kwargs, state, args) -> None
         if state["tools_on"]:
             _agent.run_loop(
                 oai, state["model"], messages, gen_kwargs, state["tools"],
-                max_tool_calls=(args.max_tool_calls or 8),
-                yes=bool(args.yes),
+                max_tool_calls=state["max_tool_calls"],
+                yes=state["yes"],
                 json_out=False,
             )
         else:
@@ -290,6 +293,13 @@ def _dispatch_slash(line, messages, state, args, models) -> str:
             print(_format_model_list(models, state["model"]), file=sys.stderr)
     elif cmd == "models":
         print(_format_model_list(models, state["model"]), file=sys.stderr)
+    elif cmd in ("auto", "manual"):
+        if not state["tools_on"]:
+            print("(no tools this session; nothing to auto-accept)", file=sys.stderr)
+        else:
+            state["yes"] = cmd == "auto"
+            on = "on" if state["yes"] else "off"
+            print(f"(auto-accept {on})", file=sys.stderr)
     elif cmd == "save":
         target = rest or getattr(args, "resume", None)
         if not target:
@@ -312,7 +322,8 @@ def _dispatch_slash(line, messages, state, args, models) -> str:
 # The loop
 # --------------------------------------------------------------------------- #
 def run(args, oai, openai, client, models, model, initial=None, *,
-        tools_session=None, gen_kwargs=None, label="venice chat") -> int:
+        tools_session=None, gen_kwargs=None, label="venice chat",
+        max_tool_calls=8) -> int:
     """Drive the interactive REPL until `/exit`, `/quit`, or EOF (Ctrl-D).
 
     `initial` is an already-resolved first message (e.g. `venice chat -i "hi"`);
@@ -322,6 +333,10 @@ def run(args, oai, openai, client, models, model, initial=None, *,
     with its own tool set and generation kwargs: `venice code` (#30) injects a
     coding tools session + minimal gen kwargs so the REPL never touches chat's
     Venice-extension flags. Defaults preserve `venice chat`'s behavior exactly.
+
+    `max_tool_calls` is the per-turn budget when no `--max-tool-calls` is given
+    (chat=8, `venice code` passes its higher default); `--max-tool-calls 0`/`<=0`
+    means unlimited. `/auto` and `/manual` flip per-turn auto-accept live (#55).
     """
     from . import chat  # lazy: chat imports this module at top (avoid a cycle)
 
@@ -360,12 +375,20 @@ def run(args, oai, openai, client, models, model, initial=None, *,
                 if rc is not None:
                     return rc      # invalid --tool subset / MCP attach error
                 tools_on = False   # model lacks function calling -> plain chat
-        state = {"model": model, "tools": tools, "tools_on": tools_on}
+        cap = getattr(args, "max_tool_calls", None)
+        state = {
+            "model": model,
+            "tools": tools,
+            "tools_on": tools_on,
+            "yes": bool(getattr(args, "yes", False)),  # /auto and /manual flip this
+            "max_tool_calls": cap if cap is not None else max_tool_calls,
+        }
 
         if _rl is not None:
             _install_completer(_rl, models, stack)
 
-        _banner(model, tools_on, getattr(args, "resume", None), messages, label=label)
+        _banner(model, tools_on, getattr(args, "resume", None), messages,
+                label=label, auto=state["yes"])
 
         # An explicit message (`venice chat -i "hello"`) becomes the first turn.
         if initial:
@@ -390,10 +413,12 @@ def run(args, oai, openai, client, models, model, initial=None, *,
             _do_turn(oai, openai, chat, line, messages, gen_kwargs, state, args)
 
 
-def _banner(model, tools_on, resume, messages, *, label="venice chat") -> None:
+def _banner(model, tools_on, resume, messages, *, label="venice chat",
+            auto=False) -> None:
     bits = [f"model {model}"]
     if tools_on:
         bits.append("tools on")
+        bits.append("auto-accept on" if auto else "auto-accept off (/auto to enable)")
     if resume:
         bits.append(f"resumed {len(messages)} msg(s) from {resume}")
     print(

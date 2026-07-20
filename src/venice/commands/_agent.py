@@ -24,8 +24,10 @@ and passes the combined list to :func:`run_loop`. Nothing in the loop changes.
 """
 from __future__ import annotations
 
+import itertools
 import json
 import sys
+import threading
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional
 
@@ -440,28 +442,107 @@ def _assistant_dict(msg) -> dict:
     return d
 
 
-def _prompt_yes() -> bool:
+# --------------------------------------------------------------------------- #
+# Live progress (#54): a spinner while the model thinks + a line per tool call.
+# All output is stderr and TTY-gated, so piped/`--json`/test runs stay silent.
+# --------------------------------------------------------------------------- #
+_SPIN_FRAMES = "|/-\\"
+
+
+class _Spinner:
+    """A tiny stderr spinner shown while awaiting the model.
+
+    A no-op unless stderr is a TTY (so automation and the test-suite's StringIO
+    stderr stay clean). Runs on a daemon thread; the line is cleared on exit.
+    """
+
+    def __init__(self, label: str = "working", *, enabled: bool = True):
+        self._enabled = enabled and sys.stderr.isatty()
+        self._label = label
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def __enter__(self):
+        if self._enabled:
+            self._thread = threading.Thread(target=self._spin, daemon=True)
+            self._thread.start()
+        return self
+
+    def _spin(self):  # pragma: no cover - timing/thread, exercised via a fake TTY
+        for frame in itertools.cycle(_SPIN_FRAMES):
+            if self._stop.is_set():
+                break
+            sys.stderr.write(f"\r{frame} {self._label}… ")
+            sys.stderr.flush()
+            self._stop.wait(0.12)
+
+    def __exit__(self, *exc):
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join()
+            sys.stderr.write("\r\033[K")  # clear the spinner line
+            sys.stderr.flush()
+        return False
+
+
+def _short_args(raw: str) -> str:
+    """A compact, safe one-line summary of a tool call's arguments (never raises)."""
     try:
-        ans = input("Proceed? [y/N] ").strip().lower()
+        args = json.loads(raw or "{}")
+    except (TypeError, ValueError):
+        return ""
+    if not isinstance(args, dict):
+        return ""
+    for key in ("path", "file", "command", "query", "prompt", "message", "pattern"):
+        val = args.get(key)
+        if isinstance(val, (str, int, float)):
+            s = str(val).replace("\n", " ")
+            return f"{key}={s[:57] + '...' if len(s) > 60 else s}"
+    return ", ".join(sorted(args)[:3])
+
+
+def _progress(text: str, *, enabled: bool) -> None:
+    if enabled and sys.stderr.isatty():
+        print(text, file=sys.stderr)
+
+
+# --------------------------------------------------------------------------- #
+# Confirm gate (#55): a paid/side-effecting tool can prompt on a TTY. `a`/`all`
+# accepts this call AND flips the run's gate to auto so nothing else prompts.
+# --------------------------------------------------------------------------- #
+def _prompt_yes() -> str:
+    """Return "yes" (this call), "all" (this call + auto-accept the rest of the
+    run), or "no". EOF -> "no"."""
+    try:
+        ans = input("Proceed? [y]es / [a]ll (accept rest) / [N]o ").strip().lower()
     except EOFError:
-        ans = ""
-    return ans in ("y", "yes")
+        return "no"
+    if ans in ("a", "all"):
+        return "all"
+    if ans in ("y", "yes"):
+        return "yes"
+    return "no"
 
 
-def _resolve_spend(tool: Tool, arguments: dict, result, *, yes: bool):
+def _resolve_spend(tool: Tool, arguments: dict, result, gate: dict):
     """Hybrid gate: prompt on a TTY, else feed the block back to the model.
 
-    Only reached for a paid tool that returned `confirmation_required` (which can
-    only happen when `yes` is False, since `confirm=True` bypasses the gate).
+    `gate` is the run's mutable auto-accept holder (`{"auto": bool}`); answering
+    `all` at the prompt sets ``gate["auto"] = True`` so subsequent paid calls in
+    the same run skip the gate. Only reached for a paid tool that returned
+    `confirmation_required` (which happens only while ``gate["auto"]`` is False).
     """
-    if not tool.paid or yes:
+    if not tool.paid or gate["auto"]:
         return result
     if not (isinstance(result, dict) and result.get("status") == "confirmation_required"):
         return result
     message = result.get("message", f"{tool.name}: confirmation required")
     if sys.stdin.isatty():
         print(message, file=sys.stderr)
-        if _prompt_yes():
+        ans = _prompt_yes()
+        if ans in ("yes", "all"):
+            if ans == "all":
+                gate["auto"] = True
             try:
                 return tool.invoke(arguments, confirm=True)
             except Exception as e:  # pragma: no cover - impls shouldn't raise
@@ -470,7 +551,7 @@ def _resolve_spend(tool: Tool, arguments: dict, result, *, yes: bool):
     return result  # non-TTY or declined -> the model sees the gate and adapts
 
 
-def _run_one_call(tc, dispatch: Dict[str, Tool], *, yes: bool) -> dict:
+def _run_one_call(tc, dispatch: Dict[str, Tool], gate: dict) -> dict:
     tool = dispatch.get(tc.function.name)
     if tool is None:
         return {"status": "error", "message": f"unknown tool {tc.function.name!r}"}
@@ -481,10 +562,10 @@ def _run_one_call(tc, dispatch: Dict[str, Tool], *, yes: bool) -> dict:
     if not isinstance(arguments, dict):
         return {"status": "error", "message": "tool arguments must be a JSON object"}
     try:
-        result = tool.invoke(arguments, confirm=bool(yes))
+        result = tool.invoke(arguments, confirm=bool(gate["auto"]))
     except Exception as e:  # pragma: no cover - impls shouldn't raise
         return {"status": "error", "message": f"{tool.name} failed: {e}"}
-    return _resolve_spend(tool, arguments, result, yes=yes)
+    return _resolve_spend(tool, arguments, result, gate)
 
 
 def _emit_final(resp, json_out: bool) -> int:
@@ -526,15 +607,21 @@ def run_loop(
     oai_tools = to_openai_tools(tools)
     dispatch = dispatch_map(tools)
     calls_made = 0
+    gate = {"auto": bool(yes)}  # mutable so an `a`/`all` confirm flips the run to auto
+    # `--max-tool-calls 0` (or None) means unlimited -- run until the model stops
+    # on its own (bounded in practice by the model's context window).
+    unlimited = max_tool_calls is None or max_tool_calls <= 0
+    show = not json_out  # progress feedback (further TTY-gated inside the helpers)
 
     while True:
-        resp = oai.chat.completions.create(
-            model=model,
-            messages=messages,
-            tools=oai_tools,
-            tool_choice="auto",
-            **base_kwargs,
-        )
+        with _Spinner("thinking", enabled=show):
+            resp = oai.chat.completions.create(
+                model=model,
+                messages=messages,
+                tools=oai_tools,
+                tool_choice="auto",
+                **base_kwargs,
+            )
         msg = resp.choices[0].message if getattr(resp, "choices", None) else None
         messages.append(_assistant_dict(msg))
         tool_calls = getattr(msg, "tool_calls", None) if msg is not None else None
@@ -544,14 +631,18 @@ def run_loop(
         # Every tool_call in the turn must get a result (message-contract), even
         # ones past the budget -- those are reported not-executed rather than run.
         for tc in tool_calls:
-            if calls_made >= max_tool_calls:
+            if not unlimited and calls_made >= max_tool_calls:
                 result = {
                     "status": "error",
                     "message": "tool-call budget (--max-tool-calls) exhausted; "
                     "not executed",
                 }
             else:
-                result = _run_one_call(tc, dispatch, yes=yes)
+                _progress(
+                    f"· {tc.function.name} {_short_args(tc.function.arguments)}".rstrip(),
+                    enabled=show,
+                )
+                result = _run_one_call(tc, dispatch, gate)
                 calls_made += 1
             messages.append(
                 {
@@ -562,19 +653,20 @@ def run_loop(
                 }
             )
 
-        if calls_made >= max_tool_calls:
+        if not unlimited and calls_made >= max_tool_calls:
             print(
                 f"chat: reached --max-tool-calls ({max_tool_calls}); "
                 "requesting a final answer",
                 file=sys.stderr,
             )
-            resp = oai.chat.completions.create(
-                model=model,
-                messages=messages,
-                tools=oai_tools,
-                tool_choice="none",
-                **base_kwargs,
-            )
+            with _Spinner("finishing", enabled=show):
+                resp = oai.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    tools=oai_tools,
+                    tool_choice="none",
+                    **base_kwargs,
+                )
             msg = resp.choices[0].message if getattr(resp, "choices", None) else None
             messages.append(_assistant_dict(msg))
             return _emit_final(resp, json_out)
