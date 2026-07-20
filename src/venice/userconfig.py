@@ -230,6 +230,14 @@ _COMMAND_MAP = {
     "search": {
         "top_k": ("top_k", int),
     },
+    "code": {
+        "model": ("model", str),
+        "system": ("system", str),
+        "root": ("root", str),
+        "auto": ("auto", _as_bool),
+        "max_tool_calls": ("max_tool_calls", int),
+        "exec_timeout": ("exec_timeout", int),
+    },
 }
 
 

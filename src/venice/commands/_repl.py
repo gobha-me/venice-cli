@@ -216,11 +216,17 @@ def _dispatch_slash(line, messages, state, args, models) -> str:
 # --------------------------------------------------------------------------- #
 # The loop
 # --------------------------------------------------------------------------- #
-def run(args, oai, openai, client, models, model, initial=None) -> int:
+def run(args, oai, openai, client, models, model, initial=None, *,
+        tools_session=None, gen_kwargs=None, label="venice chat") -> int:
     """Drive the interactive REPL until `/exit`, `/quit`, or EOF (Ctrl-D).
 
     `initial` is an already-resolved first message (e.g. `venice chat -i "hi"`);
     when set it runs as the opening turn before the prompt loop starts.
+
+    `tools_session` / `gen_kwargs` / `label` let another command reuse this REPL
+    with its own tool set and generation kwargs: `venice code` (#30) injects a
+    coding tools session + minimal gen kwargs so the REPL never touches chat's
+    Venice-extension flags. Defaults preserve `venice chat`'s behavior exactly.
     """
     from . import chat  # lazy: chat imports this module at top (avoid a cycle)
 
@@ -235,28 +241,33 @@ def run(args, oai, openai, client, models, model, initial=None) -> int:
         print(f"chat: {e}", file=sys.stderr)
         return 2
 
-    gen_kwargs = chat._gen_kwargs(args)
+    if gen_kwargs is None:
+        gen_kwargs = chat._gen_kwargs(args)
 
-    # `--mcp NAME` (like `--tools`) turns the REPL into an agent session. The MCP
-    # servers stay attached for the whole session via the ExitStack, torn down on
-    # exit. `_tools_session` also builds the built-in tools + runs the capability
-    # guard, mirroring the one-shot path.
-    tools_on = bool(getattr(args, "tools", None)) or bool(
-        chat._requested_mcp_servers(args)
-    )
+    # `--tools`/`--mcp` (or an injected `tools_session`) turns the REPL into an
+    # agent session. Any MCP servers stay attached for the whole session via the
+    # ExitStack, torn down on exit; the capability guard runs inside the session.
+    if tools_session is not None:
+        tools_on = True
+        session_cm = tools_session
+    else:
+        tools_on = bool(getattr(args, "tools", None)) or bool(
+            chat._requested_mcp_servers(args)
+        )
+        session_cm = (
+            chat._tools_session(args, client, models, model) if tools_on else None
+        )
     with contextlib.ExitStack() as stack:
         tools = None
         if tools_on:
-            tools, rc = stack.enter_context(
-                chat._tools_session(args, client, models, model)
-            )
+            tools, rc = stack.enter_context(session_cm)
             if tools is None:
                 if rc is not None:
                     return rc      # invalid --tool subset / MCP attach error
                 tools_on = False   # model lacks function calling -> plain chat
         state = {"model": model, "tools": tools, "tools_on": tools_on}
 
-        _banner(model, tools_on, getattr(args, "resume", None), messages)
+        _banner(model, tools_on, getattr(args, "resume", None), messages, label=label)
 
         # An explicit message (`venice chat -i "hello"`) becomes the first turn.
         if initial:
@@ -281,14 +292,14 @@ def run(args, oai, openai, client, models, model, initial=None) -> int:
             _do_turn(oai, openai, chat, line, messages, gen_kwargs, state, args)
 
 
-def _banner(model, tools_on, resume, messages) -> None:
+def _banner(model, tools_on, resume, messages, *, label="venice chat") -> None:
     bits = [f"model {model}"]
     if tools_on:
         bits.append("tools on")
     if resume:
         bits.append(f"resumed {len(messages)} msg(s) from {resume}")
     print(
-        f"venice chat -- interactive ({', '.join(bits)}). "
+        f"{label} -- interactive ({', '.join(bits)}). "
         "/help for commands; /exit or Ctrl-D to quit.",
         file=sys.stderr,
     )

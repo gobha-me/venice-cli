@@ -29,6 +29,10 @@ INDEX_SUBDIR = "index"
 INDEX_FILENAME = "index.json"
 ENV_INDEX_DIR = "VENICE_INDEX_DIR"
 
+# `venice code` (the vcoder coding agent) sandboxes its file/exec tools to a
+# project root; $VENICE_CODE_ROOT overrides the default (the current directory).
+ENV_CODE_ROOT = "VENICE_CODE_ROOT"
+
 SFX_POLL_INTERVAL_SEC = 2.0
 SFX_POLL_MAX_WAIT_SEC = 300
 

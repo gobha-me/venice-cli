@@ -684,6 +684,83 @@ ignore `.venice/`. Config-backable per-flag via `defaults.index.*` /
 `project_search` tool (see **Agent / tool calling**), so a `venice chat --tools`
 session can locate code by meaning before acting on it.
 
+## Coding agent (venice code)
+
+`venice code` is a self-contained coding agent ("vcoder") built on the tool loop.
+Point it at a project and give it a task: it **proposes a plan, waits for your
+acceptance, then reads, edits, and runs commands** using built-in, path-sandboxed
+tools, powered by a function-calling Venice model. Needs the `[openai]` extra and a
+tool-calling model (unlike `venice chat --tools`, it errors out rather than degrading
+if the model can't call tools). The coding engine itself is pure stdlib — no new
+dependency.
+
+```sh
+# Human at a terminal: see the plan, then choose auto/step at the prompt.
+venice code "add retry with backoff to the HTTP client and a test" -m mistral-31-24b
+
+# Autonomous, unattended (a script/cron): accept + run to completion, JSON out.
+venice code --auto --json "bump the version and update CHANGELOG" > result.json
+
+# Two-step (for a script or a controlling LLM to approve out of band):
+venice code --plan-only --json "refactor the parser" > plan.json   # prints plan, exits
+venice code --auto "refactor the parser"                            # then execute
+
+# An interactive coding session (tools on; changes confirm per step).
+venice code -i
+```
+
+**Plan → acceptance → run.** The command always plans first (one no-tools turn that
+emits a numbered plan + acceptance criteria), then crosses an **acceptance boundary**
+three possible ways, then executes and finally self-checks the criteria:
+
+| How it's launched | How the plan is accepted | Run mode |
+| --- | --- | --- |
+| Human, terminal | Interactive prompt: `[a]uto / [s]tep / [e]dit / [N]o` | chosen at the prompt |
+| Flag-driven | `--auto` (accept + autonomous) or `--manual` (accept + step) | from the flag |
+| Out of band | `--plan-only` prints the plan and exits 0; the caller re-invokes to run | deferred |
+
+Non-interactive with neither `--auto` nor `--plan-only` **aborts (exit 2)** before any
+model call — side-effecting work never runs unattended without an explicit opt-in.
+After execution a final turn reports each criterion MET/NOT MET; with `--json` that
+lands in the envelope and the **exit code reflects it** (0 = all met, 1 = not met).
+
+**Tools** (path-sandboxed to the project root; mutating tools confirm unless `--auto`):
+
+| Tool | Does | Confirms? |
+| --- | --- | --- |
+| `read_file` / `list_dir` / `grep` | read a file, list a dir, regex-search the tree | no |
+| `git` | read-only git (`status`/`diff`/`log`/`show`/…) | no |
+| `project_search` | semantic search over the `.venice` index (if built) | no |
+| `write_file` | create/overwrite a file (atomic) | yes |
+| `edit_file` | replace an exact, unique string in a file | yes |
+| `run` | run a shell command (`/bin/sh -c`) at the root | yes |
+
+**Safety.** Every filesystem path is resolved and confined to the project root
+(default: cwd, or `--root` / `$VENICE_CODE_ROOT`); a path that escapes the root, names
+a secret-shaped file (`credentials`, `.env`, `*.pem`, `*.key`, …), or lives under
+`.git`/`.venice` is refused — the same denylist `venice index` uses. `run` executes
+with the working directory forced to the root, a timeout (`--exec-timeout`),
+size-capped output, and the Venice API keys scrubbed from the child environment. Note
+that a *shell command* can still touch paths outside the root (`cat ../x`); `run`'s
+boundary is the **confirm gate** (the exact command is shown before it runs) plus the
+forced cwd, timeout, and env-scrub — which is why it always confirms. git mutations
+(`add`/`commit`) go through the gated `run` tool.
+
+| flag | effect |
+| --- | --- |
+| `--auto`, `-y` | accept the plan and run autonomously (auto-approve every tool call); required to run with no terminal |
+| `--manual` | accept and run with per-step confirmation (default on a terminal) |
+| `--plan-only` | print the plan and exit without executing |
+| `--no-plan` | skip the planning turn and execute directly |
+| `--no-verify` | skip the post-run acceptance-criteria check |
+| `--root DIR` | project directory to sandbox to (default: cwd) |
+| `--max-tool-calls N` | cap tool invocations before forcing a final answer (default 25) |
+| `--exec-timeout SECS` | timeout for `run`/`git` (default 120) |
+| `-i`, `--json`, `--model`, `--system` | interactive REPL · JSON envelope · model · extra system instructions |
+
+Per-flag config defaults live under `defaults.code.*` (e.g. `model`, `root`, `auto`,
+`max_tool_calls`).
+
 ## MCP server
 
 `venice mcp-serve` runs an [MCP](https://modelcontextprotocol.io) server over
@@ -857,6 +934,8 @@ The player list (`paplay` -> `aplay` -> `ffplay` -> `mpg123` -> `play`
 | `venice chat MESSAGE [--system S] [--model M] [--web-search on] [...]` | one-shot chat completion (OpenAI SDK) |
 | `venice chat [-i] [--resume FILE]` | interactive multi-turn REPL (conversation state, `/`-commands, transcripts) |
 | `venice embed [TEXT] [--from-file PATH] [--model M] [--dimensions N] [--json] [--embed-base-url URL --embed-model M]` | text embeddings (OpenAI SDK; alt/local backend) |
+| `venice index [PATH] [--model M] [...]` / `venice search QUERY [-k N] [--json]` | build / query a local semantic index of a project tree |
+| `venice code [TASK] [--auto\|--manual] [--plan-only] [-i] [--root DIR] [--json] [...]` | coding agent: plan → accept → edit/run a project (needs `[openai]` + tool-calling model) |
 | `venice mcp-serve` | run an MCP server (stdio) exposing venice tools (needs `[mcp]`) |
 | `venice config add\|list\|remove\|show` | manage the MCP server registry |
 | `venice config get\|set\|unset KEY [VALUE]` | manage default flag values |
