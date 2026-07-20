@@ -347,6 +347,35 @@ Provide exactly one source: a positional file (base64-encoded under 25 MB) or
 `--image-url`. Pricing is dynamic like `upscale`; balance is shown and you
 confirm before the charge.
 
+## Edit images
+
+Iterate on already-generated art without regenerating it — recolor, restyle, or
+inpaint a card — via `/image/edit`. Add one or two `--layer` images (masks or
+overlays) to composite instead, which routes to `/image/multi-edit` (up to 3
+images total, base first):
+
+```sh
+# Prompt-only edit -> ./card-edit.png.
+venice image-edit card.png -p "change the sky to a sunrise" --yes
+
+# From a URL, request a 16:9 JPEG at 2K.
+venice image-edit --image-url https://example.com/card.png \
+    -p "make it snow" --aspect-ratio 16:9 --output-format jpeg \
+    --resolution 2K -o card-winter.jpg --yes
+
+# Mask/overlay composite -> /image/multi-edit (base first, then layers).
+venice image-edit base.png -p "apply this mask" --layer mask.png --yes
+
+# Dry-run: show the planned output + balance, spend nothing.
+venice image-edit card.png -p "brighter" --dry-run
+```
+
+Provide exactly one base source: a positional file (base64-encoded under 25 MB)
+or `--image-url`. `--prompt/-p` is required. Optional `--model`, `--aspect-ratio`,
+`--resolution`, `--output-format`, and `--no-safe-mode` map straight to the API;
+omit them to take the model defaults (`firered-image-edit`, PNG for 1K). Pricing
+is dynamic like `upscale`; balance is shown and you confirm before the charge.
+
 ## Master audio
 
 Venice's audio queue returns a model-default container (sfx = mp3) and its
@@ -803,7 +832,8 @@ working directory), or a per-call `output_dir`. The API key is read the usual
 way (`$VENICE_API_KEY` or the credentials file) and is never echoed.
 
 Only stdout carries the JSON-RPC protocol; the server's own diagnostics go to
-stderr. Video and image-edit tools are not exposed yet (tracked separately).
+stderr. `venice image-edit` exists as a CLI command, but it and the video tools
+are not exposed over MCP yet (tracked separately).
 
 The reverse direction — venice as an MCP **client**, calling *other* servers'
 tools inside `venice chat` — is [`venice chat --mcp`](#external-mcp-tools---mcp).
