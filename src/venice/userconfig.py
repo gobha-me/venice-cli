@@ -217,6 +217,7 @@ _COMMAND_MAP = {
         "encoding_format": ("encoding_format", str),
         "embed_base_url": ("embed_base_url", str),
         "embed_model": ("embed_model", str),
+        "embed_ca_bundle": ("embed_ca_bundle", str),
     },
     "index": {
         "model": ("model", str),

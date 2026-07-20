@@ -33,17 +33,32 @@ def import_openai(label: str):
     return openai
 
 
-def build_openai(module, client=None, *, base_url=None, api_key=None):
+def build_openai(module, client=None, *, base_url=None, api_key=None, verify=None):
     """Build an SDK client pointed at Venice, borrowing the lean client's auth.
 
     When `base_url` is given (an alternate OpenAI-compatible backend, e.g. a
     local embeddings server), use it and `api_key` directly instead of the
     Venice client -- which may then be None. Local servers usually need no key,
     so `api_key` falls back to a placeholder the SDK accepts.
+
+    `verify` overrides TLS verification for that alternate backend (a CA-bundle
+    path to trust a private CA, or False to disable checks for a self-signed
+    cert). It is opt-in and only reaches non-Venice endpoints. When set we hand
+    the SDK an httpx client (httpx ships transitively with the openai SDK). The
+    client is not explicitly closed -- fine for a one-shot CLI process that exits
+    right after; don't copy this into a long-lived caller without closing it.
     """
+    extra = {}
+    if verify is not None:
+        import httpx
+        extra["http_client"] = httpx.Client(verify=verify)
     if base_url is not None:
-        return module.OpenAI(api_key=api_key or "not-needed", base_url=base_url)
-    return module.OpenAI(api_key=client.api_key, base_url=client.base_url)
+        return module.OpenAI(
+            api_key=api_key or "not-needed", base_url=base_url, **extra
+        )
+    return module.OpenAI(
+        api_key=client.api_key, base_url=client.base_url, **extra
+    )
 
 
 def status_to_exit(module, e, label: str) -> int:

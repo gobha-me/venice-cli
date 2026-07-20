@@ -71,6 +71,28 @@ def register(subparsers) -> None:
             "server has its own catalog, so it is taken as given)."
         ),
     )
+    tls = p.add_mutually_exclusive_group()
+    tls.add_argument(
+        "--embed-ca-bundle",
+        dest="embed_ca_bundle",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Trust this CA-bundle file when verifying the --embed-base-url TLS "
+            "cert (for a local backend behind a private/self-signed CA). Keeps "
+            "verification on; also $VENICE_EMBED_CA_BUNDLE."
+        ),
+    )
+    tls.add_argument(
+        "--embed-insecure",
+        dest="embed_insecure",
+        action="store_true",
+        help=(
+            "Disable TLS verification for --embed-base-url entirely (self-signed "
+            "certs). Only applies to the alternate backend, never Venice; prints "
+            "a warning. Prefer --embed-ca-bundle."
+        ),
+    )
     p.add_argument(
         "--dimensions",
         type=int,
@@ -154,12 +176,32 @@ def _resolve_backend(openai, args) -> tuple:
                 file=sys.stderr,
             )
             return None, None, 2
+        # TLS override, opt-in and non-Venice only: --embed-insecure wins (the
+        # CLI already blocks passing both), else a CA bundle, else the SDK default.
+        verify = False if args.embed_insecure else (args.embed_ca_bundle or None)
+        if verify is False:
+            print(
+                "embed: WARNING: TLS verification disabled (--embed-insecure) "
+                f"for {args.embed_base_url}",
+                file=sys.stderr,
+            )
         oai = _openai.build_openai(
             openai,
             base_url=args.embed_base_url,
             api_key=os.environ.get(config.ENV_EMBED_API_KEY),
+            verify=verify,
         )
         return oai, model, None
+
+    # The Venice endpoint's TLS is not overridable -- reject the flags here so
+    # they can't silently no-op against Venice.
+    if args.embed_insecure or args.embed_ca_bundle:
+        print(
+            "embed: --embed-insecure/--embed-ca-bundle only apply with "
+            "--embed-base-url",
+            file=sys.stderr,
+        )
+        return None, None, 2
 
     try:
         client = build_client_from_auth()
@@ -186,6 +228,8 @@ def _run(args) -> int:
     # apply_defaults, which only fills a dest that is still None.
     if args.embed_base_url is None:
         args.embed_base_url = os.environ.get(config.ENV_EMBED_BASE_URL)
+    if args.embed_ca_bundle is None:
+        args.embed_ca_bundle = os.environ.get(config.ENV_EMBED_CA_BUNDLE)
     userconfig.apply_defaults(args, "embed")
 
     openai = _openai.import_openai("embed")

@@ -693,6 +693,27 @@ The URL can also come from `$VENICE_EMBED_BASE_URL`, and a key (if the backend
 needs one) from `$VENICE_EMBED_API_KEY` — env only, never `config.json`. Both
 are config-backable per-flag via `defaults.embed.*` (see `venice config`).
 
+**Self-signed backends.** A local embedder fronted by Traefik/Caddy often serves
+a private or self-signed TLS cert, which the OpenAI SDK rejects
+(`embed: connection error`, exit 8). Two opt-in escape hatches — **applied only
+to `--embed-base-url`, never the Venice endpoint**:
+
+```sh
+# Trust a private CA (verification stays ON -- preferred):
+venice embed --embed-base-url https://embed.local/v1 --embed-model bge-m3 \
+    --embed-ca-bundle /etc/ssl/my-ca.pem "hi"          # or $VENICE_EMBED_CA_BUNDLE
+
+# Disable verification entirely (self-signed, no CA handy -- prints a warning):
+venice embed --embed-base-url https://embed.local/v1 --embed-model bge-m3 \
+    --embed-insecure "hi"
+```
+
+`--embed-ca-bundle` is config-backable (`defaults.embed.embed_ca_bundle`) and
+reads `$VENICE_EMBED_CA_BUNDLE`. `--embed-insecure` is CLI-only by design —
+turning verification off should always be an explicit, visible choice, never
+something a stale env var or config file switches on. The two are mutually
+exclusive, and passing either without `--embed-base-url` is an error (exit 2).
+
 ## Semantic search
 
 `venice index` builds a local semantic index of a project tree, and `venice
@@ -989,6 +1010,7 @@ The player list (`paplay` -> `aplay` -> `ffplay` -> `mpg123` -> `play`
 | `VENICE_BASE_URL` | override the API base URL (testing, proxy) |
 | `VENICE_EMBED_BASE_URL` | `embed` alternate OpenAI-compatible endpoint (local backend) |
 | `VENICE_EMBED_API_KEY` | key for `VENICE_EMBED_BASE_URL` (if the backend needs one) |
+| `VENICE_EMBED_CA_BUNDLE` | CA bundle to trust for `VENICE_EMBED_BASE_URL` TLS (self-signed backend) |
 | `VENICE_MCP_MAX_SPEND` | `mcp-serve` auto-approve cap in USD (default `0.10`) |
 | `VENICE_MCP_OUTPUT_DIR` | where `mcp-serve` tools write files (default: cwd) |
 
@@ -1011,7 +1033,7 @@ The player list (`paplay` -> `aplay` -> `ffplay` -> `mpg123` -> `play`
 | `venice contact-sheet DIR_OR_GLOB [--cols N] [--cell WxH] [--label] [...]` | tile images into one contact sheet (no API call) |
 | `venice chat MESSAGE [--system S] [--model M] [--web-search on] [...]` | one-shot chat completion (OpenAI SDK) |
 | `venice chat [-i] [--resume FILE]` | interactive multi-turn REPL (conversation state, `/`-commands, transcripts) |
-| `venice embed [TEXT] [--from-file PATH] [--model M] [--dimensions N] [--json] [--embed-base-url URL --embed-model M]` | text embeddings (OpenAI SDK; alt/local backend) |
+| `venice embed [TEXT] [--from-file PATH] [--model M] [--dimensions N] [--json] [--embed-base-url URL --embed-model M [--embed-ca-bundle PATH \| --embed-insecure]]` | text embeddings (OpenAI SDK; alt/local backend) |
 | `venice index [PATH] [--model M] [...]` / `venice search QUERY [-k N] [--json]` | build / query a local semantic index of a project tree |
 | `venice code [TASK] [--auto\|--manual] [--plan-only] [-i] [--root DIR] [--json] [...]` | coding agent: plan → accept → edit/run a project (needs `[openai]` + tool-calling model) |
 | `venice mcp-serve` | run an MCP server (stdio) exposing venice tools (needs `[mcp]`) |
