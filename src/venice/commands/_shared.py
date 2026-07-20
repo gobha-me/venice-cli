@@ -40,6 +40,45 @@ def encode_data_url(path: Path, *, default_mime: str = "application/octet-stream
     return f"data:{mime};base64,{b64}"
 
 
+MAX_IMAGE_BYTES = 25 * 1024 * 1024  # API limit: each input image < 25 MB
+
+
+def encode_base64(path: Path) -> str:
+    """Read a local file and return raw base64 (no `data:` prefix).
+
+    This is the form `upscale`/`bg-remove`/`image-edit` send in an
+    `image`/`images` field. Contrast `encode_data_url`, which prepends the
+    `data:<mime>;base64,` prefix the `/video` media inputs require.
+    """
+    return base64.b64encode(path.read_bytes()).decode("ascii")
+
+
+def check_image_file(
+    path: Path, *, label: str, max_bytes: int = MAX_IMAGE_BYTES
+) -> Optional[int]:
+    """Gate a local image input: exists, non-empty, and under `max_bytes`.
+
+    Returns exit code 2 with a `label`-prefixed stderr message on failure, else
+    None. Shared by the image-input commands so the exists/empty/size check
+    lives in one place (`label` = "upscale"/"bg-remove"/"image-edit").
+    """
+    if not path.is_file():
+        print(f"{label}: input file not found: {path}", file=sys.stderr)
+        return 2
+    size = path.stat().st_size
+    if size == 0:
+        print(f"{label}: input {path} is empty", file=sys.stderr)
+        return 2
+    if size > max_bytes:
+        print(
+            f"{label}: input {path} is {size} bytes; "
+            f"must be < {max_bytes // (1024 * 1024)} MB",
+            file=sys.stderr,
+        )
+        return 2
+    return None
+
+
 def print_estimate(cost: Optional[float], label: str) -> None:
     if cost is None:
         print(f"Estimated cost: (unknown — {label})", file=sys.stderr)

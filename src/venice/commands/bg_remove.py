@@ -9,7 +9,6 @@ Pricing is dynamic ($0.001-$10.00/call); the balance is shown and you confirm.
 """
 from __future__ import annotations
 
-import base64
 import sys
 from pathlib import Path
 from typing import Optional
@@ -17,7 +16,9 @@ from typing import Optional
 from .. import auth, userconfig
 from ..client import build_client_from_auth
 from ._shared import (
+    check_image_file,
     confirm_or_exit,
+    encode_base64,
     over_budget,
     post_binary_op,
     print_balance_and_remaining,
@@ -26,7 +27,6 @@ from ._shared import (
 )
 
 ENDPOINT = "/image/background-remove"
-MAX_INPUT_BYTES = 25 * 1024 * 1024  # API limit: input file < 25 MB
 URL_DEFAULT_NAME = "venice-nobg.png"
 
 
@@ -71,25 +71,15 @@ def _validate(args) -> Optional[int]:
               file=sys.stderr)
         return 2
     if args.input is not None:
-        inp = args.input
-        if not inp.is_file():
-            print(f"bg-remove: input file not found: {inp}", file=sys.stderr)
-            return 2
-        size = inp.stat().st_size
-        if size == 0:
-            print(f"bg-remove: input {inp} is empty", file=sys.stderr)
-            return 2
-        if size > MAX_INPUT_BYTES:
-            print(f"bg-remove: input {inp} is {size} bytes; must be < 25 MB",
-                  file=sys.stderr)
-            return 2
+        rc = check_image_file(args.input, label="bg-remove")
+        if rc is not None:
+            return rc
     return None
 
 
 def _build_body(args) -> dict:
     if args.input is not None:
-        b64 = base64.b64encode(args.input.read_bytes()).decode("ascii")
-        return {"image": b64}
+        return {"image": encode_base64(args.input)}
     return {"image_url": args.image_url}
 
 
