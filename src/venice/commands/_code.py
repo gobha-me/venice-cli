@@ -447,6 +447,8 @@ def code_tools(
     *,
     exec_timeout: int = DEFAULT_EXEC_TIMEOUT,
     include_search: bool = False,
+    assets: bool = False,
+    max_spend=None,
 ) -> List[_agent.Tool]:
     """Build the coding tools bound to a realpath-resolved project `root`.
 
@@ -454,6 +456,13 @@ def code_tools(
     (`write_file`/`edit_file`/`run`) are ``paid=True`` and route through the confirm
     gate. `project_search` (reusing the free `_mcp.search_tool`) is added only when
     `include_search` and a `client` are supplied and a `.venice` index exists.
+
+    When `assets` and a `client` are supplied, the in-process asset-generation tools
+    (`venice_image`/`venice_image_edit`/`venice_sfx`/`venice_music`/`venice_tts`/
+    `venice_upscale`/`venice_bg_remove`) are folded in via `_agent.builtin_tools`,
+    so the agent can create images/audio in the project. They are paid and route
+    through the same confirm/spend gate; generated files land in
+    ``$VENICE_MCP_OUTPUT_DIR`` or, by default, under `root`.
     """
     root = os.path.realpath(root)
 
@@ -516,6 +525,16 @@ def code_tools(
             "`venice index`) for code relevant to a natural-language query. "
             "Read-only.",
             _SEARCH_SCHEMA, search_invoke, paid=False,
+        ))
+
+    if assets and client is not None:
+        asset_dir = os.environ.get("VENICE_MCP_OUTPUT_DIR") or root
+        tools.extend(_agent.builtin_tools(
+            client, max_spend=max_spend, output_dir=asset_dir,
+            only={
+                "venice_image", "venice_image_edit", "venice_sfx",
+                "venice_music", "venice_tts", "venice_upscale", "venice_bg_remove",
+            },
         ))
     return tools
 

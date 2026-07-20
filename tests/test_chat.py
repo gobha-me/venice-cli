@@ -731,5 +731,35 @@ class TestChatMcp(unittest.TestCase):
         self.assertEqual(attach.specs, [("fs", {"command": "srv"})])
 
 
+class TestBuiltinToolsRegistry(unittest.TestCase):
+    """`_agent.builtin_tools` source-selection (backs `venice code --assets`, #45)."""
+
+    def test_only_none_stays_eight(self):
+        # chat's default advertisement must not grow when code gains asset tools
+        from venice.commands import _agent
+        names = {t.name for t in _agent.builtin_tools(object())}
+        self.assertEqual(len(names), 8)
+        self.assertNotIn("venice_image_edit", names)
+
+    def test_only_can_select_code_asset_extra(self):
+        from venice.commands import _agent
+        tools = _agent.builtin_tools(object(), only={"venice_image_edit"})
+        self.assertEqual([t.name for t in tools], ["venice_image_edit"])
+        self.assertTrue(tools[0].paid)
+
+    def test_only_mixes_builtins_and_extras(self):
+        from venice.commands import _agent
+        names = {t.name for t in _agent.builtin_tools(
+            object(), only={"venice_image", "venice_image_edit"})}
+        self.assertEqual(names, {"venice_image", "venice_image_edit"})
+
+    def test_image_edit_schema_excludes_controlled(self):
+        from venice.commands import _agent
+        props = _agent._IMAGE_EDIT_SCHEMA["properties"]
+        for banned in ("confirm", "max_spend", "output_dir"):
+            self.assertNotIn(banned, props)
+        self.assertEqual(_agent._IMAGE_EDIT_SCHEMA.get("required"), ["prompt"])
+
+
 if __name__ == "__main__":
     unittest.main()

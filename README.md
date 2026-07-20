@@ -848,6 +848,7 @@ complete — a loud stderr warning is printed).
 | `write_file` | create/overwrite a file (atomic) | yes |
 | `edit_file` | replace an exact, unique string in a file | yes |
 | `run` | run a shell command (`/bin/sh -c`) at the root | yes |
+| `venice_image` / `venice_image_edit` / `venice_sfx` / `venice_music` / `venice_tts` / `venice_upscale` / `venice_bg_remove` | generate/edit images & audio into the project — **opt-in with `--assets`** | yes |
 
 **Safety.** Every filesystem path is resolved and confined to the project root
 (default: cwd, or `--root` / `$VENICE_CODE_ROOT`); a path that escapes the root, names
@@ -870,10 +871,17 @@ forced cwd, timeout, and env-scrub — which is why it always confirms. git muta
 | `--root DIR` | project directory to sandbox to (default: cwd) |
 | `--max-tool-calls N` | cap tool invocations before forcing a final answer (default 25) |
 | `--exec-timeout SECS` | timeout for `run`/`git` (default 120) |
+| `--assets` | also expose the in-process asset-generation tools (image / image-edit / sfx / music / tts / upscale / bg-remove) so the agent can create images & audio in the project; paid — each confirms per call unless `--auto` |
 | `-i`, `--json`, `--model`, `--system` | interactive REPL · JSON envelope · model · extra system instructions |
 
+With `--assets`, generated files land in `$VENICE_MCP_OUTPUT_DIR` or, by default, under
+the project root, and paid calls are capped per call by `$VENICE_MCP_MAX_SPEND` (default
+**$0.10**) — **except** that `--auto` auto-approves every call and so bypasses that cap;
+`--auto --assets` can incur up to `--max-tool-calls` paid generations, so use a cheap
+model and a sane `--max-tool-calls` when running unattended.
+
 Per-flag config defaults live under `defaults.code.*` (e.g. `model`, `root`, `auto`,
-`max_tool_calls`).
+`assets`, `max_tool_calls`).
 
 ## MCP server
 

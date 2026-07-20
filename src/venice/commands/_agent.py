@@ -180,6 +180,28 @@ _SEARCH_SCHEMA = _obj(
     required=["query"],
 )
 
+# Schema for a tool folded in ONLY via `only=` (e.g. `venice code --assets`), so it
+# is not part of chat's default advertised set. Curated subset of
+# `_mcp.image_edit_tool`; `confirm`/`max_spend`/`output_dir` omitted (loop-injected).
+_IMAGE_EDIT_SCHEMA = _obj(
+    {
+        "prompt": _p("string", "Text directions for the edit, e.g. 'change the sky to a sunrise'."),
+        "input_path": _p("string", "Path to a local base image to edit."),
+        "image_url": _p("string", "URL of a base image (instead of input_path)."),
+        "layer_paths": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "One or two local mask/overlay images (routes to /image/multi-edit).",
+        },
+        "model": _p("string", "Edit model id (default: the server picks one)."),
+        "aspect_ratio": _p("string", "Output aspect ratio ('auto' infers from the input)."),
+        "resolution": _p("string", "Output resolution tier, e.g. 1K/2K/4K."),
+        "output_format": _p("string", "Output image format: png, jpeg, or webp."),
+        "no_safe_mode": _p("boolean", "Disable safe mode (defaults to on)."),
+    },
+    required=["prompt"],
+)
+
 # (tool name, `_mcp` impl attribute, description, schema, paid). The impl is
 # stored by NAME and resolved via getattr(_mcp, ...) at builtin_tools() time, so a
 # single source of truth wins and tests can patch `_mcp.<impl>`.
@@ -256,6 +278,22 @@ _BUILTINS = [
     ),
 ]
 
+# Extra paid tools NOT advertised by chat's default set. Folded in only when a
+# caller passes `only=` (e.g. `venice code --assets`), so chat's default stays 8
+# while `code_tools` can still select them by name.
+_CODE_ASSET_BUILTINS = [
+    (
+        "venice_image_edit",
+        "image_edit_tool",
+        "Edit/inpaint an existing image via Venice /image/edit from a text prompt "
+        "(base = a local input_path or an image_url; optional layer_paths route to "
+        "/image/multi-edit for masks). Writes the result and returns its path. "
+        "Dynamic pricing, so it always needs confirmation.",
+        _IMAGE_EDIT_SCHEMA,
+        True,
+    ),
+]
+
 # Loop-controlled kwargs the model must never supply (stripped defensively).
 _CONTROLLED = ("confirm", "max_spend", "output_dir")
 
@@ -273,11 +311,13 @@ def builtin_tools(
     output_dir: Optional[str] = None,
     only: Optional[set] = None,
 ) -> List[Tool]:
-    """Build the 7 in-process venice tools, bound to `client`.
+    """Build the in-process venice tools, bound to `client`.
 
     `max_spend`/`output_dir` are baked into the paid tools' closures; `confirm` is
     passed per-call by the loop. `only` restricts the set to the named tools (an
-    unknown name raises ValueError so the caller can exit 2).
+    unknown name raises ValueError so the caller can exit 2). With `only=None` the
+    set is exactly `_BUILTINS` (chat's default); passing `only=` also makes the
+    `_CODE_ASSET_BUILTINS` extras (e.g. `venice_image_edit`) selectable.
     """
 
     def _make_paid(impl):
@@ -298,6 +338,7 @@ def builtin_tools(
 
         return invoke
 
+    source = _BUILTINS if only is None else _BUILTINS + _CODE_ASSET_BUILTINS
     tools = [
         Tool(
             name=name,
@@ -310,7 +351,7 @@ def builtin_tools(
             ),
             paid=paid,
         )
-        for (name, impl_name, desc, schema, paid) in _BUILTINS
+        for (name, impl_name, desc, schema, paid) in source
     ]
 
     if only is not None:
