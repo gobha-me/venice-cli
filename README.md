@@ -788,8 +788,14 @@ three possible ways, then executes and finally self-checks the criteria:
 
 Non-interactive with neither `--auto` nor `--plan-only` **aborts (exit 2)** before any
 model call — side-effecting work never runs unattended without an explicit opt-in.
-After execution a final turn reports each criterion MET/NOT MET; with `--json` that
-lands in the envelope and the **exit code reflects it** (0 = all met, 1 = not met).
+After execution a final turn reports each criterion MET/NOT MET and ends with an
+`ACCEPTANCE: PASS`/`FAIL` verdict; with `--json` the verdict lands in the envelope
+(`acceptance.verdict` = `pass`/`fail`/`unknown`). The verdict parse is
+case/format-tolerant and **re-prompts once** for the verdict line if the first reply
+lacks it, so a correct run whose model phrased its verdict loosely still exits 0. The
+**exit code reflects it**: 0 = all met (or check skipped), 1 = not met, 10 = the model
+never emitted a parseable verdict even after the re-prompt (the work may still be
+complete — a loud stderr warning is printed).
 
 **Tools** (path-sandboxed to the project root; mutating tools confirm unless `--auto`):
 
@@ -957,6 +963,7 @@ Veo 3.1, Kling, Runway Gen4, LTX-2, Wan 2.7, Seedance 2.0, and more.
 | 7 | poll timeout |
 | 8 | network / connection error |
 | 9 | disk write error |
+| 10 | acceptance verdict unparseable / ambiguous (`venice code`) |
 | 130 | Ctrl-C |
 
 ## Audio playback caveat

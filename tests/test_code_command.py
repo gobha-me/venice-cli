@@ -102,6 +102,62 @@ class TestCodeCommand(unittest.TestCase):
             _code_args(task="x", root=self.root, auto=True), seq)
         self.assertEqual(rc, 1)
 
+    # --- #37: the verdict parse is case/format-tolerant (no false-fail) ---
+    def test_acceptance_pass_loose_parse(self):
+        seq = [
+            FakeToolCompletion("plan"),
+            FakeToolCompletion("did the work"),
+            FakeToolCompletion("- works: MET\n**acceptance: pass**"),  # lower + markdown
+        ]
+        rc, calls = self._run(
+            _code_args(task="x", root=self.root, auto=True), seq)
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 3)                 # no re-prompt fired
+
+    # --- #37: unparseable verdict -> re-prompt once -> recovers to exit 0 ---
+    def test_acceptance_unknown_reprompt_recovers(self):
+        seq = [
+            FakeToolCompletion("plan"),
+            FakeToolCompletion("did the work"),
+            FakeToolCompletion("All acceptance criteria are met."),    # no sentinel
+            FakeToolCompletion("ACCEPTANCE: PASS"),                    # re-prompt reply
+        ]
+        rc, calls = self._run(
+            _code_args(task="x", root=self.root, auto=True), seq)
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 4)                 # extra re-prompt turn
+        self.assertEqual(calls[3]["tool_choice"], "none")
+
+    # --- #37: still no verdict after the re-prompt -> exit 10 + warning ---
+    def test_acceptance_unknown_persists_exits_10(self):
+        err = io.StringIO()
+        seq = [
+            FakeToolCompletion("plan"),
+            FakeToolCompletion("did the work"),
+            FakeToolCompletion("All criteria met."),                   # no sentinel
+            FakeToolCompletion("Looks good."),                         # still none
+        ]
+        rc, calls = self._run(
+            _code_args(task="x", root=self.root, auto=True), seq, stderr=err)
+        self.assertEqual(rc, 10)
+        self.assertEqual(len(calls), 4)
+        self.assertIn("exiting 10", err.getvalue())
+
+    def test_json_verdict_unknown(self):
+        out = io.StringIO()
+        seq = [
+            FakeToolCompletion("plan"),
+            FakeToolCompletion("did the work"),
+            FakeToolCompletion("All criteria met."),
+            FakeToolCompletion("Still looks good."),
+        ]
+        rc, _calls = self._run(
+            _code_args(task="x", root=self.root, auto=True, json=True), seq, stdout=out)
+        self.assertEqual(rc, 10)
+        env = json.loads(out.getvalue())
+        self.assertEqual(env["acceptance"]["verdict"], "unknown")
+        self.assertIsNone(env["acceptance"]["passed"])
+
     # --- fail-safe: non-TTY without --auto aborts before any model call ---
     def test_non_tty_without_auto_aborts(self):
         err = io.StringIO()
@@ -138,6 +194,7 @@ class TestCodeCommand(unittest.TestCase):
         self.assertEqual(env["plan"], "plan text")
         self.assertIn("wrote n.py", env["final"])
         self.assertTrue(env["acceptance"]["passed"])
+        self.assertEqual(env["acceptance"]["verdict"], "pass")
         self.assertEqual(env["root"], self.root)
 
     # --- --no-plan skips plan + verify ---
