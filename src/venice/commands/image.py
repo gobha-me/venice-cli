@@ -161,9 +161,11 @@ def register(subparsers) -> None:
     )
     p.add_argument(
         "--hide-watermark",
-        action="store_true",
-        default=False,
-        help="Ask Venice to omit its watermark (may be ignored for some content).",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Ask Venice to omit its watermark (may be ignored for some content). "
+        "Config-backable via defaults.image.hide_watermark; --no-hide-watermark "
+        "forces it back on.",
     )
     p.add_argument(
         "--name",
@@ -206,7 +208,8 @@ def _build_body(prompt: str, args) -> dict:
         "prompt": prompt,
         "format": args.format,
         "safe_mode": args.safe_mode,
-        "hide_watermark": args.hide_watermark,
+        # None (neither flag nor config set) -> False, i.e. keep the watermark.
+        "hide_watermark": bool(args.hide_watermark),
     }
     if args.variants > 1:
         body["variants"] = args.variants

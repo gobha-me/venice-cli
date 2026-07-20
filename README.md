@@ -300,7 +300,10 @@ Choose a model with `--model` (default `venice-sd35`); see
 Formats: `png` (default), `webp`, `jpeg`. Aspect-ratio/resolution-tier
 models take `--aspect-ratio`/`--resolution` instead of `--width`/`--height`.
 `--hide-watermark` drops the Venice watermark (Venice may keep it for some
-content); `--no-safe-mode` stops adult-classified art from being blurred.
+content); `--no-safe-mode` stops adult-classified art from being blurred. To
+drop the watermark **by default**, set `defaults.image.hide_watermark` in config
+(`venice config set defaults.image.hide_watermark true`); `--no-hide-watermark`
+forces it back on for a single call.
 
 ## Upscale images
 
