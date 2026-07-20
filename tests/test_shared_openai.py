@@ -179,6 +179,35 @@ class TestBuildOpenAI(unittest.TestCase):
             stub.built, {"api_key": "not-needed", "base_url": "http://localhost:1234/v1"}
         )
 
+    def test_verify_ca_bundle_builds_httpx_client(self):
+        stub = _StubOpenAI()
+        with mock.patch("httpx.Client") as HttpxClient:
+            HttpxClient.return_value = "httpx-sentinel"
+            _openai.build_openai(
+                stub, base_url="https://embed.local/v1", verify="/ca.pem"
+            )
+        HttpxClient.assert_called_once_with(verify="/ca.pem")
+        self.assertEqual(stub.built["http_client"], "httpx-sentinel")
+        self.assertEqual(stub.built["base_url"], "https://embed.local/v1")
+
+    def test_verify_false_disables_verification(self):
+        stub = _StubOpenAI()
+        with mock.patch("httpx.Client") as HttpxClient:
+            HttpxClient.return_value = "httpx-sentinel"
+            _openai.build_openai(
+                stub, base_url="https://embed.local/v1", verify=False
+            )
+        HttpxClient.assert_called_once_with(verify=False)
+        self.assertEqual(stub.built["http_client"], "httpx-sentinel")
+
+    def test_verify_none_adds_no_http_client(self):
+        stub = _StubOpenAI()
+        # Default path must not touch httpx or pass http_client at all.
+        with mock.patch("httpx.Client") as HttpxClient:
+            _openai.build_openai(stub, base_url="http://localhost:1234/v1")
+        HttpxClient.assert_not_called()
+        self.assertNotIn("http_client", stub.built)
+
 
 class TestStatusToExit(unittest.TestCase):
 

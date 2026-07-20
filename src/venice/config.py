@@ -18,6 +18,10 @@ DEFAULT_BASE_URL = "https://api.venice.ai/api/v1"
 # usually need none, and secrets don't belong in config.json).
 ENV_EMBED_BASE_URL = "VENICE_EMBED_BASE_URL"
 ENV_EMBED_API_KEY = "VENICE_EMBED_API_KEY"
+# Trust a private CA when the alternate backend serves a self-signed cert. Only
+# ever applied to --embed-base-url, never the Venice endpoint. (--embed-insecure
+# has no env/config knob by design -- disabling verification stays a CLI choice.)
+ENV_EMBED_CA_BUNDLE = "VENICE_EMBED_CA_BUNDLE"
 
 # `venice index`/`venice search` keep a semantic-search store *project-local*
 # (unlike everything above, which is user-global under ~/.config/venice). The

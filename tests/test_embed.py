@@ -21,6 +21,7 @@ def _args(**ov):
         text=None, from_file=None, model=None,
         dimensions=None, encoding_format=None, json=False,
         embed_base_url=None, embed_model=None,
+        embed_ca_bundle=None, embed_insecure=False,
     )
     base.update(ov)
     return argparse.Namespace(**base)
@@ -123,7 +124,7 @@ class TestEmbed(unittest.TestCase):
         env = {
             k: v for k, v in os.environ.items()
             if k not in ("VENICE_API_KEY", "VENICE_EMBED_BASE_URL",
-                         "VENICE_EMBED_API_KEY")
+                         "VENICE_EMBED_API_KEY", "VENICE_EMBED_CA_BUNDLE")
         }
         env.update(extra_env or {})
         with mock.patch.dict(os.environ, env, clear=True), \
@@ -331,6 +332,86 @@ class TestEmbed(unittest.TestCase):
         self.assertEqual(built["base_url"], "http://config-host/v1")
         self.assertEqual(captured["model"], "cfg-embed")
         self.assertEqual(urlopen.call_count, 0)
+
+    # --- TLS override for the alternate backend (#28) ---
+
+    def test_ca_bundle_reaches_sdk_on_alt_path(self):
+        with mock.patch("httpx.Client", return_value="httpx-sentinel") as Hx:
+            rc, built, captured, urlopen = self._run_alt(
+                _args(text="hi", embed_base_url="https://embed.local/v1",
+                      embed_model="local-embed", embed_ca_bundle="/ca.pem"),
+                FakeEmbeddings([(0, [1.0])]),
+            )
+        self.assertEqual(rc, 0)
+        Hx.assert_called_once_with(verify="/ca.pem")
+        self.assertEqual(built["http_client"], "httpx-sentinel")
+
+    def test_insecure_disables_verification_and_warns(self):
+        err = io.StringIO()
+        with mock.patch("httpx.Client", return_value="httpx-sentinel") as Hx:
+            rc, built, captured, urlopen = self._run_alt(
+                _args(text="hi", embed_base_url="https://embed.local/v1",
+                      embed_model="local-embed", embed_insecure=True),
+                FakeEmbeddings([(0, [1.0])]), stderr=err,
+            )
+        self.assertEqual(rc, 0)
+        Hx.assert_called_once_with(verify=False)
+        self.assertEqual(built["http_client"], "httpx-sentinel")
+        self.assertIn("TLS verification disabled", err.getvalue())
+
+    def test_ca_bundle_from_env_on_alt_path(self):
+        with mock.patch("httpx.Client", return_value="httpx-sentinel") as Hx:
+            rc, built, captured, urlopen = self._run_alt(
+                _args(text="hi", embed_base_url="https://embed.local/v1",
+                      embed_model="local-embed"),
+                FakeEmbeddings([(0, [1.0])]),
+                extra_env={"VENICE_EMBED_CA_BUNDLE": "/env-ca.pem"},
+            )
+        self.assertEqual(rc, 0)
+        Hx.assert_called_once_with(verify="/env-ca.pem")
+
+    def test_ca_bundle_from_config_on_alt_path(self):
+        doc = {"version": 1, "mcpServers": {}, "defaults": {"embed": {
+            "embed_ca_bundle": "/cfg-ca.pem"}}}
+        with mock.patch("httpx.Client", return_value="httpx-sentinel") as Hx:
+            rc, built, captured, urlopen = self._run_alt(
+                _args(text="hi", embed_base_url="https://embed.local/v1",
+                      embed_model="local-embed"),
+                FakeEmbeddings([(0, [1.0])]), doc=doc,
+            )
+        self.assertEqual(rc, 0)
+        Hx.assert_called_once_with(verify="/cfg-ca.pem")
+
+    def test_insecure_without_base_url_is_rejected(self):
+        err = io.StringIO()
+        rc, fake, captured = self._run(
+            _args(text="hi", embed_insecure=True), FakeEmbeddings([(0, [1.0])]),
+            stderr=err,
+        )
+        self.assertEqual(rc, 2)
+        self.assertEqual(fake.embeddings.create.call_count, 0)
+        self.assertIn("only apply with --embed-base-url", err.getvalue())
+
+    def test_ca_bundle_without_base_url_is_rejected(self):
+        err = io.StringIO()
+        rc, fake, captured = self._run(
+            _args(text="hi", embed_ca_bundle="/ca.pem"),
+            FakeEmbeddings([(0, [1.0])]), stderr=err,
+        )
+        self.assertEqual(rc, 2)
+        self.assertEqual(fake.embeddings.create.call_count, 0)
+        self.assertIn("only apply with --embed-base-url", err.getvalue())
+
+    def test_ca_bundle_and_insecure_are_mutually_exclusive(self):
+        from venice.commands import embed
+        parser = argparse.ArgumentParser()
+        sub = parser.add_subparsers()
+        embed.register(sub)
+        with mock.patch.object(sys, "stderr", io.StringIO()), \
+             self.assertRaises(SystemExit):
+            parser.parse_args(
+                ["embed", "--embed-ca-bundle", "/ca.pem", "--embed-insecure"]
+            )
 
 
 if __name__ == "__main__":
