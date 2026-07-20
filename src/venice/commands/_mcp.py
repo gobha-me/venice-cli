@@ -17,7 +17,6 @@ warnings, progress ticks -- are fine; stderr is not the transport.)
 """
 from __future__ import annotations
 
-import base64
 import os
 import sys
 from pathlib import Path
@@ -480,7 +479,7 @@ def upscale_tool(
     if rc is not None:
         return _err(f"upscale: invalid arguments (exit {rc})")
 
-    image_b64 = base64.b64encode(inp.read_bytes()).decode("ascii")
+    image_b64 = _shared.encode_base64(inp)
     body = _upscale._build_body(ns, image_b64)
     out_path = resolve_output_dir(output_dir) / f"{inp.stem}-upscaled.png"
     return _binary_op_tool(

@@ -11,7 +11,6 @@ or an image URL; layers are local files. The endpoint returns raw image bytes
 """
 from __future__ import annotations
 
-import base64
 import sys
 from pathlib import Path
 from typing import List, Optional
@@ -19,7 +18,9 @@ from typing import List, Optional
 from .. import auth, userconfig
 from ..client import build_client_from_auth
 from ._shared import (
+    check_image_file,
     confirm_or_exit,
+    encode_base64,
     over_budget,
     post_binary_op,
     print_balance_and_remaining,
@@ -29,7 +30,6 @@ from ._shared import (
 
 EDIT_ENDPOINT = "/image/edit"
 MULTI_EDIT_ENDPOINT = "/image/multi-edit"
-MAX_INPUT_BYTES = 25 * 1024 * 1024  # API limit: each input file < 25 MB
 MAX_LAYERS = 2  # /image/multi-edit takes up to 3 images (base + 2 layers)
 MAX_PROMPT = 32768
 URL_DEFAULT_STEM = "venice-edit"
@@ -100,21 +100,6 @@ def register(subparsers) -> None:
     p.set_defaults(handler=_run)
 
 
-def _check_image_file(inp: Path) -> Optional[int]:
-    if not inp.is_file():
-        print(f"image-edit: input file not found: {inp}", file=sys.stderr)
-        return 2
-    size = inp.stat().st_size
-    if size == 0:
-        print(f"image-edit: input {inp} is empty", file=sys.stderr)
-        return 2
-    if size > MAX_INPUT_BYTES:
-        print(f"image-edit: input {inp} is {size} bytes; must be < 25 MB",
-              file=sys.stderr)
-        return 2
-    return None
-
-
 def _validate(args) -> Optional[int]:
     if (args.input is None) == (args.image_url is None):
         print("image-edit: provide exactly one of INPUT file or --image-url",
@@ -127,7 +112,7 @@ def _validate(args) -> Optional[int]:
         print(f"image-edit: --prompt exceeds {MAX_PROMPT} chars", file=sys.stderr)
         return 2
     if args.input is not None:
-        rc = _check_image_file(args.input)
+        rc = check_image_file(args.input, label="image-edit")
         if rc is not None:
             return rc
     layers = args.layer or []
@@ -136,14 +121,10 @@ def _validate(args) -> Optional[int]:
               "(base + 2 = 3 total)", file=sys.stderr)
         return 2
     for layer in layers:
-        rc = _check_image_file(layer)
+        rc = check_image_file(layer, label="image-edit")
         if rc is not None:
             return rc
     return None
-
-
-def _encode(path: Path) -> str:
-    return base64.b64encode(path.read_bytes()).decode("ascii")
 
 
 def _add_common(body: dict, args) -> None:
@@ -206,7 +187,7 @@ def _run(args) -> int:
     if rc is not None:
         return rc
 
-    base_image = _encode(args.input) if args.input is not None else args.image_url
-    layers_b64 = [_encode(p) for p in (args.layer or [])]
+    base_image = encode_base64(args.input) if args.input is not None else args.image_url
+    layers_b64 = [encode_base64(p) for p in (args.layer or [])]
     endpoint, body = _build_body(args, base_image, layers_b64)
     return post_binary_op(client, endpoint, body, out_path, "image-edit")
