@@ -161,6 +161,124 @@ class TestRunLoopBudget(unittest.TestCase):
         self.assertEqual(calls[-1]["tool_choice"], "none")  # forced final answer
 
 
+class TestCostLedger(unittest.TestCase):
+    """The #66 session spend ledger."""
+
+    def test_accumulates_input_and_output_cost(self):
+        L = _agent.CostLedger()
+        L.bind_pricing({"input": {"usd": 1.5}, "output": {"usd": 4.0}})
+        c = L.record({"prompt_tokens": 1000, "completion_tokens": 500})
+        # 1000*1.5/1e6 + 500*4.0/1e6 = 0.0015 + 0.0020
+        self.assertAlmostEqual(c, 0.0035)
+        self.assertAlmostEqual(L.total, 0.0035)
+        self.assertEqual(L.prompt_tokens, 1000)
+        self.assertEqual(L.completion_tokens, 500)
+
+    def test_over_only_when_capped(self):
+        L = _agent.CostLedger()  # uncapped
+        L.bind_pricing({"input": {"usd": 100.0}, "output": {"usd": 100.0}})
+        L.record({"prompt_tokens": 10**6, "completion_tokens": 10**6})
+        self.assertFalse(L.over())  # huge spend, but no cap set
+        L2 = _agent.CostLedger(max_spend=0.001)
+        L2.bind_pricing({"input": {"usd": 1.0}, "output": {"usd": 1.0}})
+        L2.record({"prompt_tokens": 2000, "completion_tokens": 0})  # $0.002 > cap
+        self.assertTrue(L2.over())
+
+    def test_unpriced_model_counts_tokens_without_charge(self):
+        L = _agent.CostLedger(max_spend=0.0)
+        # no bind_pricing -> unknown rate
+        c = L.record({"prompt_tokens": 5000, "completion_tokens": 100})
+        self.assertEqual(c, 0.0)
+        self.assertTrue(L.unpriced)
+        self.assertEqual(L.prompt_tokens, 5000)
+        self.assertFalse(L.over())  # nothing charged, so cap never trips
+        self.assertIn("unpriced", L.summary())
+
+    def test_record_tolerates_sdk_objects_and_garbage(self):
+        L = _agent.CostLedger()
+        L.bind_pricing({"input": {"usd": 1.0}, "output": {"usd": 1.0}})
+        usage = mock.MagicMock()
+        usage.model_dump.return_value = {"prompt_tokens": 100, "completion_tokens": 10}
+        L.record(usage)
+        L.record(None)
+        L.record({"prompt_tokens": "nope"})
+        self.assertEqual(L.prompt_tokens, 100)
+        self.assertAlmostEqual(L.total, 0.00011)
+
+    def test_factory_none_without_cap(self):
+        args = type("A", (), {"session_max_spend": None})()
+        self.assertIsNone(_agent.ledger_from_args(args, [], "m"))
+
+    def test_factory_binds_catalog_pricing(self):
+        args = type("A", (), {"session_max_spend": 0.5})()
+        models = [{"id": "m", "model_spec": {"pricing": {"input": {"usd": 2.0}}}}]
+        L = _agent.ledger_from_args(args, models, "m")
+        self.assertEqual(L.max_spend, 0.5)
+        self.assertEqual(L._in, 2.0 / 1e6)
+        self.assertIsNone(L._out)  # no output price advertised
+
+
+class TestRunLoopSpendGate(unittest.TestCase):
+    """The loop stops starting paid turns once the session cap is hit (#66)."""
+
+    def _tool(self):
+        return _agent.Tool("t", "t", {"type": "object", "properties": {}},
+                           lambda a, *, confirm=False: {"status": "ok"})
+
+    def test_forces_final_when_cap_crossed(self):
+        # Turn 1 calls a tool AND costs enough to cross the cap; the next
+        # iteration must force a final answer instead of another paid turn.
+        usage = {"prompt_tokens": 9000, "completion_tokens": 1000,
+                 "total_tokens": 10000}
+        seq = [
+            FakeToolCompletion(tool_calls=[_FnCall("c1", "t", "{}")], usage=usage),
+            FakeToolCompletion("wrapped up"),  # the forced-final turn
+        ]
+        fake, calls = _fake_oai(seq)
+        ledger = _agent.CostLedger(max_spend=0.001)
+        ledger.bind_pricing({"input": {"usd": 1.0}, "output": {"usd": 1.0}})
+        with mock.patch.object(sys, "stdout", io.StringIO()), \
+             mock.patch.object(sys, "stderr", io.StringIO()):
+            rc = _agent.run_loop(
+                fake, "m", [{"role": "user", "content": "go"}], {},
+                [self._tool()], max_tool_calls=0, yes=True, json_out=False,
+                ledger=ledger,
+            )
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 2)                      # turn 1 + forced final
+        self.assertEqual(calls[-1]["tool_choice"], "none")   # forced, no tools
+        self.assertTrue(ledger.over())
+
+    def test_no_ledger_means_no_gate(self):
+        usage = {"prompt_tokens": 10**9, "completion_tokens": 10**9}
+        seq = [FakeToolCompletion("done", usage=usage)]
+        fake, calls = _fake_oai(seq)
+        with mock.patch.object(sys, "stdout", io.StringIO()), \
+             mock.patch.object(sys, "stderr", io.StringIO()):
+            rc = _agent.run_loop(
+                fake, "m", [{"role": "user", "content": "go"}], {},
+                [self._tool()], max_tool_calls=0, yes=True, json_out=False,
+            )
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 1)  # no forced final despite huge usage
+
+    def test_unpriced_ledger_never_gates_but_counts(self):
+        usage = {"prompt_tokens": 5000, "completion_tokens": 500}
+        seq = [FakeToolCompletion("done", usage=usage)]
+        fake, calls = _fake_oai(seq)
+        ledger = _agent.CostLedger(max_spend=0.0)  # cap 0, but no price bound
+        with mock.patch.object(sys, "stdout", io.StringIO()), \
+             mock.patch.object(sys, "stderr", io.StringIO()):
+            rc = _agent.run_loop(
+                fake, "m", [{"role": "user", "content": "go"}], {},
+                [self._tool()], max_tool_calls=0, yes=True, json_out=False,
+                ledger=ledger,
+            )
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 1)  # unpriced -> counted, not gated
+        self.assertEqual(ledger.prompt_tokens, 5000)
+
+
 class TestAutoCompact(unittest.TestCase):
     """Auto-compaction in run_loop (#48)."""
 

@@ -213,6 +213,7 @@ _COMMAND_MAP = {
         "auto_compact": ("auto_compact", _as_bool),
         "compact_threshold": ("compact_threshold", int),
         "compact_keep_turns": ("compact_keep_turns", int),
+        "session_max_spend": ("session_max_spend", float),
     },
     "embed": {
         "model": ("model", str),
@@ -248,6 +249,7 @@ _COMMAND_MAP = {
         "auto_compact": ("auto_compact", _as_bool),
         "compact_threshold": ("compact_threshold", int),
         "compact_keep_turns": ("compact_keep_turns", int),
+        "session_max_spend": ("session_max_spend", float),
     },
     "image": {
         # `--hide-watermark` / `--safe-mode` are tri-state (default None) so these

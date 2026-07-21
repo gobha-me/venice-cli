@@ -153,6 +153,14 @@ def register(subparsers) -> None:
         help="Per-call auto-approve cap for paid tools (default: $0.10 / "
         "$VENICE_MCP_MAX_SPEND). Over-cap calls prompt on a TTY.",
     )
+    ag.add_argument(
+        "--session-max-spend", type=float, default=None, metavar="USD",
+        dest="session_max_spend",
+        help="Cap total chat-completion spend for this session (#66). Meters the "
+        "model's own calls (not just paid tools) from server token usage; at the "
+        "cap the agent stops starting new turns and wraps up. Distinct from "
+        "--max-spend (the per-call tool cap).",
+    )
     ag.add_argument("--yes", "-y", action="store_true", default=None,
                     help="Auto-approve every paid tool call and every side-effecting "
                     "external MCP tool (skips the confirm gate).")
@@ -443,6 +451,7 @@ def _run_agent(args, oai, openai, client, models, model, kwargs) -> Optional[int
                 yes=bool(args.yes),
                 json_out=args.json,
                 budget=_compact.budget_from_args(args),  # #48 auto-compact parity
+                ledger=_agent.ledger_from_args(args, models, model),  # #66 spend cap
             )
         except openai.OpenAIError as e:
             return _openai.status_to_exit(openai, e, "chat")

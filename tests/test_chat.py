@@ -33,6 +33,8 @@ def _args(**ov):
         interactive=False, resume=None,
         # --- auto-compaction (#48) ---
         auto_compact=None, compact_threshold=None, compact_keep_turns=None,
+        # --- session spend cap (#66) ---
+        session_max_spend=None,
     )
     base.update(ov)
     return argparse.Namespace(**base)
@@ -457,6 +459,41 @@ class TestChatAgent(unittest.TestCase):
             )
         self.assertEqual(rc, 0)
         self.assertIsNone(captured["budget"])
+
+    def test_tools_session_max_spend_hands_ledger_to_loop(self):
+        # #66: chat --tools must honor --session-max-spend by giving run_loop a
+        # CostLedger bound to the session model's catalog pricing.
+        from venice.commands import _agent
+        captured = {}
+
+        def _spy(*a, **kw):
+            captured["ledger"] = kw.get("ledger")
+            return 0
+
+        with mock.patch.object(_agent, "run_loop", _spy):
+            rc, _fake, _calls = self._run_seq(
+                _args(message="hi", tools=True, stream=False,
+                      session_max_spend=1.25),
+                [],
+            )
+        self.assertEqual(rc, 0)
+        self.assertIsInstance(captured["ledger"], _agent.CostLedger)
+        self.assertEqual(captured["ledger"].max_spend, 1.25)
+
+    def test_tools_without_session_max_spend_passes_no_ledger(self):
+        from venice.commands import _agent
+        captured = {}
+
+        def _spy(*a, **kw):
+            captured["ledger"] = kw.get("ledger")
+            return 0
+
+        with mock.patch.object(_agent, "run_loop", _spy):
+            rc, _fake, _calls = self._run_seq(
+                _args(message="hi", tools=True, stream=False), [],
+            )
+        self.assertEqual(rc, 0)
+        self.assertIsNone(captured["ledger"])
 
     def test_capability_degrade_to_plain_chat(self):
         err = io.StringIO()
