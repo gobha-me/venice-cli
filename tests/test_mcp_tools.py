@@ -526,5 +526,36 @@ class TestModelsTool(_ToolTest):
         self.assertIn("unknown type", out["message"])
 
 
+class TestModelDetailsTool(_ToolTest):
+    def test_returns_curated_details(self):
+        # `text` is first in MODEL_TYPES, so _find_model matches on the first GET.
+        spec = {"name": "Big", "pricing": {"input": {"usd": 1.5}},
+                "availableContextTokens": 131072, "promptCharacterLimit": 1500,
+                "capabilities": {"supportsFunctionCalling": True},
+                "traits": ["default"]}
+        catalog = json.dumps(
+            {"data": [{"id": "big-model", "type": "text", "model_spec": spec}]}
+        ).encode()
+        with mock.patch("venice.client.urllib.request.urlopen",
+                        _seq(FakeResp(200, catalog))), self.stdout_guard():
+            out = _mcp.model_details_tool(_client(), model="big-model")
+        self.assertEqual(out["status"], "ok")
+        self.assertEqual(out["id"], "big-model")
+        self.assertEqual(out["available_context_tokens"], 131072)
+        self.assertEqual(out["prompt_character_limit"], 1500)
+        self.assertEqual(out["pricing"], {"input": {"usd": 1.5}})
+        self.assertTrue(out["capabilities"]["supportsFunctionCalling"])
+
+    def test_unknown_model_errors(self):
+        from venice.commands.models import MODEL_TYPES
+        empty = json.dumps({"data": []}).encode()
+        resps = _seq(*[FakeResp(200, empty) for _ in MODEL_TYPES])
+        with mock.patch("venice.client.urllib.request.urlopen", resps), \
+                self.stdout_guard():
+            out = _mcp.model_details_tool(_client(), model="nope")
+        self.assertEqual(out["status"], "error")
+        self.assertIn("no model", out["message"])
+
+
 if __name__ == "__main__":
     unittest.main()

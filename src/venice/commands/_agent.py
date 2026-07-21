@@ -198,6 +198,13 @@ _MODELS_SCHEMA = _obj(
     required=["type"],
 )
 
+_MODEL_DETAILS_SCHEMA = _obj(
+    {
+        "model": _p("string", "The model id to describe (e.g. from venice_models)."),
+    },
+    required=["model"],
+)
+
 # Schema for a tool folded in ONLY via `only=` (e.g. `venice code --assets`), so it
 # is not part of chat's default advertised set. Curated subset of
 # `_mcp.image_edit_tool`; `confirm`/`max_spend`/`output_dir` omitted (loop-injected).
@@ -306,6 +313,15 @@ _BUILTINS = [
         "to choose a valid `model` for the other venice_* tools instead of guessing. "
         "Read-only; not spend-gated.",
         _MODELS_SCHEMA,
+        False,
+    ),
+    (
+        "venice_model_details",
+        "model_details_tool",
+        "Get one model's details -- pricing (cost), input context/prompt-length "
+        "limits (your input budget), and capabilities -- so you can budget input "
+        "and confirm a model fits before using it. Read-only; not spend-gated.",
+        _MODEL_DETAILS_SCHEMA,
         False,
     ),
     (
