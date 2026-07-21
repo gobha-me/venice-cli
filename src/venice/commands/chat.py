@@ -19,7 +19,7 @@ from typing import Optional
 
 from .. import auth, userconfig
 from ..client import build_client_from_auth
-from . import _agent, _compact, _mcp, _mcp_client, _models, _openai, _repl
+from . import _agent, _compact, _mcp, _mcp_client, _models, _openai, _persona, _repl
 
 
 def register(subparsers) -> None:
@@ -39,6 +39,16 @@ def register(subparsers) -> None:
         help="User message. Use '-' (or pipe stdin) to read from stdin.",
     )
     p.add_argument("--system", "-s", default=None, help="Optional system prompt.")
+    p.add_argument(
+        "--persona",
+        default=None,
+        metavar="NAME",
+        help=(
+            "Load a saved system prompt from ~/.config/venice/personas/<name>.md "
+            "at launch. Ignored if --system is given. Switch mid-session with "
+            "/persona."
+        ),
+    )
     p.add_argument(
         "--model",
         "-m",
@@ -291,6 +301,16 @@ def _is_interactive(args, message) -> bool:
 
 def _run(args) -> int:
     userconfig.apply_defaults(args, "chat")
+    # A startup persona (--persona or defaults.chat.persona) seeds the same lever
+    # both one-shot and REPL modes read -- args.system -- so it flows through
+    # _build_kwargs and _seed_messages unchanged. An explicit system prompt
+    # (--system / defaults.chat.system) wins.
+    if getattr(args, "persona", None) and args.system is None:
+        try:
+            args.system = _persona.load(args.persona)
+        except _persona.PersonaError as e:
+            print(f"chat: {e}", file=sys.stderr)
+            return 2
     message = _resolve_message(args)
     interactive = _is_interactive(args, message)
     if not interactive and not message:

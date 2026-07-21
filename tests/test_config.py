@@ -19,7 +19,7 @@ import venice.userconfig as uc
 from venice import cli
 from venice.commands import config as cfgcmd
 from venice.commands import (
-    image, image_edit, index, music, sfx, tts, upscale, video,
+    chat, image, image_edit, index, music, sfx, tts, upscale, video,
 )
 
 
@@ -127,6 +127,26 @@ class TestApplyDefaults(_Base):
                                    max_tokens=None, web_search=None, character=None)
         uc.apply_defaults(args2, "chat", doc)
         self.assertEqual(args2.model, "explicit")
+
+    def test_apply_fills_chat_persona(self):
+        # #68: defaults.chat.persona is a plain-string key like system/character.
+        doc = {"defaults": {"chat": {"persona": "pirate"}}}
+        args = argparse.Namespace(persona=None, model=None, system=None)
+        uc.apply_defaults(args, "chat", doc)
+        self.assertEqual(args.persona, "pirate")
+        args2 = argparse.Namespace(persona="cli", model=None, system=None)
+        uc.apply_defaults(args2, "chat", doc)
+        self.assertEqual(args2.persona, "cli")  # explicit wins
+
+    def test_chat_parser_has_persona_dest_config_fills_it(self):
+        # Guards the config key against the real argparser's dest (#68): a wrong
+        # dest name would silently no-op.
+        parser = _build_parser(chat)
+        args = parser.parse_args(["chat"])
+        self.assertTrue(hasattr(args, "persona"))
+        doc = {"defaults": {"chat": {"persona": "pirate"}}}
+        uc.apply_defaults(args, "chat", doc)
+        self.assertEqual(args.persona, "pirate")
 
     def test_apply_global_output_dir_expands_user(self):
         doc = {"defaults": {"output_dir": "~/venice-out", "max_spend": 0.5, "yes": True}}

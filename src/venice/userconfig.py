@@ -203,6 +203,7 @@ _COMMAND_MAP = {
     "chat": {
         "model": ("model", str),
         "system": ("system", str),
+        "persona": ("persona", str),
         "temperature": ("temperature", float),
         "max_tokens": ("max_tokens", int),
         "web_search": ("web_search", str),
