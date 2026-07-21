@@ -988,6 +988,25 @@ overrides them. **Precedence for any flag is: explicit CLI flag > environment
 variable > config file > built-in default** — so a config default never shadows
 something you pass on the command line or set in the environment.
 
+Per-command sections cover the *persistent preferences* of most commands — the
+knob is "if it expresses a preference (model, format, voice, sizing, style,
+safety), it should be settable in config." Currently config-backable:
+
+- `defaults.image.*` — `width`, `height`, `aspect_ratio`, `resolution`,
+  `style_prefix`, `preset`, `preset_file`, `negative_prompt`, `cfg_scale`,
+  `steps`, `style_preset`, `hide_watermark`
+- `defaults.image_edit.*` — `model`, `aspect_ratio`, `resolution`, `output_format`
+- `defaults.tts.*` — `voice`, `speed`, `play`
+- `defaults.sfx.*` — `play`
+- `defaults.music.*` — `duration`, `speed`, `play`
+- `defaults.video.*` — `model`, `resolution`, `aspect_ratio`, `negative_prompt`
+- `defaults.upscale.*` — `enhance_creativity`, `enhance_prompt`, `replication`
+- `defaults.chat.*`, `defaults.code.*`, `defaults.embed.*`, `defaults.index.*`,
+  `defaults.search.*` — see each command's section above
+
+Per-invocation flags (`--dry-run`, `--json`, `--resume`, `--seed`, inputs and
+positionals) stay CLI-only by design.
+
 The **API key is never stored here** — it stays in
 `~/.config/venice/credentials`. Unknown keys are preserved on write, so the
 schema is forward-compatible.

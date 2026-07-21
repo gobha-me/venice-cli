@@ -18,6 +18,9 @@ import venice.config as cfg
 import venice.userconfig as uc
 from venice import cli
 from venice.commands import config as cfgcmd
+from venice.commands import (
+    image, image_edit, index, music, sfx, tts, upscale, video,
+)
 
 
 def _add_args(name="srv", **ov):
@@ -147,6 +150,120 @@ class TestApplyDefaults(_Base):
         _, _, err = _capture(uc.apply_defaults, args, "chat", doc)
         self.assertIsNone(args.temperature)  # unchanged
         self.assertIn("temperature", err)
+
+
+# --------------------------------------------------------------------------- #
+# #57 config parity -- Class A: flags that already default None become
+# config-backable by a pure `_COMMAND_MAP` addition (no argparse change). Each
+# case parses the command's REAL parser (so a wrong dest name would be caught),
+# fills from a `defaults.<cmd>.<key>` doc, and confirms an explicit CLI wins.
+# --------------------------------------------------------------------------- #
+def _build_parser(mod):
+    parser = argparse.ArgumentParser(prog="venice")
+    sub = parser.add_subparsers(dest="command")
+    mod.register(sub)
+    return parser
+
+
+_CLASS_A_CASES = [
+    dict(
+        mod=image, argv=["image"], key="image",
+        config={
+            "width": 512, "height": 768, "aspect_ratio": "16:9",
+            "resolution": "2K", "style_prefix": "oil painting of",
+            "preset": "myp", "preset_file": "~/p.json",
+            "negative_prompt": "blurry", "cfg_scale": "7.5", "steps": 30,
+            "style_preset": "anime",
+        },
+        expected={
+            "width": 512, "height": 768, "aspect_ratio": "16:9",
+            "resolution": "2K", "style_prefix": "oil painting of",
+            "preset": "myp", "preset_file": Path("~/p.json").expanduser(),
+            "negative_prompt": "blurry", "cfg_scale": 7.5, "steps": 30,
+            "style_preset": "anime",
+        },
+        explicit=["image", "--steps", "10"], edest="steps", eval=10,
+    ),
+    dict(
+        mod=image_edit, argv=["image-edit"], key="image_edit",
+        config={"model": "edit-m", "aspect_ratio": "1:1",
+                "resolution": "1K", "output_format": "webp"},
+        expected={"model": "edit-m", "aspect_ratio": "1:1",
+                  "resolution": "1K", "output_format": "webp"},
+        explicit=["image-edit", "--model", "cli-m"], edest="model", eval="cli-m",
+    ),
+    dict(
+        mod=tts, argv=["tts"], key="tts",
+        config={"voice": "af_sky", "speed": "1.25", "play": "false"},
+        expected={"voice": "af_sky", "speed": 1.25, "play": False},
+        explicit=["tts", "--voice", "cli-v"], edest="voice", eval="cli-v",
+    ),
+    dict(
+        mod=sfx, argv=["sfx"], key="sfx",
+        config={"play": True},
+        expected={"play": True},
+        explicit=["sfx", "--no-play"], edest="play", eval=False,
+    ),
+    dict(
+        mod=music, argv=["music"], key="music",
+        config={"duration": 30, "speed": "0.9", "play": "no"},
+        expected={"duration": 30, "speed": 0.9, "play": False},
+        explicit=["music", "--speed", "2.0"], edest="speed", eval=2.0,
+    ),
+    dict(
+        mod=video, argv=["video"], key="video",
+        config={"model": "vid-1", "resolution": "720p",
+                "aspect_ratio": "16:9", "negative_prompt": "text"},
+        expected={"model": "vid-1", "resolution": "720p",
+                  "aspect_ratio": "16:9", "negative_prompt": "text"},
+        explicit=["video", "--model", "cli-vid"], edest="model", eval="cli-vid",
+    ),
+    dict(
+        mod=upscale, argv=["upscale", "in.png"], key="upscale",
+        config={"enhance_creativity": "0.5", "enhance_prompt": "gold",
+                "replication": "0.3"},
+        expected={"enhance_creativity": 0.5, "enhance_prompt": "gold",
+                  "replication": 0.3},
+        explicit=["upscale", "in.png", "--replication", "0.9"],
+        edest="replication", eval=0.9,
+    ),
+    dict(
+        mod=index, argv=["index"], key="index",
+        config={"exclude": ["*.min.js", "vendor/"]},
+        expected={"exclude": ["*.min.js", "vendor/"]},
+        explicit=["index", "--exclude", "cli-pat"], edest="exclude",
+        eval=["cli-pat"],
+    ),
+]
+
+
+class TestClassAParity(unittest.TestCase):
+    def test_config_fills_none_dests(self):
+        for case in _CLASS_A_CASES:
+            with self.subTest(cmd=case["key"]):
+                parser = _build_parser(case["mod"])
+                args = parser.parse_args(case["argv"])
+                doc = {"defaults": {case["key"]: case["config"]}}
+                uc.apply_defaults(args, case["key"], doc)
+                for dest, want in case["expected"].items():
+                    self.assertEqual(getattr(args, dest), want,
+                                     msg=f"{case['key']}.{dest}")
+
+    def test_explicit_cli_beats_config(self):
+        for case in _CLASS_A_CASES:
+            with self.subTest(cmd=case["key"]):
+                parser = _build_parser(case["mod"])
+                args = parser.parse_args(case["explicit"])
+                doc = {"defaults": {case["key"]: case["config"]}}
+                uc.apply_defaults(args, case["key"], doc)
+                self.assertEqual(getattr(args, case["edest"]), case["eval"])
+
+    def test_index_exclude_scalar_becomes_list(self):
+        parser = _build_parser(index)
+        args = parser.parse_args(["index"])
+        doc = {"defaults": {"index": {"exclude": "solo-pat"}}}
+        uc.apply_defaults(args, "index", doc)
+        self.assertEqual(args.exclude, ["solo-pat"])
 
 
 # --------------------------------------------------------------------------- #
