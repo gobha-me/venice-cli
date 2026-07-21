@@ -228,6 +228,7 @@ _COMMAND_MAP = {
         "batch": ("batch", int),
         "chunk_lines": ("chunk_lines", int),
         "chunk_overlap": ("chunk_overlap", int),
+        "exclude": ("exclude", _as_list),
     },
     "search": {
         "top_k": ("top_k", int),
@@ -246,6 +247,51 @@ _COMMAND_MAP = {
         # `--hide-watermark` is tri-state (default None) so this default can win;
         # an explicit --hide-watermark/--no-hide-watermark on the CLI still wins.
         "hide_watermark": ("hide_watermark", _as_bool),
+        # Sizing / style / passthrough knobs (all default None on the CLI).
+        "width": ("width", int),
+        "height": ("height", int),
+        "aspect_ratio": ("aspect_ratio", str),
+        "resolution": ("resolution", str),
+        "style_prefix": ("style_prefix", str),
+        "preset": ("preset", str),
+        "preset_file": ("preset_file", _as_path),
+        "negative_prompt": ("negative_prompt", str),
+        "cfg_scale": ("cfg_scale", float),
+        "steps": ("steps", int),
+        "style_preset": ("style_preset", str),
+    },
+    "image_edit": {
+        "model": ("model", str),
+        "aspect_ratio": ("aspect_ratio", str),
+        "resolution": ("resolution", str),
+        "output_format": ("output_format", str),
+    },
+    "tts": {
+        "voice": ("voice", str),
+        "speed": ("speed", float),
+        # `--play`/`--no-play` is a tri-stated store_true(None)/store_false pair.
+        "play": ("play", _as_bool),
+    },
+    "sfx": {
+        "play": ("play", _as_bool),
+    },
+    "music": {
+        # `lyrics` is deliberately CLI-only -- it's per-song content, not a
+        # persistent preference.
+        "duration": ("duration", int),
+        "speed": ("speed", float),
+        "play": ("play", _as_bool),
+    },
+    "video": {
+        "model": ("model", str),
+        "resolution": ("resolution", str),
+        "aspect_ratio": ("aspect_ratio", str),
+        "negative_prompt": ("negative_prompt", str),
+    },
+    "upscale": {
+        "enhance_creativity": ("enhance_creativity", float),
+        "enhance_prompt": ("enhance_prompt", str),
+        "replication": ("replication", float),
     },
 }
 
