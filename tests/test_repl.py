@@ -506,6 +506,13 @@ class TestReplCompletion(unittest.TestCase):
         self.assertIn("/auto", _repl._COMMANDS)
         self.assertIn("/manual", _repl._COMMANDS)
 
+    def test_commands_include_paste_edit(self):
+        self.assertIn("/paste", _repl._COMMANDS)
+        self.assertIn("/edit", _repl._COMMANDS)
+
+    def test_completes_paste(self):
+        self.assertEqual(self._complete_all("/pa", 0, "/pa"), ["/paste"])
+
     def test_completes_slash_command(self):
         self.assertEqual(self._complete_all("/mo", 0, "/mo"), ["/model", "/models"])
 
@@ -563,6 +570,124 @@ class TestReplCompletion(unittest.TestCase):
         # leaving the REPL restores the prior completer + delims (no leak)
         self.assertEqual(rl.completer, "PREV")
         self.assertEqual(rl.delims, "PREVDELIMS")
+
+
+class TestReplMultiline(unittest.TestCase):
+    """#65: /paste block mode and /edit ($EDITOR) multi-line composition. Both
+    are handled in the run() loop and submit exactly one normal turn."""
+
+    # ---- /paste ------------------------------------------------------- #
+    def test_paste_composes_multiline_turn(self):
+        rc, fake, calls = _run_repl(
+            _args(interactive=True),
+            [[FakeChunk("ok")]],
+            ["/paste", "line one", "line two", "/end", "/exit"],
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["messages"][-1],
+                         {"role": "user", "content": "line one\nline two"})
+
+    def test_paste_preserves_indentation(self):
+        rc, fake, calls = _run_repl(
+            _args(interactive=True),
+            [[FakeChunk("ok")]],
+            ["/paste", "def f():", "    return 1", "/end", "/exit"],
+        )
+        self.assertEqual(calls[0]["messages"][-1]["content"],
+                         "def f():\n    return 1")
+
+    def test_paste_cancel_sends_nothing(self):
+        rc, fake, calls = _run_repl(
+            _args(interactive=True), [],
+            ["/paste", "junk", "/cancel", "/exit"],
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 0)
+
+    def test_paste_empty_block_sends_nothing(self):
+        rc, fake, calls = _run_repl(
+            _args(interactive=True), [],
+            ["/paste", "/end", "/exit"],
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 0)
+
+    # ---- /edit -------------------------------------------------------- #
+    @staticmethod
+    def _editor_writing(text, rc=0):
+        """A fake subprocess.call that simulates the user saving `text` (the temp
+        path is the last argv element) then leaving the editor with code `rc`."""
+        def _call(cmd, *a, **k):
+            with open(cmd[-1], "w", encoding="utf-8") as fh:
+                fh.write(text)
+            return rc
+        return _call
+
+    def test_edit_composes_turn(self):
+        with mock.patch.dict(os.environ, {"EDITOR": "true"}), \
+             mock.patch("venice.commands._repl.subprocess.call",
+                        self._editor_writing("edited one\nedited two\n")):
+            rc, fake, calls = _run_repl(
+                _args(interactive=True), [[FakeChunk("ok")]], ["/edit", "/exit"],
+            )
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["messages"][-1],
+                         {"role": "user", "content": "edited one\nedited two"})
+
+    def test_edit_preseeds_buffer_with_inline_text(self):
+        seen = {}
+
+        def _call(cmd, *a, **k):
+            with open(cmd[-1], encoding="utf-8") as fh:
+                seen["seed"] = fh.read()
+            with open(cmd[-1], "w", encoding="utf-8") as fh:
+                fh.write(seen["seed"] + " and more")
+            return 0
+
+        with mock.patch.dict(os.environ, {"EDITOR": "true"}), \
+             mock.patch("venice.commands._repl.subprocess.call", _call):
+            rc, fake, calls = _run_repl(
+                _args(interactive=True), [[FakeChunk("ok")]],
+                ["/edit draft text", "/exit"],
+            )
+        self.assertEqual(seen["seed"], "draft text")
+        self.assertEqual(calls[0]["messages"][-1]["content"], "draft text and more")
+
+    def test_edit_empty_buffer_sends_nothing(self):
+        with mock.patch.dict(os.environ, {"EDITOR": "true"}), \
+             mock.patch("venice.commands._repl.subprocess.call",
+                        self._editor_writing("   \n")):
+            rc, fake, calls = _run_repl(
+                _args(interactive=True), [], ["/edit", "/exit"],
+            )
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 0)
+
+    def test_edit_nonzero_exit_aborts(self):
+        with mock.patch.dict(os.environ, {"EDITOR": "true"}), \
+             mock.patch("venice.commands._repl.subprocess.call",
+                        self._editor_writing("would-be text", rc=1)):
+            rc, fake, calls = _run_repl(
+                _args(interactive=True), [], ["/edit", "/exit"],
+            )
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 0)
+
+    def test_edit_no_editor_found_is_graceful(self):
+        def _call(cmd, *a, **k):
+            raise FileNotFoundError(cmd[0])
+
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {"EDITOR": "nope-no-such-editor"}), \
+             mock.patch("venice.commands._repl.subprocess.call", _call):
+            rc, fake, calls = _run_repl(
+                _args(interactive=True), [], ["/edit", "/exit"], stderr=err,
+            )
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 0)
+        self.assertIn("editor", err.getvalue().lower())
 
 
 if __name__ == "__main__":
