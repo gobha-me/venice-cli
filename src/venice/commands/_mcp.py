@@ -127,6 +127,40 @@ def _err(message: str) -> dict:
     return {"status": "error", "message": message}
 
 
+# ---- async job handles (#62: background media renders) -----------------------
+
+# Which retrieve/complete route family serves each queued media type. sfx and
+# music share the audio queue; video has its own. `venice_job_status` /
+# `venice_job_result` use this to route a bare (queue_id, type, model) handle.
+_JOB_ROUTE = {"sfx": "audio", "music": "audio", "video": "video"}
+
+
+def _job_handle(
+    queue_id: str, *, type: str, model: str, quote_value, download_url: Optional[str] = None
+) -> dict:
+    """The stateless handle a `background=True` media call returns.
+
+    The agent holds these fields and passes them back to `venice_job_status` /
+    `venice_job_result`. The charge already landed at queue time, so fetching the
+    result later is free.
+    """
+    handle = {
+        "status": "queued",
+        "queue_id": queue_id,
+        "type": type,
+        "model": model,
+        "cost_estimate_usd": quote_value,
+        "message": (
+            "queued; keep working, then poll venice_job_status or fetch with "
+            "venice_job_result using this queue_id, type, and model"
+        ),
+    }
+    if download_url:
+        handle["download_url"] = download_url
+        handle["message"] += " (pass download_url too for this video)"
+    return handle
+
+
 # ---- tools -------------------------------------------------------------------
 
 def image_tool(
@@ -278,12 +312,17 @@ def _queue_media(
     name_prefix: str,
     output_dir: Optional[str],
     max_wait: float,
+    background: bool = False,
 ) -> dict:
     """Shared quote-gated queue -> poll -> save for sfx/music (print-free).
 
     The caller has already fetched the quote (`quote_value`) and built the
     `/audio/queue` body; here we gate on spend, queue, poll via the print-free
     `_audio.retrieve_bytes`, write the file, and best-effort `/audio/complete`.
+
+    With `background=True` we still gate + queue (so the charge lands up front),
+    then return a `{"status": "queued", ...}` job handle *before* polling -- the
+    caller fetches the file later via `venice_job_result`.
     """
     gate = check_spend(quote_value, confirm=confirm, max_spend=max_spend, label=label)
     if gate is not None:
@@ -296,6 +335,9 @@ def _queue_media(
     queue_id = queued.get("queue_id") or queued.get("id") or ""
     if not queue_id:
         return _err(f"{label}: queue response missing queue_id")
+
+    if background:
+        return _job_handle(queue_id, type=label, model=model, quote_value=quote_value)
 
     try:
         ctype, audio = _audio.retrieve_bytes(
@@ -339,8 +381,14 @@ def sfx_tool(
     confirm: bool = False,
     max_spend: Optional[float] = None,
     max_wait: float = _sfx.config.SFX_POLL_MAX_WAIT_SEC,
+    background: bool = False,
 ) -> dict:
-    """Generate a sound effect via the async audio queue; write a file, return path."""
+    """Generate a sound effect via the async audio queue; write a file, return path.
+
+    With `background=True` the call queues the job (charging up front) and returns
+    a `{"status": "queued", ...}` handle immediately instead of blocking on the
+    poll; fetch the audio later via `venice_job_result`.
+    """
     if not prompt or not prompt.strip():
         return _err("sfx: prompt is required")
     if model not in _sfx.SFX_MODELS:
@@ -366,6 +414,7 @@ def sfx_tool(
         name_prefix="venice-sfx",
         output_dir=output_dir,
         max_wait=max_wait,
+        background=background,
     )
 
 
@@ -382,8 +431,14 @@ def music_tool(
     confirm: bool = False,
     max_spend: Optional[float] = None,
     max_wait: float = _music.config.SFX_POLL_MAX_WAIT_SEC,
+    background: bool = False,
 ) -> dict:
-    """Generate long-form music/ambience via the async audio queue; return the path."""
+    """Generate long-form music/ambience via the async audio queue; return the path.
+
+    With `background=True` the call queues the job (charging up front) and returns
+    a `{"status": "queued", ...}` handle immediately instead of blocking on the
+    poll; fetch the audio later via `venice_job_result`.
+    """
     if not prompt or not prompt.strip():
         return _err("music: prompt is required")
 
@@ -426,6 +481,7 @@ def music_tool(
         name_prefix="venice-music",
         output_dir=output_dir,
         max_wait=max_wait,
+        background=background,
     )
 
 
@@ -696,6 +752,7 @@ def video_tool(
     confirm: bool = False,
     max_spend: Optional[float] = None,
     max_wait: float = _video.config.VIDEO_POLL_MAX_WAIT_SEC,
+    background: bool = False,
 ) -> dict:
     """Generate a video via Venice's async /video queue; write a file, return path.
 
@@ -703,6 +760,11 @@ def video_tool(
     `*_url` accepts an http(s)/data URL or a local path (encoded to a data URL).
     Long-running -- blocks while polling up to `max_wait`. Paid: a quote is
     fetched first; over-cap or dynamic quotes need confirm=true.
+
+    With `background=True` the call queues the job (charging up front) and returns
+    a `{"status": "queued", ...}` handle immediately instead of blocking on the
+    poll; fetch the mp4 later via `venice_job_result` (pass back the handle's
+    `download_url` too, which VPS-backed models need).
     """
     if not prompt or not prompt.strip():
         return _err("video: prompt is required")
@@ -754,6 +816,12 @@ def video_tool(
         return _err("video: queue response missing queue_id")
     download_url = queued.get("download_url") or None
 
+    if background:
+        return _job_handle(
+            queue_id, type="video", model=model,
+            quote_value=quote_value, download_url=download_url,
+        )
+
     try:
         ctype, data = _video.retrieve_bytes(
             client, model, queue_id,
@@ -786,6 +854,135 @@ def video_tool(
         "model": model,
         "queue_id": queue_id,
         "cost_estimate_usd": quote_value,
+    }
+
+
+def _job_route(type: str) -> Optional[str]:
+    """Retrieve/complete route base for a queued media type, or None if unknown."""
+    return _JOB_ROUTE.get((type or "").lower())
+
+
+def job_status_tool(
+    client, *, queue_id: str, type: str, model: str, download_url: Optional[str] = None
+) -> dict:
+    """Peek at a backgrounded media job (from a `background=True` sfx/music/video call).
+
+    Free, read-only, non-blocking: one probe of the media type's retrieve route.
+    Returns status `processing` / `done` / `failed` / `not_found` / `error`.
+
+    Note: Venice has no status-only endpoint -- retrieve *is* the status check and
+    streams the finished media once ready. So a `done` probe of an audio (or
+    non-VPS video) job transfers the media server-side and this tool discards it;
+    once you expect completion, call `venice_job_result` (which writes the file).
+    """
+    if not queue_id:
+        return _err("job_status: queue_id is required")
+    base = _job_route(type)
+    if base is None:
+        return _err(
+            f"job_status: unknown type {type!r}; expected one of "
+            f"{', '.join(sorted(_JOB_ROUTE))}"
+        )
+    try:
+        ctype, payload = client.post_for_bytes_or_json(
+            f"/{base}/retrieve", {"model": model, "queue_id": queue_id}
+        )
+    except VeniceAPIError as e:
+        if e.status == 404:
+            return {
+                "status": "not_found",
+                "queue_id": queue_id,
+                "message": f"job {queue_id} not found (expired, wrong type, or bad id)",
+            }
+        return _err(f"job_status: {e}")
+
+    if isinstance(payload, (bytes, bytearray)):
+        return {"status": "done", "ready": True, "queue_id": queue_id,
+                "bytes_available": len(payload)}
+    state = (payload or {}).get("status") if isinstance(payload, dict) else None
+    if state == "COMPLETED":  # VPS video: terminal JSON, media at download_url
+        return {"status": "done", "ready": True, "queue_id": queue_id}
+    if state in (None, "PROCESSING"):
+        return {"status": "processing", "queue_id": queue_id}
+    return {"status": "failed", "queue_id": queue_id, "detail": payload}
+
+
+def job_result_tool(
+    client,
+    *,
+    queue_id: str,
+    type: str,
+    model: str,
+    download_url: Optional[str] = None,
+    max_wait: float = 0.0,
+) -> dict:
+    """Fetch a backgrounded media job's file (from a `background=True` call).
+
+    Free (the job was charged at queue time). `max_wait=0` (default) makes a
+    single non-blocking attempt: if the media is ready it is written and the path
+    returned; otherwise `{"status": "processing"}` comes back so the agent can
+    keep working and retry. Pass a larger `max_wait` to block-poll up to that many
+    seconds. Writes to $VENICE_MCP_OUTPUT_DIR or the cwd.
+    """
+    if not queue_id:
+        return _err("job_result: queue_id is required")
+    base = _job_route(type)
+    if base is None:
+        return _err(
+            f"job_result: unknown type {type!r}; expected one of "
+            f"{', '.join(sorted(_JOB_ROUTE))}"
+        )
+    try:
+        if base == "audio":
+            # Clamp to the blocking tool's own ceiling so a model can't turn a
+            # "keep working" fetch into an arbitrarily long block of the loop.
+            wait = max(0.0, min(max_wait, _sfx.config.SFX_POLL_MAX_WAIT_SEC))
+            ctype, data = _audio.retrieve_bytes(
+                client, model, queue_id,
+                poll_interval=_sfx.config.SFX_POLL_INTERVAL_SEC, max_wait=wait,
+            )
+            ext, _unknown = _audio.ext_for(ctype)
+            name_prefix = f"venice-{(type or '').lower()}"
+        else:  # video
+            wait = max(0.0, min(max_wait, _video.config.VIDEO_POLL_MAX_WAIT_SEC))
+            ctype, data = _video.retrieve_bytes(
+                client, model, queue_id,
+                poll_interval=_video.config.VIDEO_POLL_INTERVAL_SEC,
+                max_wait=wait, download_url=download_url,
+            )
+            ext, _unknown = _queue.ext_for(ctype, _video.VIDEO_EXT_BY_CTYPE, default=".mp4")
+            name_prefix = "venice-video"
+    except TimeoutError:
+        return {
+            "status": "processing",
+            "queue_id": queue_id,
+            "message": "not ready yet; keep working and retry venice_job_result later",
+        }
+    except _video.NoVideoStream:
+        return _err(
+            f"job_result: video job {queue_id} completed but returned no stream; "
+            "re-call with the download_url from the background job handle"
+        )
+    except VeniceAPIError as e:
+        return _err(f"job_result: retrieve failed: {e}")
+
+    out_path = _queue.resolve_output_path(
+        resolve_output_dir(None), queue_id, ext, prefix=name_prefix
+    )
+    werr = _write(out_path, data)
+    if werr:
+        return _err(f"job_result: could not write {out_path}: {werr}")
+
+    try:  # best-effort cleanup; the file is already saved
+        client.post_json(f"/{base}/complete", {"model": model, "queue_id": queue_id})
+    except VeniceAPIError:
+        pass
+    return {
+        "status": "ok",
+        "path": str(out_path.resolve()),
+        "bytes": len(data),
+        "model": model,
+        "queue_id": queue_id,
     }
 
 

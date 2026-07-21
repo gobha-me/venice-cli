@@ -15,6 +15,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+from urllib.error import HTTPError
 
 from tests.test_client import FakeResp
 from venice.client import VeniceClient
@@ -208,6 +209,31 @@ class TestSfxTool(_ToolTest):
         res = _mcp.sfx_tool(_client(), "x", model="nope", confirm=True)
         self.assertEqual(res["status"], "error")
 
+    def test_background_returns_queue_id(self):
+        # #62: background=True queues (charging up front) then returns a handle
+        # WITHOUT polling/retrieving or writing a file.
+        seen = []
+
+        def fake(req, timeout=None):
+            seen.append(req.full_url)
+            if req.full_url.endswith("/audio/quote"):
+                return FakeResp(200, b'{"quote": 0.0027}')
+            if req.full_url.endswith("/audio/queue"):
+                return FakeResp(200, b'{"queue_id": "bgsfx123"}')
+            raise AssertionError(f"background must not poll: {req.full_url}")
+
+        with mock.patch("venice.client.urllib.request.urlopen", fake), self.stdout_guard():
+            res = _mcp.sfx_tool(
+                _client(), "thunder", output_dir=self.td, confirm=True, background=True
+            )
+        self.assertEqual(res["status"], "queued")
+        self.assertEqual(res["queue_id"], "bgsfx123")
+        self.assertEqual(res["type"], "sfx")
+        self.assertEqual(res["model"], _mcp._sfx.DEFAULT_SFX_MODEL)
+        self.assertEqual(res["cost_estimate_usd"], 0.0027)
+        self.assertEqual(os.listdir(self.td), [])            # nothing written
+        self.assertTrue(all("/audio/retrieve" not in u for u in seen))
+
 
 class TestMusicTool(_ToolTest):
     def test_ok_queue_poll_save(self):
@@ -229,6 +255,27 @@ class TestMusicTool(_ToolTest):
             )
         self.assertEqual(res["status"], "ok")
         self.assertEqual(Path(res["path"]).read_bytes(), b"MUSICBYTES")
+
+    def test_background_returns_queue_id(self):
+        def fake(req, timeout=None):
+            u = req.full_url
+            if "type=music" in u:                            # fetch_music_spec
+                return FakeResp(200, json.dumps(
+                    {"data": [{"id": "elevenlabs-music", "model_spec": {}}]}).encode())
+            if u.endswith("/audio/quote"):
+                return FakeResp(200, b'{"quote": 0.05}')
+            if u.endswith("/audio/queue"):
+                return FakeResp(200, b'{"queue_id": "bgmus123"}')
+            raise AssertionError(f"background must not poll: {u}")
+
+        with mock.patch("venice.client.urllib.request.urlopen", fake), self.stdout_guard():
+            res = _mcp.music_tool(
+                _client(), "dungeon drone", output_dir=self.td, confirm=True, background=True
+            )
+        self.assertEqual(res["status"], "queued")
+        self.assertEqual(res["queue_id"], "bgmus123")
+        self.assertEqual(res["type"], "music")
+        self.assertEqual(os.listdir(self.td), [])
 
 
 class TestBinaryTools(_ToolTest):
@@ -533,6 +580,176 @@ class TestVideoTool(_ToolTest):
     def test_empty_prompt_is_error(self):
         res = _mcp.video_tool(_client(), "   ", confirm=True)
         self.assertEqual(res["status"], "error")
+
+    def test_background_returns_queue_id_with_download_url(self):
+        url = "https://cdn.example.com/presigned?sig=abc"
+
+        def fake(req, timeout=None):
+            u = req.full_url
+            if "type=video" in u:
+                return FakeResp(200, _video_catalog())
+            if u.endswith("/video/quote"):
+                return FakeResp(200, b'{"quote": 0.5}')
+            if u.endswith("/video/queue"):
+                return FakeResp(200, json.dumps(
+                    {"queue_id": "bgvid1", "download_url": url}).encode())
+            raise AssertionError(f"background must not poll: {u}")
+
+        with mock.patch("venice.client.urllib.request.urlopen", fake), self.stdout_guard():
+            res = _mcp.video_tool(
+                _client(), "a koi pond", output_dir=self.td, confirm=True, background=True
+            )
+        self.assertEqual(res["status"], "queued")
+        self.assertEqual(res["queue_id"], "bgvid1")
+        self.assertEqual(res["type"], "video")
+        self.assertEqual(res["download_url"], url)
+        self.assertEqual(os.listdir(self.td), [])
+
+
+class TestJobStatusTool(_ToolTest):
+    def test_processing(self):
+        responses = _seq(FakeResp(200, json.dumps({"status": "PROCESSING"}).encode()))
+        with mock.patch("venice.client.urllib.request.urlopen", responses), self.stdout_guard():
+            res = _mcp.job_status_tool(
+                _client(), queue_id="q1", type="sfx", model="elevenlabs-sound-effects-v2"
+            )
+        self.assertEqual(res["status"], "processing")
+        self.assertEqual(res["queue_id"], "q1")
+
+    def test_done_when_bytes_ready(self):
+        responses = _seq(FakeResp(200, b"AUDIOBYTES", "audio/mpeg"))
+        with mock.patch("venice.client.urllib.request.urlopen", responses), self.stdout_guard():
+            res = _mcp.job_status_tool(
+                _client(), queue_id="q2", type="music", model="elevenlabs-music"
+            )
+        self.assertEqual(res["status"], "done")
+        self.assertTrue(res["ready"])
+        self.assertEqual(res["bytes_available"], len(b"AUDIOBYTES"))
+        # a status probe never writes a file
+        self.assertEqual(os.listdir(self.td), [])
+
+    def test_video_completed_is_done(self):
+        responses = _seq(FakeResp(200, json.dumps({"status": "COMPLETED"}).encode()))
+        with mock.patch("venice.client.urllib.request.urlopen", responses), self.stdout_guard():
+            res = _mcp.job_status_tool(
+                _client(), queue_id="q3", type="video", model="seedance-2-0-text-to-video"
+            )
+        self.assertEqual(res["status"], "done")
+
+    def test_not_found_on_404(self):
+        def boom(*a, **kw):
+            raise HTTPError(
+                url="https://api.venice.ai/api/v1/audio/retrieve", code=404,
+                msg="Not Found", hdrs={"Content-Type": "application/json"},  # type: ignore[arg-type]
+                fp=io.BytesIO(b'{"message": "no such job"}'),
+            )
+
+        with mock.patch("venice.client.urllib.request.urlopen", boom), self.stdout_guard():
+            res = _mcp.job_status_tool(
+                _client(), queue_id="gone", type="sfx", model="elevenlabs-sound-effects-v2"
+            )
+        self.assertEqual(res["status"], "not_found")
+
+    def test_unknown_type_is_error(self):
+        res = _mcp.job_status_tool(_client(), queue_id="q", type="bogus", model="m")
+        self.assertEqual(res["status"], "error")
+
+
+class TestJobResultTool(_ToolTest):
+    def test_ok_writes_file_and_cleans_up(self):
+        seen = []
+
+        def fake(req, timeout=None):
+            seen.append(req.full_url)
+            if req.full_url.endswith("/audio/retrieve"):
+                return FakeResp(200, b"SFXBYTES", "audio/mpeg")
+            if req.full_url.endswith("/audio/complete"):
+                return FakeResp(200, b'{"ok": true}')
+            raise AssertionError(f"unexpected: {req.full_url}")
+
+        with mock.patch("venice.client.urllib.request.urlopen", fake), \
+             mock.patch.dict(os.environ, {"VENICE_MCP_OUTPUT_DIR": self.td}), \
+             self.stdout_guard():
+            res = _mcp.job_result_tool(
+                _client(), queue_id="abcdef1234", type="sfx",
+                model="elevenlabs-sound-effects-v2",
+            )
+        self.assertEqual(res["status"], "ok")
+        self.assertEqual(res["queue_id"], "abcdef1234")
+        self.assertEqual(Path(res["path"]).read_bytes(), b"SFXBYTES")
+        self.assertTrue(res["path"].startswith(self.td))
+        self.assertTrue(any(u.endswith("/audio/complete") for u in seen))
+
+    def test_processing_when_not_ready(self):
+        # max_wait=0 -> a single probe; still PROCESSING -> no file, status back.
+        responses = _seq(FakeResp(200, json.dumps({"status": "PROCESSING"}).encode()))
+        with mock.patch("venice.client.urllib.request.urlopen", responses), \
+             mock.patch.dict(os.environ, {"VENICE_MCP_OUTPUT_DIR": self.td}), \
+             self.stdout_guard():
+            res = _mcp.job_result_tool(
+                _client(), queue_id="q1", type="music", model="elevenlabs-music", max_wait=0
+            )
+        self.assertEqual(res["status"], "processing")
+        self.assertEqual(os.listdir(self.td), [])
+
+    def test_video_fetches_download_url(self):
+        url = "https://cdn.example.com/presigned?sig=xyz"
+        seen = []
+
+        def fake(req, timeout=None):
+            seen.append(req.full_url)
+            if req.full_url.endswith("/video/retrieve"):
+                return FakeResp(200, json.dumps({"status": "COMPLETED"}).encode())
+            if url in req.full_url:
+                return FakeResp(200, b"PRESIGNEDMP4", "video/mp4")
+            if req.full_url.endswith("/video/complete"):
+                return FakeResp(200, b'{"ok": true}')
+            raise AssertionError(f"unexpected: {req.full_url}")
+
+        with mock.patch("venice.client.urllib.request.urlopen", fake), \
+             mock.patch.dict(os.environ, {"VENICE_MCP_OUTPUT_DIR": self.td}), \
+             self.stdout_guard():
+            res = _mcp.job_result_tool(
+                _client(), queue_id="vpsq1", type="video",
+                model="seedance-2-0-text-to-video", download_url=url,
+            )
+        self.assertEqual(res["status"], "ok")
+        self.assertEqual(Path(res["path"]).read_bytes(), b"PRESIGNEDMP4")
+        self.assertTrue(res["path"].endswith(".mp4"))
+        self.assertIn(url, seen)
+
+    def test_video_completed_without_download_url_is_error(self):
+        responses = _seq(FakeResp(200, json.dumps({"status": "COMPLETED"}).encode()))
+        with mock.patch("venice.client.urllib.request.urlopen", responses), self.stdout_guard():
+            res = _mcp.job_result_tool(
+                _client(), queue_id="vpsq2", type="video",
+                model="seedance-2-0-text-to-video",  # no download_url
+            )
+        self.assertEqual(res["status"], "error")
+
+    def test_unknown_type_is_error(self):
+        res = _mcp.job_result_tool(_client(), queue_id="q", type="bogus", model="m")
+        self.assertEqual(res["status"], "error")
+
+    def test_max_wait_clamped_to_ceiling(self):
+        # A model asking for an absurd block must not exceed the audio ceiling.
+        captured = {}
+
+        def fake_retrieve(client, model, queue_id, *, poll_interval, max_wait, on_tick=None):
+            captured["max_wait"] = max_wait
+            return "audio/mpeg", b"BYTES"
+
+        with mock.patch.object(_mcp._audio, "retrieve_bytes", fake_retrieve), \
+             mock.patch("venice.client.urllib.request.urlopen",
+                        _seq(FakeResp(200, b'{"ok": true}'))), \
+             mock.patch.dict(os.environ, {"VENICE_MCP_OUTPUT_DIR": self.td}), \
+             self.stdout_guard():
+            res = _mcp.job_result_tool(
+                _client(), queue_id="q1", type="sfx",
+                model="elevenlabs-sound-effects-v2", max_wait=999999,
+            )
+        self.assertEqual(res["status"], "ok")
+        self.assertEqual(captured["max_wait"], _mcp._sfx.config.SFX_POLL_MAX_WAIT_SEC)
 
 
 class TestImageEditTool(_ToolTest):
