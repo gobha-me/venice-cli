@@ -4,7 +4,7 @@ Import-clean by design: this module must NOT import `mcp` (or `openai`) at modul
 scope, so `venice --help` and the base, stdlib-only install keep working, and the
 tests here run on Python 3.9 where the `mcp` SDK cannot even be installed. The thin
 FastMCP wiring lives in `venice.mcp_server`; everything with real logic lives here:
-the lazy `import_mcp` probe, the spend gate, the output-dir resolver, and the seven
+the lazy `import_mcp` probe, the spend gate, the output-dir resolver, and the
 print-free `*_tool` functions the server delegates to.
 
 CRITICAL invariant -- an MCP stdio server owns **stdout** for JSON-RPC framing, so
@@ -558,6 +558,110 @@ def chat_tool(
         resp = oai.chat.completions.create(**kwargs)
     except openai.OpenAIError as e:
         return _err(f"chat: API error: {e}")
+
+    content = ""
+    if getattr(resp, "choices", None):
+        content = resp.choices[0].message.content or ""
+    out = {"status": "ok", "content": content, "model": resolved}
+    usage = _chat._as_dict(getattr(resp, "usage", None))
+    if usage:
+        out["usage"] = usage
+    return out
+
+
+DEFAULT_VISION_PROMPT = "Describe this image in detail."
+
+
+def _vision_default(models: List[dict]) -> Optional[str]:
+    """The default-trait text model if vision-capable, else the first
+    catalog model advertising supportsVision, else None."""
+    default = _models.default_model(models)
+    if default and _models.supports_capability(models, default, "supportsVision"):
+        return default
+    for m in models:
+        mid = m.get("id") if isinstance(m, dict) else None
+        if mid and _models.supports_capability(models, mid, "supportsVision"):
+            return mid
+    return None
+
+
+def vision_tool(
+    client,
+    input_path: Optional[str] = None,
+    *,
+    image_url: Optional[str] = None,
+    prompt: Optional[str] = None,
+    model: Optional[str] = None,
+    max_tokens: Optional[int] = None,
+) -> dict:
+    """Describe/inspect an image via a multimodal /chat/completions call.
+
+    The image is a local `input_path` (sent as a base64 data: URL) or an
+    `image_url` passed through verbatim -- exactly one of the two. The model
+    must be vision-capable: an explicit non-vision `model` is rejected
+    client-side (the API would reject the image content anyway); when `model`
+    is omitted the default-trait text model is used if it advertises
+    supportsVision, else the first catalog model that does. Cheap relative to
+    media generation, so it is not spend-gated. Needs the `[openai]` extra.
+    """
+    if bool(input_path) == bool(image_url):
+        return _err("vision: exactly one of input_path or image_url is required")
+
+    openai = _openai.import_openai("vision")  # stderr hint if missing
+    if openai is None:
+        return _err('vision: needs the openai package: pip install "venice-cli[openai]"')
+
+    if input_path:
+        p = Path(input_path)
+        rc = _shared.check_image_file(p, label="vision")  # stderr detail
+        if rc is not None:
+            return _err(f"vision: invalid input file (exit {rc})")
+        url = _shared.encode_data_url(p, default_mime="image/png")
+    else:
+        url = image_url
+
+    models = _models.catalog(client, "text")
+    if model:
+        resolved, rc = _models.resolve_model(
+            model, models, label="vision", noun="text model"
+        )
+        if rc is not None:
+            return _err(f"vision: could not resolve model (exit {rc})")
+        if _models.supports_capability(models, resolved, "supportsVision") is False:
+            return _err(
+                f"vision: model {resolved!r} does not advertise supportsVision; "
+                "pick a vision-capable model (see venice_model_details) or omit model"
+            )
+    else:
+        if models is None:
+            return _err("vision: could not fetch the model catalog; pass model explicitly")
+        resolved = _vision_default(models)
+        if resolved is None:
+            return _err(
+                "vision: no vision-capable text model found in the catalog; "
+                "pass model (see venice_models / venice_model_details)"
+            )
+
+    kwargs: dict = {
+        "model": resolved,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": (prompt or DEFAULT_VISION_PROMPT).strip()},
+                    {"type": "image_url", "image_url": {"url": url}},
+                ],
+            }
+        ],
+    }
+    if max_tokens is not None:
+        kwargs["max_tokens"] = int(max_tokens)
+
+    oai = _openai.build_openai(openai, client)
+    try:
+        resp = oai.chat.completions.create(**kwargs)
+    except openai.OpenAIError as e:
+        return _err(f"vision: API error: {e}")
 
     content = ""
     if getattr(resp, "choices", None):

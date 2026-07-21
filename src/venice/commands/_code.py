@@ -662,11 +662,14 @@ def code_tools(
         ))
 
     # Free model-catalog lookups so the agent can pick a valid `model` for the
-    # asset tools (and see cost/context limits) instead of guessing (need a client
-    # for the /models GET).
+    # asset tools (and see cost/context limits) instead of guessing, plus
+    # venice_vision so it can see images (screenshots/mockups/its own
+    # generations) instead of working blind (need a client for the API calls).
     if client is not None:
         tools.extend(_agent.builtin_tools(
-            client, only={"venice_models", "venice_model_details"}, config=config))
+            client,
+            only={"venice_models", "venice_model_details", "venice_vision"},
+            config=config))
 
     if assets and client is not None:
         asset_dir = os.environ.get("VENICE_MCP_OUTPUT_DIR") or root

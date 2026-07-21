@@ -113,6 +113,37 @@ class TestResolveModel(unittest.TestCase):
         self.assertIn("video: unknown video model 'nope'", err.getvalue())
 
 
+class TestSupportsCapability(unittest.TestCase):
+    """Tri-state capability reader over model_spec.capabilities (#60)."""
+
+    def _caps_model(self, mid, caps):
+        return {"id": mid, "model_spec": {"capabilities": caps}}
+
+    def test_true_and_false_read_through(self):
+        models = [
+            self._caps_model("v", {"supportsVision": True}),
+            self._caps_model("t", {"supportsVision": False}),
+        ]
+        self.assertIs(_models.supports_capability(models, "v", "supportsVision"), True)
+        self.assertIs(_models.supports_capability(models, "t", "supportsVision"), False)
+
+    def test_key_matching_ignores_case_and_underscores(self):
+        models = [self._caps_model("v", {"supportsVision": True})]
+        self.assertIs(
+            _models.supports_capability(models, "v", "supports_vision"), True)
+
+    def test_unknown_is_none(self):
+        no_caps = [{"id": "m", "model_spec": {"traits": []}}]
+        missing_field = [self._caps_model("m", {"supportsWebSearch": True})]
+        self.assertIsNone(_models.supports_capability(None, "m", "supportsVision"))
+        self.assertIsNone(_models.supports_capability([], "m", "supportsVision"))
+        self.assertIsNone(_models.supports_capability(no_caps, "m", "supportsVision"))
+        self.assertIsNone(
+            _models.supports_capability(missing_field, "m", "supportsVision"))
+        self.assertIsNone(
+            _models.supports_capability(no_caps, "absent", "supportsVision"))
+
+
 # --- _openai ---
 
 class _StubConnErr(Exception):

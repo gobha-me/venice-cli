@@ -609,7 +609,13 @@ guessing, and `venice_model_details` (single `model` arg) which returns one
 model's pricing (cost), `capabilities` (text models — supportsVision etc.),
 `constraints` (image/media — aspect ratios, resolutions, qualities, prompt-length
 limit), and the full `model_spec`, so the agent can budget input and confirm a
-model fits. (`venice code` gets both too.)
+model fits, and `venice_vision`, which sends a local image (`input_path`, as a
+base64 data-URL) or an `image_url` to a vision-capable text model and returns
+what it sees — the agent's eyes, so it can inspect its own generations
+(watermarks, character consistency, glitches) instead of working blind; an
+optional `prompt` directs the question, and when `model` is omitted a
+`supportsVision` model is auto-picked from the catalog. Not spend-gated.
+(`venice code` gets all three too.)
 
 ```sh
 # One command, multiple steps: the model generates an image, then critiques it.
@@ -884,6 +890,7 @@ complete — a loud stderr warning is printed).
 | `read_file` / `list_dir` / `grep` | read a file, list a dir, regex-search the tree | no |
 | `git` | read-only git (`status`/`diff`/`log`/`show`/…) | no |
 | `project_search` | semantic search over the `.venice` index (if built) | no |
+| `venice_vision` | describe/inspect a local image or image URL via a vision-capable model | no |
 | `write_file` | create/overwrite a file (atomic) | yes |
 | `edit_file` | replace an exact, unique string in a file | yes |
 | `apply_patch` | apply a batch of edits grouped per file, atomically per file (use `occurrence=N` for non-unique strings) | yes |

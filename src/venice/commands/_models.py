@@ -41,6 +41,31 @@ def default_model(models: List[dict]) -> Optional[str]:
     return None
 
 
+def supports_capability(models, model_id, key) -> Optional[bool]:
+    """Whether `model_id` advertises the boolean capability `key` in the catalog.
+
+    `key` is matched case/underscore-insensitively against
+    `model_spec.capabilities` (e.g. "supportsVision"). True/False when the model
+    is found and carries the field; None when it can't be determined (no
+    catalog, model absent, or the field missing) -- callers treat None as
+    "unknown, attempt anyway".
+    """
+    if not models:
+        return None
+    want = str(key).lower().replace("_", "")
+    for m in models:
+        if not isinstance(m, dict) or m.get("id") != model_id:
+            continue
+        spec = m.get("model_spec") or {}
+        caps = spec.get("capabilities")
+        if not isinstance(caps, dict):
+            return None
+        norm = {str(k).lower().replace("_", ""): v for k, v in caps.items()}
+        val = norm.get(want)
+        return bool(val) if val is not None else None
+    return None
+
+
 def resolve_model(
     requested: Optional[str],
     models: Optional[List[dict]],

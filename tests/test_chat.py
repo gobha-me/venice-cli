@@ -584,10 +584,11 @@ class TestChatAgent(unittest.TestCase):
                     f"{t['function']['name']} leaks control kwarg {banned}",
                 )
         names = {t["function"]["name"] for t in tools}
-        self.assertEqual(len(names), 10)  # media/chat + project_search + models(+details)
+        self.assertEqual(len(names), 11)  # media/chat + project_search + models(+details) + vision
         self.assertIn("project_search", names)
         self.assertIn("venice_models", names)
         self.assertIn("venice_model_details", names)
+        self.assertIn("venice_vision", names)
 
     def test_tool_error_surfaced_not_fatal(self):
         seq = [
@@ -717,7 +718,7 @@ class TestChatMcp(unittest.TestCase):
         names = self._tool_names(calls[0])
         self.assertIn("fs__read", names)          # remote tool advertised
         self.assertIn("venice_image", names)      # alongside the built-ins
-        self.assertEqual(len(names), 11)          # 10 built-ins + 1 remote
+        self.assertEqual(len(names), 12)          # 11 built-ins + 1 remote
         self.assertEqual(attach.specs, [("fs", {"command": "srv", "args": []})])
         tool_msgs = [m for m in calls[1]["messages"] if m.get("role") == "tool"]
         self.assertIn("127.0.0.1", tool_msgs[0]["content"])
@@ -731,7 +732,7 @@ class TestChatMcp(unittest.TestCase):
         )
         self.assertEqual(rc, 0)
         attach.assert_not_called()
-        self.assertEqual(len(self._tool_names(calls[0])), 10)  # built-ins only
+        self.assertEqual(len(self._tool_names(calls[0])), 11)  # built-ins only
 
     def test_unknown_mcp_server_exits_2_before_model(self):
         attach = mock.MagicMock()
@@ -819,9 +820,10 @@ class TestBuiltinToolsRegistry(unittest.TestCase):
         # chat's default advertisement must not grow when code gains asset tools
         from venice.commands import _agent
         names = {t.name for t in _agent.builtin_tools(object())}
-        self.assertEqual(len(names), 10)  # +venice_models +venice_model_details (free)
+        self.assertEqual(len(names), 11)  # +venice_models +venice_model_details +venice_vision (free)
         self.assertIn("venice_models", names)
         self.assertIn("venice_model_details", names)
+        self.assertIn("venice_vision", names)
         self.assertNotIn("venice_image_edit", names)
 
     def test_only_can_select_code_asset_extra(self):

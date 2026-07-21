@@ -417,6 +417,7 @@ class TestToolSection(unittest.TestCase):
     def test_section_derivation(self):
         self.assertEqual(_agent._tool_section("venice_image"), "image")
         self.assertEqual(_agent._tool_section("venice_image_edit"), "image_edit")
+        self.assertEqual(_agent._tool_section("venice_vision"), "vision")
         self.assertEqual(_agent._tool_section("project_search"), "project_search")
 
 

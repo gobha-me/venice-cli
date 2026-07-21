@@ -307,6 +307,163 @@ class TestChatTool(_ToolTest):
         self.assertEqual(res["model"], "venice-uncensored")
 
 
+def _vision_catalog(default_vision=False):
+    """A /models?type=text catalog: a default-trait model (vision per the flag)
+    and a non-default vision-capable one."""
+    return json.dumps({"data": [
+        {"id": "venice-uncensored", "model_spec": {
+            "traits": ["default"],
+            "capabilities": {"supportsVision": default_vision},
+        }},
+        {"id": "qwen-vl", "model_spec": {
+            "traits": [],
+            "capabilities": {"supportsVision": True},
+        }},
+    ]}).encode()
+
+
+class TestVisionTool(_ToolTest):
+    def _png(self):
+        ip = Path(self.td) / "shot.png"
+        ip.write_bytes(b"\x89PNG\r\n" + b"x" * 16)
+        return ip
+
+    def _oai(self, content="a red square"):
+        msg = mock.Mock()
+        msg.content = content
+        choice = mock.Mock()
+        choice.message = msg
+        resp = mock.Mock()
+        resp.choices = [choice]
+        resp.usage = None
+        oai = mock.Mock()
+        oai.chat.completions.create.return_value = resp
+        return oai
+
+    def test_missing_openai_returns_error(self):
+        err = io.StringIO()
+        with mock.patch.dict(sys.modules, {"openai": None}), \
+             mock.patch.object(sys, "stderr", err):
+            res = _mcp.vision_tool(_client(), str(self._png()))
+        self.assertEqual(res["status"], "error")
+        self.assertIn("openai", res["message"])
+
+    def test_requires_exactly_one_source(self):
+        def boom(*a, **kw):
+            raise AssertionError("must not hit the network on bad args")
+
+        with mock.patch("venice.client.urllib.request.urlopen", boom), \
+             self.stdout_guard():
+            neither = _mcp.vision_tool(_client())
+            both = _mcp.vision_tool(
+                _client(), str(self._png()), image_url="https://x/y.png")
+        self.assertEqual(neither["status"], "error")
+        self.assertEqual(both["status"], "error")
+
+    def test_missing_input_file_errors(self):
+        err = io.StringIO()
+        oai = self._oai()
+        with mock.patch("openai.OpenAI", return_value=oai), \
+             mock.patch.object(sys, "stderr", err), self.stdout_guard():
+            res = _mcp.vision_tool(_client(), str(Path(self.td) / "nope.png"))
+        self.assertEqual(res["status"], "error")
+        oai.chat.completions.create.assert_not_called()
+
+    def test_ok_local_image_sends_data_url(self):
+        oai = self._oai()
+        with mock.patch(
+            "venice.client.urllib.request.urlopen",
+            _seq(FakeResp(200, _vision_catalog())),
+        ), mock.patch("openai.OpenAI", return_value=oai), self.stdout_guard():
+            res = _mcp.vision_tool(_client(), str(self._png()), model="qwen-vl")
+        self.assertEqual(res["status"], "ok")
+        self.assertEqual(res["content"], "a red square")
+        self.assertEqual(res["model"], "qwen-vl")
+        kwargs = oai.chat.completions.create.call_args.kwargs
+        parts = kwargs["messages"][0]["content"]
+        self.assertEqual(parts[0], {"type": "text", "text": _mcp.DEFAULT_VISION_PROMPT})
+        self.assertTrue(
+            parts[1]["image_url"]["url"].startswith("data:image/png;base64,"))
+        self.assertNotIn("max_tokens", kwargs)
+
+    def test_ok_image_url_and_custom_prompt(self):
+        oai = self._oai("blue")
+        with mock.patch(
+            "venice.client.urllib.request.urlopen",
+            _seq(FakeResp(200, _vision_catalog())),
+        ), mock.patch("openai.OpenAI", return_value=oai), self.stdout_guard():
+            res = _mcp.vision_tool(
+                _client(), image_url="https://x/y.png",
+                prompt="What color?", model="qwen-vl", max_tokens=64,
+            )
+        self.assertEqual(res["status"], "ok")
+        kwargs = oai.chat.completions.create.call_args.kwargs
+        parts = kwargs["messages"][0]["content"]
+        self.assertEqual(parts[0]["text"], "What color?")
+        self.assertEqual(parts[1]["image_url"]["url"], "https://x/y.png")
+        self.assertEqual(kwargs["max_tokens"], 64)
+
+    def test_explicit_non_vision_model_errors(self):
+        oai = self._oai()
+        with mock.patch(
+            "venice.client.urllib.request.urlopen",
+            _seq(FakeResp(200, _vision_catalog())),
+        ), mock.patch("openai.OpenAI", return_value=oai), self.stdout_guard():
+            res = _mcp.vision_tool(
+                _client(), str(self._png()), model="venice-uncensored")
+        self.assertEqual(res["status"], "error")
+        self.assertIn("supportsVision", res["message"])
+        oai.chat.completions.create.assert_not_called()
+
+    def test_unknown_capabilities_proceeds(self):
+        # No capabilities field on the model spec -> tri-state None -> attempt.
+        catalog = json.dumps(
+            {"data": [{"id": "mystery", "model_spec": {"traits": []}}]}
+        ).encode()
+        oai = self._oai()
+        with mock.patch(
+            "venice.client.urllib.request.urlopen", _seq(FakeResp(200, catalog))
+        ), mock.patch("openai.OpenAI", return_value=oai), self.stdout_guard():
+            res = _mcp.vision_tool(_client(), str(self._png()), model="mystery")
+        self.assertEqual(res["status"], "ok")
+
+    def test_default_skips_non_vision_default_trait(self):
+        oai = self._oai()
+        with mock.patch(
+            "venice.client.urllib.request.urlopen",
+            _seq(FakeResp(200, _vision_catalog(default_vision=False))),
+        ), mock.patch("openai.OpenAI", return_value=oai), self.stdout_guard():
+            res = _mcp.vision_tool(_client(), str(self._png()))
+        self.assertEqual(res["status"], "ok")
+        self.assertEqual(res["model"], "qwen-vl")
+
+    def test_default_prefers_vision_capable_default_trait(self):
+        oai = self._oai()
+        with mock.patch(
+            "venice.client.urllib.request.urlopen",
+            _seq(FakeResp(200, _vision_catalog(default_vision=True))),
+        ), mock.patch("openai.OpenAI", return_value=oai), self.stdout_guard():
+            res = _mcp.vision_tool(_client(), str(self._png()))
+        self.assertEqual(res["status"], "ok")
+        self.assertEqual(res["model"], "venice-uncensored")
+
+    def test_no_vision_model_in_catalog_errors(self):
+        catalog = json.dumps({"data": [
+            {"id": "venice-uncensored", "model_spec": {
+                "traits": ["default"],
+                "capabilities": {"supportsVision": False},
+            }},
+        ]}).encode()
+        oai = self._oai()
+        with mock.patch(
+            "venice.client.urllib.request.urlopen", _seq(FakeResp(200, catalog))
+        ), mock.patch("openai.OpenAI", return_value=oai), self.stdout_guard():
+            res = _mcp.vision_tool(_client(), str(self._png()))
+        self.assertEqual(res["status"], "error")
+        self.assertIn("vision-capable", res["message"])
+        oai.chat.completions.create.assert_not_called()
+
+
 class TestVideoTool(_ToolTest):
     def test_ok_queue_poll_save(self):
         responses = _seq(
