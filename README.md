@@ -877,6 +877,7 @@ complete — a loud stderr warning is printed).
 | `project_search` | semantic search over the `.venice` index (if built) | no |
 | `write_file` | create/overwrite a file (atomic) | yes |
 | `edit_file` | replace an exact, unique string in a file | yes |
+| `apply_patch` | apply a batch of edits grouped per file, atomically per file (use `occurrence=N` for non-unique strings) | yes |
 | `run` | run a shell command (`/bin/sh -c`) at the root | yes |
 | `venice_image` / `venice_image_edit` / `venice_sfx` / `venice_music` / `venice_tts` / `venice_upscale` / `venice_bg_remove` / `venice_video` | generate/edit images, audio & video into the project — **opt-in with `--assets`** | yes |
 
