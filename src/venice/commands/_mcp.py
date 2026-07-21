@@ -29,6 +29,7 @@ from . import bg_remove as _bg
 from . import chat as _chat
 from . import image as _image
 from . import image_edit as _image_edit
+from . import models as _models_cmd
 from . import music as _music
 from . import sfx as _sfx
 from . import tts as _tts
@@ -750,3 +751,33 @@ def search_tool(client, query, *, k: int = 8) -> dict:
     except _index.IndexingError as e:
         return _err(str(e) or f"search: failed (exit {e.exit_code})")
     return {"status": "ok", "results": results, "count": len(results)}
+
+
+def models_tool(client, *, type: str) -> dict:
+    """List available Venice model ids for a catalog `type` (or "all").
+
+    Wraps the free `/models?type=...` GET (`_models.catalog`) so an agent can
+    discover valid model ids before choosing a `model` for the other tools.
+    Read-only; not spend-gated. Returns a flat id list for one type, or a
+    {type: [ids]} map for "all".
+    """
+    valid = _models_cmd.MODEL_TYPES
+    if type != "all" and type not in valid:
+        return _err(
+            f"models: unknown type {type!r}; choose from "
+            + ", ".join(("all", *valid))
+        )
+    types = valid if type == "all" else (type,)
+    by_type = {}
+    for t in types:
+        cat = _models.catalog(client, t)
+        if cat is None:
+            return _err(f"models: /models catalog unavailable for type {t!r}")
+        by_type[t] = [m["id"] for m in cat
+                      if isinstance(m, dict) and m.get("id")]
+    if type == "all":
+        return {"status": "ok", "type": "all",
+                "count": sum(len(v) for v in by_type.values()),
+                "models": by_type}
+    return {"status": "ok", "type": type,
+            "count": len(by_type[type]), "models": by_type[type]}

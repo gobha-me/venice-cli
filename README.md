@@ -588,7 +588,11 @@ produces a final answer. These run **in-process on the `[openai]` extra alone**
 seven of the capabilities `venice mcp-serve` exposes (which adds `venice_video`
 and `venice_image_edit`) — plus `project_search`,
 a read-only [semantic search](#semantic-search) over the project's local
-`venice index` for locating code by meaning before acting on it.
+`venice index` for locating code by meaning before acting on it, and
+`venice_models`, a read-only lookup that lists model ids for a given catalog
+type (its single `type` arg — text/code/image/video/music/tts/embedding/upscale,
+or `all`) so the model can pick a valid `model` for the other tools instead of
+guessing. (`venice code` gets `venice_models` too.)
 
 ```sh
 # One command, multiple steps: the model generates an image, then critiques it.

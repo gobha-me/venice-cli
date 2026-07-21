@@ -492,5 +492,39 @@ class TestRetrieveBytesParity(unittest.TestCase):
                 _audio.retrieve_bytes(_client(), "m", "q", poll_interval=0, max_wait=-1)
 
 
+class TestModelsTool(_ToolTest):
+    def _catalog(self, *ids):
+        return json.dumps({"data": [{"id": i} for i in ids]}).encode()
+
+    def test_lists_ids_for_one_type(self):
+        with mock.patch("venice.client.urllib.request.urlopen",
+                        _seq(FakeResp(200, self._catalog("m-a", "m-b")))), \
+                self.stdout_guard():
+            out = _mcp.models_tool(_client(), type="image")
+        self.assertEqual(out["status"], "ok")
+        self.assertEqual(out["type"], "image")
+        self.assertEqual(out["models"], ["m-a", "m-b"])
+        self.assertEqual(out["count"], 2)
+
+    def test_all_returns_map_keyed_by_type(self):
+        from venice.commands.models import MODEL_TYPES
+        resps = _seq(*[FakeResp(200, self._catalog(f"{t}-1")) for t in MODEL_TYPES])
+        with mock.patch("venice.client.urllib.request.urlopen", resps), \
+                self.stdout_guard():
+            out = _mcp.models_tool(_client(), type="all")
+        self.assertEqual(out["status"], "ok")
+        self.assertEqual(set(out["models"]), set(MODEL_TYPES))
+        self.assertEqual(out["count"], len(MODEL_TYPES))
+
+    def test_unknown_type_errors_without_http(self):
+        def boom(*a, **kw):
+            raise AssertionError("a bad type must not trigger an HTTP call")
+        with mock.patch("venice.client.urllib.request.urlopen", boom), \
+                self.stdout_guard():
+            out = _mcp.models_tool(_client(), type="bogus")
+        self.assertEqual(out["status"], "error")
+        self.assertIn("unknown type", out["message"])
+
+
 if __name__ == "__main__":
     unittest.main()
