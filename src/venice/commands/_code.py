@@ -104,11 +104,15 @@ def _safe_path(root: str, arg, *, must_exist: bool = False):
     return real, rel
 
 
-def _atomic_write(target: str, text: str) -> None:
-    """Write `text` to `target` atomically (tmp in the same dir + fsync + replace).
+def _stage_write(target: str, text: str) -> str:
+    """Write `text` to a temp file next to `target` and return the temp path.
 
-    Normal file mode (umask-respecting) -- these are source files, not the 0600
-    secrets `_index.save_store` writes. Creates parent dirs (already inside root).
+    Does the durable part of an atomic write (tmp in the same dir + fsync) but
+    does **not** replace `target` -- the caller commits with ``os.replace`` once
+    every file in a batch has staged (so a multi-file write is all-or-nothing;
+    see `apply_patch`). Normal file mode (umask-respecting) -- these are source
+    files, not the 0600 secrets `_index.save_store` writes. Creates parent dirs
+    (already inside root). On failure the temp file is cleaned up before raising.
     """
     parent = os.path.dirname(target) or "."
     os.makedirs(parent, exist_ok=True)
@@ -125,7 +129,12 @@ def _atomic_write(target: str, text: str) -> None:
         except OSError:
             pass
         raise
-    os.replace(tmp, target)
+    return tmp
+
+
+def _atomic_write(target: str, text: str) -> None:
+    """Write `text` to `target` atomically (stage a tmp file, then replace)."""
+    os.replace(_stage_write(target, text), target)
 
 
 # --------------------------------------------------------------------------- #
@@ -329,18 +338,27 @@ def _replace_nth(text: str, old: str, new: str, n: int) -> str:
     return text[:start] + new + text[start + len(old):]
 
 
-def apply_patch(root: str, patches, *, confirm: bool = False) -> dict:
-    """Apply a batch of edits, grouped per file, atomically per file.
+def apply_patch(root: str, patches, *, confirm: bool = False,
+                dry_run: bool = False) -> dict:
+    """Apply a batch of edits, grouped per file, atomically across all files.
 
     `patches` is a list of ``{path, edits: [{old, new, occurrence?}, ...]}``.
-    Each file's hunks are validated and applied in order against the in-memory
-    text; only if every hunk for that file applies is it written (so a partial
-    failure never leaves a half-edited file). Hunks are checked sequentially --
-    a later hunk sees the result of the earlier ones.
+    Every file's hunks are validated and applied in order against the in-memory
+    text first; only once every file validates are they written. The write phase
+    stages each file's new text to a temp file and commits them all with
+    ``os.replace`` only after every stage succeeded, so a failure part-way
+    through never leaves some files written and others not (cross-file
+    atomicity, #67). Hunks are checked sequentially -- a later hunk sees the
+    result of the earlier ones.
+
+    With ``dry_run=True`` the hunks are validated as usual but nothing is
+    written and no confirmation is required: the return value previews the
+    per-hunk old->new changes for every file.
     """
     if not isinstance(patches, list) or not patches:
         return _err("patches must be a non-empty list of {path, edits}")
-    plan = []  # (real, rel, new_text, n_edits)
+    plan = []     # (real, rel, new_text, n_edits)
+    preview = []  # {path, edits: [{index, old, new, occurrence?}, ...]}  (dry_run)
     for fi, entry in enumerate(patches):
         if not isinstance(entry, dict):
             return _err(f"patches[{fi}]: must be an object with path + edits")
@@ -357,25 +375,48 @@ def apply_patch(root: str, patches, *, confirm: bool = False) -> dict:
         _data, text = _index.read_text(Path(real))
         if text is None:
             return _err(f"patches[{fi}]: {rel} is binary or unreadable")
+        file_preview = []
         for hi, hunk in enumerate(edits):
             if not isinstance(hunk, dict):
                 return _err(f"patches[{fi}] hunk {hi}: must be an object")
             text, err = _apply_one_hunk(text, hunk, hi)
             if err is not None:
                 return _err(f"{rel}: {err}")
+            change = {"index": hi, "old": str(hunk.get("old")),
+                      "new": str(hunk.get("new"))}
+            if hunk.get("occurrence") is not None:
+                change["occurrence"] = hunk.get("occurrence")
+            file_preview.append(change)
         plan.append((real, rel, text, len(edits)))
+        preview.append({"path": rel, "edits": file_preview})
+    if dry_run:
+        return _ok(action="dry_run", files=preview,
+                   total_edits=sum(len(p["edits"]) for p in preview))
     if not confirm:
         total = sum(n for _r, _l, _t, n in plan)
         files = ", ".join(rel for _r, rel, _t, _n in plan)
         return _confirm(
             f"apply_patch will apply {total} edit(s) across {len(plan)} file(s): {files}"
         )
-    results = []
+    # Stage every file first; commit (os.replace) only once all staged, so a
+    # failure part-way through leaves nothing written (cross-file atomicity).
+    staged = []  # (tmp, real, rel, n_edits)
     for real, rel, text, n in plan:
         try:
-            _atomic_write(real, text)
+            tmp = _stage_write(real, text)
         except OSError as e:
+            for t, *_ in staged:  # nothing committed yet -- just drop the temps
+                try:
+                    os.unlink(t)
+                except OSError:
+                    pass
             return _err(f"write failed for {rel}: {e}")
+        staged.append((tmp, real, rel, n))
+    # Commit: same-dir renames, as atomic as the filesystem allows. A rename
+    # failing here (after every file staged) is the one remaining narrow window.
+    results = []
+    for tmp, real, rel, n in staged:
+        os.replace(tmp, real)
         results.append({"path": rel, "edits": n})
     return _ok(action="patched", files=results,
                total_edits=sum(r["edits"] for r in results))
@@ -525,7 +566,7 @@ _PATCH_SCHEMA = _obj(
     {
         "patches": {
             "type": "array",
-            "description": "Edits grouped per file; applied atomically per file.",
+            "description": "Edits grouped per file; applied atomically across all files.",
             "items": _obj(
                 {
                     "path": _p("string", "File to edit, relative to the root."),
@@ -538,6 +579,12 @@ _PATCH_SCHEMA = _obj(
                 ["path", "edits"],
             ),
         },
+        "dry_run": _p(
+            "boolean",
+            "Preview the per-hunk old->new changes for every file without "
+            "writing anything (no confirmation needed). Use to self-check a "
+            "patch before applying it.",
+        ),
     },
     ["patches"],
 )
@@ -634,10 +681,12 @@ def code_tools(
                     "requires confirmation.",
                     _EDIT_SCHEMA, paid(edit_file), paid=True),
         _agent.Tool("apply_patch",
-                    "Apply a batch of edits grouped per file, atomically per file "
-                    "(#63). Prefer this over edit_file for multi-hunk changes or "
-                    "when a string is not unique (use occurrence=N); use edit_file "
-                    "for a single unique change. Mutating -- requires confirmation.",
+                    "Apply a batch of edits grouped per file, atomically across "
+                    "all files (validated first, then written all-or-nothing). "
+                    "Prefer this over edit_file for multi-hunk changes or when a "
+                    "string is not unique (use occurrence=N); use edit_file for a "
+                    "single unique change. Pass dry_run=true to preview the "
+                    "changes without writing. Mutating -- requires confirmation.",
                     _PATCH_SCHEMA, paid(apply_patch), paid=True),
         _agent.Tool("run",
                     "Run a shell command (/bin/sh -c) with the working directory "
