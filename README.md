@@ -592,7 +592,9 @@ a read-only [semantic search](#semantic-search) over the project's local
 `venice_models`, a read-only lookup that lists model ids for a given catalog
 type (its single `type` arg — text/code/image/video/music/tts/embedding/upscale,
 or `all`) so the model can pick a valid `model` for the other tools instead of
-guessing. (`venice code` gets `venice_models` too.)
+guessing, and `venice_model_details` (single `model` arg) which returns one
+model's pricing (cost), input context/prompt-length limits, and capabilities so
+the agent can budget its input. (`venice code` gets both too.)
 
 ```sh
 # One command, multiple steps: the model generates an image, then critiques it.

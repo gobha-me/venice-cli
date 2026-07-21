@@ -781,3 +781,28 @@ def models_tool(client, *, type: str) -> dict:
                 "models": by_type}
     return {"status": "ok", "type": type,
             "count": len(by_type[type]), "models": by_type[type]}
+
+
+def model_details_tool(client, *, model: str) -> dict:
+    """Details for one model id: pricing (cost), context/prompt-length limits, and
+    capabilities -- so an agent can budget its input and confirm a model fits
+    before using it. Read-only; not spend-gated. May scan the catalog by type to
+    locate the id.
+    """
+    if not model or not str(model).strip():
+        return _err("models: a model id is required")
+    m = _models_cmd._find_model(client, str(model).strip())
+    if m is None:
+        return _err(f"models: no model with id {model!r}")
+    spec = m.get("model_spec") if isinstance(m.get("model_spec"), dict) else {}
+    return {
+        "status": "ok",
+        "id": m.get("id"),
+        "type": m.get("type"),
+        "name": spec.get("name") or m.get("name"),
+        "pricing": spec.get("pricing"),
+        "available_context_tokens": spec.get("availableContextTokens"),
+        "prompt_character_limit": spec.get("promptCharacterLimit"),
+        "capabilities": spec.get("capabilities"),
+        "traits": spec.get("traits"),
+    }
