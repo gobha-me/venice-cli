@@ -447,6 +447,89 @@ class TestRepl(unittest.TestCase):
         self.assertIn("auto-accept on", err.getvalue())
         self.assertIn("auto-accept off", err.getvalue())
 
+    # ------------------------------------------------------------------ #
+    # #68: /persona loads a file-backed system prompt; lists; rejects escapes
+    # ------------------------------------------------------------------ #
+    def _personas_dir(self, **files):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        d = Path(tmp.name) / "personas"
+        d.mkdir()
+        for name, text in files.items():
+            (d / name).write_text(text, encoding="utf-8")
+        p = mock.patch("venice.config.PERSONAS_DIR", d)
+        p.start()
+        self.addCleanup(p.stop)
+        return d
+
+    def _state(self):
+        return {"model": "m", "tools": [], "tools_on": True, "yes": False,
+                "max_tool_calls": 8}
+
+    def test_slash_persona_loads_file_as_system(self):
+        self._personas_dir(**{"pirate.md": "You are a terse pirate."})
+        messages = []
+        err = io.StringIO()
+        with mock.patch.object(sys, "stderr", err):
+            _repl._dispatch_slash("/persona pirate", messages, self._state(),
+                                  _args(interactive=True), [])
+        self.assertEqual(messages[0],
+                         {"role": "system", "content": "You are a terse pirate."})
+        self.assertIn("loaded", err.getvalue())
+
+    def test_slash_persona_replaces_existing_system_keeps_history(self):
+        self._personas_dir(**{"pirate.md": "pirate"})
+        messages = [{"role": "system", "content": "old"},
+                    {"role": "user", "content": "hi"}]
+        err = io.StringIO()
+        with mock.patch.object(sys, "stderr", err):
+            _repl._dispatch_slash("/persona pirate", messages, self._state(),
+                                  _args(interactive=True), [])
+        self.assertEqual(messages[0], {"role": "system", "content": "pirate"})
+        self.assertEqual(messages[1], {"role": "user", "content": "hi"})  # kept
+
+    def test_slash_persona_no_arg_lists(self):
+        self._personas_dir(**{"pirate.md": "You are a pirate.",
+                              "coach.txt": "Motivate."})
+        err = io.StringIO()
+        with mock.patch.object(sys, "stderr", err):
+            _repl._dispatch_slash("/persona", [], self._state(),
+                                  _args(interactive=True), [])
+        out = err.getvalue()
+        self.assertIn("pirate", out)
+        self.assertIn("You are a pirate.", out)
+        self.assertIn("coach", out)
+
+    def test_slash_persona_no_arg_empty_dir(self):
+        self._personas_dir()
+        err = io.StringIO()
+        with mock.patch.object(sys, "stderr", err):
+            _repl._dispatch_slash("/persona", [], self._state(),
+                                  _args(interactive=True), [])
+        self.assertIn("no personas yet", err.getvalue())
+
+    def test_slash_persona_traversal_rejected(self):
+        d = self._personas_dir()
+        (d.parent / "credentials").write_text("SECRET", encoding="utf-8")
+        messages = []
+        err = io.StringIO()
+        with mock.patch.object(sys, "stderr", err):
+            _repl._dispatch_slash("/persona ../credentials", messages, self._state(),
+                                  _args(interactive=True), [])
+        self.assertEqual(messages, [])                 # nothing loaded
+        self.assertNotIn("SECRET", err.getvalue())     # secret never read/printed
+        self.assertIn("/persona:", err.getvalue())     # a friendly error instead
+
+    def test_slash_persona_missing_name(self):
+        self._personas_dir()
+        messages = []
+        err = io.StringIO()
+        with mock.patch.object(sys, "stderr", err):
+            _repl._dispatch_slash("/persona ghost", messages, self._state(),
+                                  _args(interactive=True), [])
+        self.assertEqual(messages, [])
+        self.assertIn("ghost", err.getvalue())
+
     def test_slash_auto_noop_without_tools(self):
         state = {"model": "m", "tools": None, "tools_on": False, "yes": False,
                  "max_tool_calls": 8}

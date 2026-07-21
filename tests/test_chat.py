@@ -11,7 +11,9 @@ import io
 import json
 import os
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from tests.test_client import FakeResp
@@ -19,7 +21,7 @@ from tests.test_client import FakeResp
 
 def _args(**ov):
     base = dict(
-        message=None, system=None, model=None, temperature=None,
+        message=None, system=None, persona=None, model=None, temperature=None,
         max_tokens=None, stream=True, json=False,
         web_search=None, web_citations=False, web_scraping=False,
         character=None, no_venice_system_prompt=False,
@@ -245,6 +247,73 @@ class TestChat(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(captured["model"], "venice-uncensored")
         self.assertEqual(captured["messages"][0], {"role": "system", "content": "be terse"})
+
+    # --- personas (#68): --persona / defaults.chat.persona seed args.system ---
+
+    def _personas_dir(self, **files):
+        """A temp personas dir patched in as config.PERSONAS_DIR; returns its Path."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        d = Path(tmp.name)
+        for name, text in files.items():
+            (d / name).write_text(text, encoding="utf-8")
+        p = mock.patch("venice.config.PERSONAS_DIR", d)
+        p.start()
+        self.addCleanup(p.stop)
+        return d
+
+    def test_persona_flag_seeds_system(self):
+        self._personas_dir(**{"pirate.md": "You are a terse pirate."})
+        rc, fake, captured = self._run(
+            _args(message="hi", persona="pirate", stream=False), FakeCompletion("ok")
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            captured["messages"][0],
+            {"role": "system", "content": "You are a terse pirate."},
+        )
+
+    def test_persona_config_default_applied(self):
+        self._personas_dir(**{"pirate.md": "Arr."})
+        cfg = {"version": 1, "mcpServers": {},
+               "defaults": {"chat": {"persona": "pirate"}}}
+        with mock.patch("venice.userconfig.load_config", lambda *a, **k: cfg):
+            rc, fake, captured = self._run(
+                _args(message="hi", stream=False), FakeCompletion("ok")
+            )
+        self.assertEqual(rc, 0)
+        self.assertEqual(captured["messages"][0],
+                         {"role": "system", "content": "Arr."})
+
+    def test_explicit_system_beats_persona(self):
+        self._personas_dir(**{"pirate.md": "Arr."})
+        rc, fake, captured = self._run(
+            _args(message="hi", system="be terse", persona="pirate", stream=False),
+            FakeCompletion("ok"),
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(captured["messages"][0],
+                         {"role": "system", "content": "be terse"})
+
+    def test_persona_not_found_errors(self):
+        self._personas_dir()
+        err = io.StringIO()
+        rc, fake, captured = self._run(
+            _args(message="hi", persona="ghost", stream=False),
+            FakeCompletion("ok"), stderr=err,
+        )
+        self.assertEqual(rc, 2)
+        self.assertIn("ghost", err.getvalue())
+
+    def test_persona_traversal_rejected(self):
+        self._personas_dir()
+        err = io.StringIO()
+        rc, fake, captured = self._run(
+            _args(message="hi", persona="../credentials", stream=False),
+            FakeCompletion("ok"), stderr=err,
+        )
+        self.assertEqual(rc, 2)
+        self.assertIn("invalid persona", err.getvalue())
 
     def test_stdin_dash_becomes_message(self):
         with mock.patch.object(sys, "stdin", io.StringIO("piped question")):

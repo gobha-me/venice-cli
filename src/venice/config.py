@@ -7,6 +7,10 @@ CONFIG_DIR = HOME / ".config" / "venice"
 CREDS_FILE = CONFIG_DIR / "credentials"
 PRESETS_FILE = CONFIG_DIR / "image_presets.json"
 CONFIG_FILE = CONFIG_DIR / "config.json"
+# `venice chat` reads local, file-backed system prompts ("personas", #68) from a
+# dedicated subdir so listing them never has to enumerate the config root (where
+# `credentials` lives). Names resolve to <PERSONAS_DIR>/<name>.md|.txt only.
+PERSONAS_DIR = CONFIG_DIR / "personas"
 
 ENV_API_KEY = "VENICE_API_KEY"
 ENV_BASE_URL = "VENICE_BASE_URL"

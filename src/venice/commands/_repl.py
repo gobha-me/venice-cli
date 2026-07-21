@@ -33,7 +33,8 @@ import tempfile
 from pathlib import Path
 from typing import List, Optional
 
-from . import _agent, _compact, _models
+from .. import config
+from . import _agent, _compact, _models, _persona
 
 
 _PROMPT = "you> "
@@ -42,6 +43,7 @@ _CONT_PROMPT = "... "  # continuation prompt for /paste block mode (#65)
 _HELP = """\
 Commands:
   /system [text]   show, or set, the system prompt (reseeds the conversation)
+  /persona [name]  load a saved system prompt from ~/.config/venice/personas/ (no name lists them)
   /model [name]    switch model; with no name, show the current one and list the catalog
   /models          list the available models (marks the current and default)
   /auto            auto-accept paid/side-effecting tool calls for following turns
@@ -60,8 +62,8 @@ Anything else is sent to the model as your next message."""
 # (#40). Keep in sync with `_dispatch_slash` and `_HELP`. (/end and /cancel are
 # only meaningful inside a /paste block, so they stay out of top-level completion.)
 _COMMANDS = (
-    "/system", "/model", "/models", "/auto", "/manual", "/compact", "/cost",
-    "/reset", "/save", "/paste", "/edit", "/help", "/exit", "/quit",
+    "/system", "/persona", "/model", "/models", "/auto", "/manual", "/compact",
+    "/cost", "/reset", "/save", "/paste", "/edit", "/help", "/exit", "/quit",
 )
 
 
@@ -165,6 +167,24 @@ def _format_model_list(models, current: Optional[str]) -> str:
     return "\n".join(lines) if lines else "(no models advertised)"
 
 
+def _format_persona_list() -> str:
+    """One persona per line for bare `/persona`, name + first-line description.
+
+    Enumerates only the personas dir (never the config root). Empty/missing dir
+    returns a printable hint instead of a list. Returns a stderr-bound block.
+    """
+    personas = _persona.available()
+    if not personas:
+        return "(no personas yet; drop a .md in ~/.config/venice/personas/)"
+    lines = []
+    for name, desc in personas:
+        line = f"  {name}"
+        if desc:
+            line += f"  -- {desc}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def _make_completer(models, rl):
     """Build a `readline` completer over the slash-commands and model ids (#40).
 
@@ -187,6 +207,8 @@ def _make_completer(models, rl):
             candidates = _COMMANDS
         elif buf.lstrip().split(maxsplit=1)[0].lower() == "/model":
             candidates = model_ids
+        elif buf.lstrip().split(maxsplit=1)[0].lower() == "/persona":
+            candidates = [name for name, _ in _persona.available()]
         else:
             candidates = ()
         matches = [c for c in candidates if c.startswith(text)]
@@ -369,6 +391,21 @@ def _dispatch_slash(line, messages, state, args, models, oai=None, gen_kwargs=No
             print("(system prompt set)", file=sys.stderr)
         else:
             print(f"system: {_current_system(messages) or '(none)'}", file=sys.stderr)
+    elif cmd == "persona":
+        if rest:
+            try:
+                text = _persona.load(rest)
+            except _persona.PersonaError as e:
+                print(f"/persona: {e}", file=sys.stderr)
+            else:
+                _set_system(messages, text)
+                print(f"(persona {rest!r} loaded)", file=sys.stderr)
+        else:
+            # Create the drop-dir lazily so a first-time user has somewhere to
+            # put files; a failure here is non-fatal (we just list nothing).
+            with contextlib.suppress(OSError):
+                config.PERSONAS_DIR.mkdir(parents=True, exist_ok=True)
+            print(_format_persona_list(), file=sys.stderr)
     elif cmd == "model":
         if rest:
             new, rc = _models.resolve_model(

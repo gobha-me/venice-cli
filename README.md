@@ -523,6 +523,8 @@ venice chat --resume session.json
 ```
 
 In-REPL slash-commands: `/system [text]` (show/set the system prompt),
+`/persona [name]` (load a saved system prompt from
+`~/.config/venice/personas/`; with no name, list the available ones),
 `/model [name]` (switch model; with no name, show the current one and list the
 catalog), `/models` (list the available models, marking the current and the
 default), `/auto` and `/manual` (toggle auto-accepting paid/side-effecting tool
@@ -535,7 +537,7 @@ the system prompt),
 `git commit`, optionally pre-seeded with `text`),
 `/help`, and `/exit` (or `/quit`, or Ctrl-D). Ctrl-C aborts the current turn
 without ending the session. Tab completes slash-commands (and model ids after
-`/model `). At a per-tool confirmation prompt, `a` accepts that call **and**
+`/model `, persona names after `/persona `). At a per-tool confirmation prompt, `a` accepts that call **and**
 auto-accepts the rest of the run. `--max-tool-calls 0` runs until the model
 stops on its own (instead of capping at the default and asking to continue).
 
@@ -549,6 +551,32 @@ back to a chars-per-token estimate otherwise), so it fires on the real prompt
 size rather than a guess. Compaction is best-effort — a failed summarization
 call leaves the history untouched — and never orphans a tool result from its
 assistant turn. It's off by default because it costs a summarization call.
+
+#### Personas (local system-prompt files)
+
+Keep a library of your own reusable system prompts as plain `.md`/`.txt` files
+under `~/.config/venice/personas/` — private, version-controllable, offline, and
+complementary to Venice's server-side `--character` slugs. Drop a file in the
+directory, then load it by bare name:
+
+```sh
+mkdir -p ~/.config/venice/personas
+printf 'You are a terse pirate. Answer in one sentence.\n' \
+  > ~/.config/venice/personas/pirate.md
+
+venice chat --persona pirate            # load at launch
+# ...or mid-session in the REPL:
+#   /persona           -> list personas (name + first line)
+#   /persona pirate    -> load personas/pirate.md as the system prompt
+```
+
+`/persona <name>` replaces the system prompt but keeps the conversation (use
+`/reset` for a clean slate), exactly like `/system`. At launch, `--persona`
+(or the `defaults.chat.persona` config default) seeds the system prompt; an
+explicit `--system` / `defaults.chat.system` takes precedence. Names are
+**bare only** — a name with a path separator or `..` is refused, and the lister
+enumerates only the `personas/` directory, so a persona can never read the
+neighbouring `credentials` file. `venice chat` only for now.
 
 ### Venice extensions
 
@@ -924,6 +952,7 @@ forced cwd, timeout, and env-scrub — which is why it always confirms. git muta
 | `--assets` | also expose the in-process asset-generation tools (image / image-edit / sfx / music / tts / upscale / bg-remove / video) so the agent can create images, audio & video in the project; paid — each confirms per call unless `--auto` |
 | `--auto-compact` | summarize older history once the prompt crosses `--compact-threshold` tokens (default 100 000), keeping the last `--compact-keep-turns` turns (default 10); long runs stay in-context |
 | `-i`, `--json`, `--model`, `--system` | interactive REPL · JSON envelope · model · extra system instructions |
+| `--persona NAME` | load `~/.config/venice/personas/NAME.md` as the system prompt at launch (`/persona` in the REPL) |
 
 With `--assets`, generated files land in `$VENICE_MCP_OUTPUT_DIR` or, by default, under
 the project root, and paid calls are capped per call by `$VENICE_MCP_MAX_SPEND` (default
