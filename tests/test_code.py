@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from venice.commands import _code
 
@@ -264,6 +265,70 @@ class TestCodeTools(unittest.TestCase):
             {"path": "nope.py", "edits": [{"old": "a", "new": "b"}]}]}, confirm=True)
         self.assertEqual(r["status"], "error")
         self.assertIn("no such file", r["message"])
+
+    def test_apply_patch_dry_run_previews_without_writing(self):
+        # dry_run reports the per-hunk old->new for every file and writes nothing,
+        # without needing confirmation.
+        self._write("a.py", "a1\nx\nx\n")
+        self._write("b.py", "b1\n")
+        r = self.tools["apply_patch"].invoke({"patches": [
+            {"path": "a.py", "edits": [
+                {"old": "a1", "new": "A1"},
+                {"old": "x", "new": "MID", "occurrence": 2},
+            ]},
+            {"path": "b.py", "edits": [{"old": "b1", "new": "B1"}]},
+        ], "dry_run": True})  # note: no confirm=True
+        self.assertEqual(r["status"], "ok")
+        self.assertEqual(r["action"], "dry_run")
+        self.assertEqual(r["total_edits"], 3)
+        self.assertEqual(len(r["files"]), 2)
+        first = r["files"][0]
+        self.assertEqual(first["path"], "a.py")
+        self.assertEqual(first["edits"][0], {"index": 0, "old": "a1", "new": "A1"})
+        self.assertEqual(first["edits"][1],
+                         {"index": 1, "old": "x", "new": "MID", "occurrence": 2})
+        # Nothing written to disk.
+        self.assertEqual(Path(self.root, "a.py").read_text(), "a1\nx\nx\n")
+        self.assertEqual(Path(self.root, "b.py").read_text(), "b1\n")
+
+    def test_apply_patch_dry_run_reports_validation_error(self):
+        # dry_run still validates -- a non-matching hunk is an error, not a preview.
+        self._write("a.py", "keep\n")
+        r = self.tools["apply_patch"].invoke({"patches": [
+            {"path": "a.py", "edits": [{"old": "MISSING", "new": "y"}]}],
+            "dry_run": True})
+        self.assertEqual(r["status"], "error")
+        self.assertIn("not found", r["message"])
+        self.assertEqual(Path(self.root, "a.py").read_text(), "keep\n")
+
+    def test_apply_patch_cross_file_atomic_on_write_failure(self):
+        # If a later file fails to stage, no earlier file is committed -- the batch
+        # is all-or-nothing across files (#67), not just per file.
+        self._write("a.py", "a1\n")
+        self._write("b.py", "b1\n")
+        real_stage = _code._stage_write
+        calls = {"n": 0}
+
+        def flaky_stage(target, text):
+            calls["n"] += 1
+            if calls["n"] == 2:  # second file fails to write
+                raise OSError("disk full (simulated)")
+            return real_stage(target, text)
+
+        with mock.patch.object(_code, "_stage_write", flaky_stage):
+            r = self.tools["apply_patch"].invoke({"patches": [
+                {"path": "a.py", "edits": [{"old": "a1", "new": "a2"}]},
+                {"path": "b.py", "edits": [{"old": "b1", "new": "b2"}]},
+            ]}, confirm=True)
+        self.assertEqual(r["status"], "error")
+        self.assertIn("write failed", r["message"])
+        # Both files unchanged -- file 1 was staged but never committed.
+        self.assertEqual(Path(self.root, "a.py").read_text(), "a1\n")
+        self.assertEqual(Path(self.root, "b.py").read_text(), "b1\n")
+        # No temp files left behind.
+        leftover = [p.name for p in Path(self.root).iterdir()
+                    if p.name.endswith(".venice-tmp")]
+        self.assertEqual(leftover, [])
 
     # --- run ---
     def test_run_gate_then_exec_cwd_and_scrub(self):
