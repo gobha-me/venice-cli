@@ -153,11 +153,12 @@ def register(subparsers) -> None:
         help=f"Images to generate per prompt ({MIN_VARIANTS}-{MAX_VARIANTS}).",
     )
     p.add_argument(
-        "--no-safe-mode",
-        dest="safe_mode",
-        action="store_false",
-        default=True,
-        help="Disable safe_mode so flagged art isn't silently blurred.",
+        "--safe-mode",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Safe mode blurs flagged art (on by default). --no-safe-mode "
+        "disables it. Config-backable via defaults.image.safe_mode; an explicit "
+        "--safe-mode/--no-safe-mode still wins.",
     )
     p.add_argument(
         "--hide-watermark",
@@ -207,7 +208,8 @@ def _build_body(prompt: str, args) -> dict:
         "model": args.model,
         "prompt": prompt,
         "format": args.format,
-        "safe_mode": args.safe_mode,
+        # None (neither flag nor config set) -> True, i.e. stay safe by default.
+        "safe_mode": args.safe_mode if args.safe_mode is not None else True,
         # None (neither flag nor config set) -> False, i.e. keep the watermark.
         "hide_watermark": bool(args.hide_watermark),
     }
