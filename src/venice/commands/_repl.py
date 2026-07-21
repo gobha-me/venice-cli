@@ -29,7 +29,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
-from . import _agent, _models
+from . import _agent, _compact, _models
 
 
 _PROMPT = "you> "
@@ -41,6 +41,7 @@ Commands:
   /models          list the available models (marks the current and default)
   /auto            auto-accept paid/side-effecting tool calls for following turns
   /manual          confirm each paid/side-effecting tool call (undo /auto)
+  /compact [N]     summarize older history to shrink the context (keeps last N turns)
   /reset           clear the conversation (keeps the system prompt)
   /save [file]     write the transcript JSON (default: the --resume file)
   /help            show this help
@@ -50,8 +51,8 @@ Anything else is sent to the model as your next message."""
 # Slash-commands, in help order -- the single source of truth for tab-completion
 # (#40). Keep in sync with `_dispatch_slash` and `_HELP`.
 _COMMANDS = (
-    "/system", "/model", "/models", "/auto", "/manual", "/reset", "/save",
-    "/help", "/exit", "/quit",
+    "/system", "/model", "/models", "/auto", "/manual", "/compact", "/reset",
+    "/save", "/help", "/exit", "/quit",
 )
 
 
@@ -212,20 +213,35 @@ def _install_completer(rl, models, stack) -> None:
 # --------------------------------------------------------------------------- #
 # One turn
 # --------------------------------------------------------------------------- #
-def _stream_turn(oai, chat, model: str, messages: List[dict], gen_kwargs: dict) -> None:
+def _stream_turn(oai, chat, model: str, messages: List[dict], gen_kwargs: dict):
+    """One streamed turn; returns (reply_text, usage) for history + budget (#48)."""
     kwargs = dict(gen_kwargs)
     kwargs["model"] = model
     kwargs["messages"] = messages
     kwargs["stream"] = True
     kwargs["stream_options"] = {"include_usage": True}
-    text = chat._consume_stream(oai.chat.completions.create(**kwargs))
-    messages.append({"role": "assistant", "content": text})
+    return chat._consume_stream_full(oai.chat.completions.create(**kwargs))
 
 
 def _do_turn(oai, openai, chat, text, messages, gen_kwargs, state, args) -> None:
     """Run one turn. Any failure/interrupt rolls the turn's messages back so the
     persistent history stays a valid, replayable conversation, and the session
-    survives (only `/exit`/EOF ends the REPL)."""
+    survives (only `/exit`/EOF ends the REPL).
+
+    Auto-compaction (#48): when the session carries a `budget`, an over-budget
+    history is summarized BEFORE the completion call, outside the rollback
+    window -- a turn failure then rolls back only that turn, not the compaction.
+    Tool turns pass the budget to `run_loop`, which compacts between calls and
+    observes `usage` itself; streamed turns compact here and observe usage from
+    the stream's final chunk.
+    """
+    budget = state.get("budget")
+    _compact.maybe_compact(
+        oai, state["model"], messages, budget, gen_kwargs,
+        on_compact=lambda b, a: print(
+            f"(auto-compacted history: {b} -> {a} messages)", file=sys.stderr,
+        ),
+    )
     mark = len(messages)
     messages.append({"role": "user", "content": text})
     try:
@@ -235,9 +251,13 @@ def _do_turn(oai, openai, chat, text, messages, gen_kwargs, state, args) -> None
                 max_tool_calls=state["max_tool_calls"],
                 yes=state["yes"],
                 json_out=False,
+                budget=budget,
             )
         else:
-            _stream_turn(oai, chat, state["model"], messages, gen_kwargs)
+            reply, usage = _stream_turn(oai, chat, state["model"], messages, gen_kwargs)
+            if budget is not None:
+                budget.observe(usage)
+            messages.append({"role": "assistant", "content": reply})
     except KeyboardInterrupt:
         # Ctrl-C aborts just this turn -- roll it back and keep the session.
         del messages[mark:]
@@ -250,9 +270,9 @@ def _do_turn(oai, openai, chat, text, messages, gen_kwargs, state, args) -> None
 # --------------------------------------------------------------------------- #
 # Slash-commands
 # --------------------------------------------------------------------------- #
-def _dispatch_slash(line, messages, state, args, models) -> str:
+def _dispatch_slash(line, messages, state, args, models, oai=None, gen_kwargs=None) -> str:
     """Handle a ``/command``. Returns ``"exit"`` to leave the REPL, else
-    ``"continue"``."""
+    ``"continue"``. `oai`/`gen_kwargs` are needed only by `/compact` (#48)."""
     parts = line[1:].split(maxsplit=1)
     cmd = parts[0].lower() if parts else ""
     rest = parts[1].strip() if len(parts) > 1 else ""
@@ -300,6 +320,32 @@ def _dispatch_slash(line, messages, state, args, models) -> str:
             state["yes"] = cmd == "auto"
             on = "on" if state["yes"] else "off"
             print(f"(auto-accept {on})", file=sys.stderr)
+    elif cmd == "compact":
+        # Manual compaction (#48): summarize the older prefix with the session
+        # model; `rest` can override how many recent turns stay verbatim.
+        keep = _compact.DEFAULT_KEEP_TURNS
+        if state.get("budget") is not None:
+            keep = state["budget"].keep_turns
+        if rest:
+            try:
+                keep = max(1, int(rest))
+            except ValueError:
+                print(f"/compact: bad turn count {rest!r}", file=sys.stderr)
+                return "continue"
+        before = len(messages)
+        if _compact.compact_messages(
+            oai, state["model"], messages,
+            keep_turns=keep, base_kwargs=gen_kwargs,
+        ):
+            if state.get("budget") is not None:
+                state["budget"].last_prompt_tokens = None
+            print(
+                f"(compacted: {before} -> {len(messages)} messages; "
+                f"last {keep} turn(s) verbatim)",
+                file=sys.stderr,
+            )
+        else:
+            print("(nothing to compact)", file=sys.stderr)
     elif cmd == "save":
         target = rest or getattr(args, "resume", None)
         if not target:
@@ -383,6 +429,9 @@ def run(args, oai, openai, client, models, model, initial=None, *,
             "yes": bool(getattr(args, "yes", False)),  # /auto and /manual flip this
             "max_tool_calls": cap if cap is not None else max_tool_calls,
         }
+        # Auto-compaction (#48) is opt-in: `--auto-compact` or
+        # `defaults.<cmd>.auto_compact` (it costs a summarization call).
+        state["budget"] = _compact.budget_from_args(args)
 
         if _rl is not None:
             _install_completer(_rl, models, stack)
@@ -407,7 +456,9 @@ def run(args, oai, openai, client, models, model, initial=None, *,
             if not line:
                 continue
             if line.startswith("/"):
-                if _dispatch_slash(line, messages, state, args, models) == "exit":
+                if _dispatch_slash(
+                    line, messages, state, args, models, oai=oai, gen_kwargs=gen_kwargs
+                ) == "exit":
                     return 0
                 continue
             _do_turn(oai, openai, chat, line, messages, gen_kwargs, state, args)

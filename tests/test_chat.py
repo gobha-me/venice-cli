@@ -31,6 +31,8 @@ def _args(**ov):
         mcp=None, no_mcp=False,
         # --- interactive / REPL (#22) ---
         interactive=False, resume=None,
+        # --- auto-compaction (#48) ---
+        auto_compact=None, compact_threshold=None, compact_keep_turns=None,
     )
     base.update(ov)
     return argparse.Namespace(**base)
@@ -146,9 +148,11 @@ class _ToolChoice:
 class FakeToolCompletion:
     """A completion whose message may carry tool_calls (None => a final answer)."""
 
-    def __init__(self, content=None, tool_calls=None, venice_parameters=None):
+    def __init__(self, content=None, tool_calls=None, venice_parameters=None,
+                 usage=None):
         self.choices = [_ToolChoice(_ToolMsg(content, tool_calls))]
         self.venice_parameters = venice_parameters
+        self.usage = usage
 
     def model_dump(self):
         return {"choices": [{"message": {"content": self.choices[0].message.content}}]}
@@ -415,6 +419,44 @@ class TestChatAgent(unittest.TestCase):
         self.assertEqual(len(tool_msgs), 1)
         self.assertEqual(tool_msgs[0]["tool_call_id"], "call_1")
         self.assertIn("hola", tool_msgs[0]["content"])
+
+    def test_tools_auto_compact_hands_budget_to_loop(self):
+        # #48 parity: chat --tools must honor --auto-compact by giving run_loop a
+        # Budget (like code / the REPL do). Non-interactive single turns rarely
+        # compact, but the flag has to reach the loop -- spy on run_loop to prove
+        # the wiring without depending on compaction actually firing.
+        from venice.commands import _agent, _compact
+        captured = {}
+
+        def _spy(*a, **kw):
+            captured["budget"] = kw.get("budget")
+            return 0
+
+        with mock.patch.object(_agent, "run_loop", _spy):
+            rc, _fake, _calls = self._run_seq(
+                _args(message="hi", tools=True, stream=False, auto_compact=True,
+                      compact_threshold=1234, compact_keep_turns=3),
+                [],
+            )
+        self.assertEqual(rc, 0)
+        self.assertIsInstance(captured["budget"], _compact.Budget)
+        self.assertEqual(captured["budget"].threshold_tokens, 1234)
+        self.assertEqual(captured["budget"].keep_turns, 3)
+
+    def test_tools_without_auto_compact_passes_no_budget(self):
+        from venice.commands import _agent
+        captured = {}
+
+        def _spy(*a, **kw):
+            captured["budget"] = kw.get("budget")
+            return 0
+
+        with mock.patch.object(_agent, "run_loop", _spy):
+            rc, _fake, _calls = self._run_seq(
+                _args(message="hi", tools=True, stream=False), [],
+            )
+        self.assertEqual(rc, 0)
+        self.assertIsNone(captured["budget"])
 
     def test_capability_degrade_to_plain_chat(self):
         err = io.StringIO()

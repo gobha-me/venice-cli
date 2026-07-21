@@ -24,6 +24,7 @@ def _code_args(**ov):
         max_tokens=None, json=False, auto=None, manual=None, yes=None,
         plan_only=False, no_plan=False, no_verify=False, max_tool_calls=None,
         exec_timeout=None, interactive=False, resume=None, assets=None,
+        auto_compact=None, compact_threshold=None, compact_keep_turns=None,
     )
     base.update(ov)
     return argparse.Namespace(**base)
@@ -91,6 +92,57 @@ class TestCodeCommand(unittest.TestCase):
         # auto -> confirm=True -> the write actually happened
         with open(os.path.join(self.root, "hello.py")) as f:
             self.assertEqual(f.read(), "def hi():\n    return 1\n")
+
+    # --- auto-compact (#48) ---
+    def test_auto_compact_compacts_during_execute(self):
+        # Plan turn, then several over-budget tool rounds so the history grows
+        # past keep_turns -- the loop fires one tool-free summarization turn.
+        # Post-compaction turns report small usage (the history is now short),
+        # so compaction doesn't re-fire.
+        over = {"prompt_tokens": 9000, "completion_tokens": 5, "total_tokens": 9005}
+        under = {"prompt_tokens": 100, "completion_tokens": 5, "total_tokens": 105}
+        seq = [FakeToolCompletion("plan: read a file")]                # plan
+        for i in range(4):                                             # exec rounds
+            seq.append(FakeToolCompletion(
+                tool_calls=[_FnCall(f"c{i}", "read_file", '{"path":"x"}')],
+                usage=over))
+        seq += [
+            FakeToolCompletion("summary so far"),                      # compact turn
+            FakeToolCompletion("done", usage=under),                   # exec final
+            FakeToolCompletion("- works: MET\nACCEPTANCE: PASS"),      # verify
+        ]
+        rc, calls = self._run(
+            _code_args(task="read x", root=self.root, auto=True,
+                       auto_compact=True, compact_threshold=1000,
+                       compact_keep_turns=1),
+            seq)
+        self.assertEqual(rc, 0)
+        # At least one tool-free, tool_choice="none" summarization turn fired
+        # (the plan and verify turns pass tools; only the compact turn omits
+        # them). With several over-budget rounds it can fire more than once as
+        # the history re-grows past the threshold -- that's expected.
+        summary_turns = [c for c in calls
+                         if c.get("tool_choice") == "none" and "tools" not in c]
+        self.assertGreaterEqual(len(summary_turns), 1)
+        # The summarization turn is self-contained: instruction system + the
+        # flattened transcript, no tools, no tool_choice other than "none".
+        st = summary_turns[0]
+        self.assertEqual(st["messages"][0]["role"], "system")
+        self.assertEqual(len(st["messages"]), 2)  # instruction + transcript only
+
+    def test_auto_compact_off_by_default_no_compact_call(self):
+        usage = {"prompt_tokens": 999999, "completion_tokens": 1,
+                 "total_tokens": 1000000}
+        seq = [FakeToolCompletion("plan")]
+        for i in range(4):
+            seq.append(FakeToolCompletion(
+                tool_calls=[_FnCall(f"c{i}", "read_file", '{"path":"x"}')],
+                usage=usage))
+        seq += [FakeToolCompletion("done"), FakeToolCompletion("ACCEPTANCE: PASS")]
+        rc, calls = self._run(
+            _code_args(task="x", root=self.root, auto=True), seq)
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 7)  # plan + 4 rounds + final + verify; no compact
 
     # --- --assets exposes the in-process asset tools ---
     def _exec_tool_names(self, calls):

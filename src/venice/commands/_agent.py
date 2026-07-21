@@ -34,6 +34,7 @@ from typing import Callable, Dict, List, Optional
 
 from .. import userconfig
 from . import _mcp
+from . import _compact
 from .models import MODEL_TYPES
 
 
@@ -682,6 +683,7 @@ def run_loop(
     max_tool_calls: int,
     yes: bool,
     json_out: bool,
+    budget: Optional[_compact.Budget] = None,
 ) -> int:
     """Drive the function-calling loop until the model stops (or the cap is hit).
 
@@ -691,6 +693,13 @@ def run_loop(
     by design (tool-call deltas would need fragment reassembly; v1 buffers each turn).
     Only `openai.OpenAIError` from create() is fatal -- the caller maps it to an exit
     code; tool failures come back as dicts the model can recover from.
+
+    `budget` (issue #48) enables auto-compaction: when given, each turn first
+    records the previous response's `usage` and, once the prompt would exceed
+    `budget.threshold_tokens`, summarizes the older prefix into one synthetic
+    system message (keeping the system prompt + last `budget.keep_turns` turns
+    verbatim). Compaction mutates `messages` in place and is best-effort: a
+    failed summary call leaves the history alone.
     """
     oai_tools = to_openai_tools(tools)
     dispatch = dispatch_map(tools)
@@ -702,6 +711,12 @@ def run_loop(
     show = not json_out  # progress feedback (further TTY-gated inside the helpers)
 
     while True:
+        _compact.maybe_compact(
+            oai, model, messages, budget, base_kwargs,
+            on_compact=lambda b, a: _progress(
+                f"(auto-compacted history: {b} -> {a} messages)", enabled=show,
+            ),
+        )
         with _Spinner("thinking", enabled=show):
             resp = oai.chat.completions.create(
                 model=model,
@@ -710,6 +725,8 @@ def run_loop(
                 tool_choice="auto",
                 **base_kwargs,
             )
+        if budget is not None:
+            budget.observe(getattr(resp, "usage", None))
         msg = resp.choices[0].message if getattr(resp, "choices", None) else None
         messages.append(_assistant_dict(msg))
         tool_calls = getattr(msg, "tool_calls", None) if msg is not None else None
@@ -746,6 +763,15 @@ def run_loop(
                 f"chat: reached --max-tool-calls ({max_tool_calls}); "
                 "requesting a final answer",
                 file=sys.stderr,
+            )
+            # The forced-final is the turn a long, over-budget run most needs
+            # compacted -- it returns without re-entering the loop, so compact
+            # here too or it ships the full history (#48).
+            _compact.maybe_compact(
+                oai, model, messages, budget, base_kwargs,
+                on_compact=lambda b, a: _progress(
+                    f"(auto-compacted history: {b} -> {a} messages)", enabled=show,
+                ),
             )
             with _Spinner("finishing", enabled=show):
                 resp = oai.chat.completions.create(
