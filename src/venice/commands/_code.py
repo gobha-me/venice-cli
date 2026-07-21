@@ -449,6 +449,7 @@ def code_tools(
     include_search: bool = False,
     assets: bool = False,
     max_spend=None,
+    config=None,
 ) -> List[_agent.Tool]:
     """Build the coding tools bound to a realpath-resolved project `root`.
 
@@ -530,7 +531,8 @@ def code_tools(
     # A free model-catalog lookup so the agent can pick a valid `model` for the
     # asset tools instead of guessing (needs a client for the /models GET).
     if client is not None:
-        tools.extend(_agent.builtin_tools(client, only={"venice_models"}))
+        tools.extend(_agent.builtin_tools(client, only={"venice_models"},
+                                          config=config))
 
     if assets and client is not None:
         asset_dir = os.environ.get("VENICE_MCP_OUTPUT_DIR") or root
@@ -541,6 +543,7 @@ def code_tools(
                 "venice_music", "venice_tts", "venice_upscale", "venice_bg_remove",
                 "venice_video",
             },
+            config=config,  # #58: asset tools honor defaults.<cmd>.*
         ))
     return tools
 

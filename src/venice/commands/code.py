@@ -358,6 +358,7 @@ def _run(args) -> int:
         exec_timeout=args.exec_timeout or _code.DEFAULT_EXEC_TIMEOUT,
         include_search=True,
         assets=bool(args.assets),
+        config=userconfig.load_config(),  # #58: honor defaults.<cmd>.* in tools
     )
     system = _system_prompt(args, root, tools)
     gen_kwargs = _gen_kwargs(args)

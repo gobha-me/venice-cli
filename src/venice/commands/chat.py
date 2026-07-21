@@ -338,6 +338,7 @@ def _tools_for(args, client, models, model):
             max_spend=args.max_spend,
             output_dir=str(args.output) if args.output else None,
             only=set(args.tool) if args.tool else None,
+            config=userconfig.load_config(),  # #58: honor defaults.<cmd>.* in tools
         )
     except ValueError as e:
         print(f"chat: {e}", file=sys.stderr)

@@ -1012,6 +1012,12 @@ safety), it should be settable in config." Currently config-backable:
 Per-invocation flags (`--dry-run`, `--json`, `--resume`, `--seed`, inputs and
 positionals) stay CLI-only by design.
 
+These per-command defaults also apply when a generator runs as an **agent tool**
+inside `venice chat --tools` and `venice code` — e.g. `defaults.image.safe_mode`
+is honored when the model calls `venice_image`, not just on the `venice image`
+CLI. An explicit argument the model puts in the tool call still wins over config.
+(`venice mcp-serve` doesn't yet thread config into its wrappers.)
+
 The **API key is never stored here** — it stays in
 `~/.config/venice/credentials`. Unknown keys are preserved on write, so the
 schema is forward-compatible.
