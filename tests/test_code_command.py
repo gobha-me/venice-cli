@@ -25,6 +25,7 @@ def _code_args(**ov):
         plan_only=False, no_plan=False, no_verify=False, max_tool_calls=None,
         exec_timeout=None, interactive=False, resume=None, assets=None,
         auto_compact=None, compact_threshold=None, compact_keep_turns=None,
+        session_max_spend=None,
     )
     base.update(ov)
     return argparse.Namespace(**base)

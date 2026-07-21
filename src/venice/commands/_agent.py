@@ -72,6 +72,126 @@ def to_openai_tools(tools: List[Tool]) -> List[dict]:
     ]
 
 
+# --------------------------------------------------------------------------- #
+# Cost ledger (#66): meter chat-completion spend across an agent run.
+#
+# Paid *tools* are already spend-gated (`check_spend` in `_mcp`); the model
+# calls themselves were not. This ledger accumulates per-turn cost from the
+# server-reported `usage` block and the catalog's per-1M-token pricing, so a
+# session `--max-spend` can stop a runaway loop. Accounting is post-response
+# (chat pricing is dynamic; there is no pre-call quote), so the gate fires
+# *between* turns: once accumulated cost crosses the cap, no new paid turn
+# starts and the loop forces a final answer (mirroring --max-tool-calls).
+# --------------------------------------------------------------------------- #
+def _usd_per_token(pricing, key) -> Optional[float]:
+    """`pricing.<key>.usd` as a per-token rate (catalog prices are per 1M)."""
+    if not isinstance(pricing, dict):
+        return None
+    node = pricing.get(key)
+    if isinstance(node, dict) and isinstance(node.get("usd"), (int, float)):
+        return float(node["usd"]) / 1_000_000.0
+    return None
+
+
+class CostLedger:
+    """Accumulates estimated USD spend for one agent run.
+
+    `max_spend` is the session cap (USD-equivalent; None = unmetered). The
+    ledger is bound to a model's pricing on first use via :meth:`bind_pricing`;
+    an unknown price means the turn's tokens are counted but not charged
+    (degrade gracefully rather than hard-block on a missing price).
+    """
+
+    def __init__(self, max_spend: Optional[float] = None):
+        # A non-positive cap means "uncapped" (mirrors --max-tool-calls 0).
+        cap = float(max_spend) if max_spend is not None else None
+        self.max_spend = cap if (cap is not None and cap > 0) else None
+        self.total = 0.0
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+        self.unpriced = False  # saw a turn whose model price was unknown
+        self._in = None        # per-token input rate (USD)
+        self._out = None       # per-token output rate (USD)
+
+    def bind_pricing(self, pricing) -> None:
+        """Set the per-token rates from a catalog `model_spec.pricing` block."""
+        self._in = _usd_per_token(pricing, "input")
+        self._out = _usd_per_token(pricing, "output")
+
+    def record(self, usage) -> float:
+        """Add one turn's `usage` (dict or SDK obj); return this turn's cost."""
+        if usage is None:
+            return 0.0
+        if hasattr(usage, "model_dump"):
+            usage = usage.model_dump()
+        if not isinstance(usage, dict):
+            return 0.0
+        pt = usage.get("prompt_tokens") or 0
+        ct = usage.get("completion_tokens") or 0
+        if not isinstance(pt, (int, float)):
+            pt = 0
+        if not isinstance(ct, (int, float)):
+            ct = 0
+        self.prompt_tokens += int(pt)
+        self.completion_tokens += int(ct)
+        cost = 0.0
+        if self._in is not None or self._out is not None:
+            cost = float(pt) * (self._in or 0.0) + float(ct) * (self._out or 0.0)
+        else:
+            self.unpriced = True
+        self.total += cost
+        return cost
+
+    def over(self) -> bool:
+        """True when accumulated spend has reached/exceeded the cap."""
+        return self.max_spend is not None and self.total >= self.max_spend
+
+    def summary(self) -> str:
+        """A one-line human-readable total (for stderr / --json)."""
+        if self.unpriced and self.total == 0.0:
+            return (
+                f"cost: (unpriced — model rate unknown) "
+                f"tokens prompt={self.prompt_tokens} completion={self.completion_tokens}"
+            )
+        s = f"cost: ${self.total:.4f}"
+        if self.max_spend is not None:
+            s += f" / cap ${self.max_spend:.2f}"
+        s += f" (tokens prompt={self.prompt_tokens} completion={self.completion_tokens})"
+        if self.unpriced:
+            s += " [partially unpriced]"
+        return s
+
+
+def _pricing_for(models, model_id):
+    """The catalog `model_spec.pricing` block for `model_id`, or None."""
+    for m in models or []:
+        if isinstance(m, dict) and m.get("id") == model_id:
+            spec = m.get("model_spec")
+            if isinstance(spec, dict):
+                return spec.get("pricing")
+    return None
+
+
+def ledger_from_args(args, models, model_id) -> Optional[CostLedger]:
+    """The session CostLedger for a parsed-args namespace, or None when the run
+    isn't spend-capped (#66).
+
+    Enabled by ``--session-max-spend`` (or ``defaults.<cmd>.session_max_spend``)
+    -- DISTINCT from ``--max-spend``, which is the *per-call* auto-approve cap
+    for paid tools. Bound to the session model's catalog pricing; an unknown
+    price degrades to token-counting without charging (the ledger still reports
+    usage). `models` is the text catalog the command already fetched.
+    """
+    cap = getattr(args, "session_max_spend", None)
+    if cap is None:
+        return None
+    ledger = CostLedger(max_spend=cap)
+    pricing = _pricing_for(models, model_id)
+    if pricing is not None:
+        ledger.bind_pricing(pricing)
+    return ledger
+
+
 def dispatch_map(tools: List[Tool]) -> Dict[str, Tool]:
     return {t.name: t for t in tools}
 
@@ -684,6 +804,7 @@ def run_loop(
     yes: bool,
     json_out: bool,
     budget: Optional[_compact.Budget] = None,
+    ledger: Optional[CostLedger] = None,
 ) -> int:
     """Drive the function-calling loop until the model stops (or the cap is hit).
 
@@ -700,6 +821,13 @@ def run_loop(
     system message (keeping the system prompt + last `budget.keep_turns` turns
     verbatim). Compaction mutates `messages` in place and is best-effort: a
     failed summary call leaves the history alone.
+
+    `ledger` (issue #66) meters chat-completion spend: each turn's `usage` is
+    recorded against the session model's per-token rate, and once accumulated
+    cost reaches `ledger.max_spend` the loop stops starting new paid turns and
+    forces a final answer (the model wraps up with the history it has). The
+    gate is post-response (chat has no pre-call quote), so it bounds *further*
+    spend rather than preempting a turn already in flight.
     """
     oai_tools = to_openai_tools(tools)
     dispatch = dispatch_map(tools)
@@ -710,7 +838,29 @@ def run_loop(
     unlimited = max_tool_calls is None or max_tool_calls <= 0
     show = not json_out  # progress feedback (further TTY-gated inside the helpers)
 
+    def _force_final(reason: str) -> int:
+        print(reason, file=sys.stderr)
+        with _Spinner("finishing", enabled=show):
+            resp = oai.chat.completions.create(
+                model=model,
+                messages=messages,
+                tools=oai_tools,
+                tool_choice="none",
+                **base_kwargs,
+            )
+        if ledger is not None:
+            ledger.record(getattr(resp, "usage", None))
+        msg = resp.choices[0].message if getattr(resp, "choices", None) else None
+        messages.append(_assistant_dict(msg))
+        return _emit_final(resp, json_out)
+
     while True:
+        # Spend gate (#66): don't start a new paid turn once the cap is hit.
+        if ledger is not None and ledger.over():
+            return _force_final(
+                f"chat: reached --max-spend ({ledger.summary()}); "
+                "requesting a final answer"
+            )
         _compact.maybe_compact(
             oai, model, messages, budget, base_kwargs,
             on_compact=lambda b, a: _progress(
@@ -727,6 +877,8 @@ def run_loop(
             )
         if budget is not None:
             budget.observe(getattr(resp, "usage", None))
+        if ledger is not None:
+            ledger.record(getattr(resp, "usage", None))
         msg = resp.choices[0].message if getattr(resp, "choices", None) else None
         messages.append(_assistant_dict(msg))
         tool_calls = getattr(msg, "tool_calls", None) if msg is not None else None
@@ -759,11 +911,6 @@ def run_loop(
             )
 
         if not unlimited and calls_made >= max_tool_calls:
-            print(
-                f"chat: reached --max-tool-calls ({max_tool_calls}); "
-                "requesting a final answer",
-                file=sys.stderr,
-            )
             # The forced-final is the turn a long, over-budget run most needs
             # compacted -- it returns without re-entering the loop, so compact
             # here too or it ships the full history (#48).
@@ -773,14 +920,7 @@ def run_loop(
                     f"(auto-compacted history: {b} -> {a} messages)", enabled=show,
                 ),
             )
-            with _Spinner("finishing", enabled=show):
-                resp = oai.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    tools=oai_tools,
-                    tool_choice="none",
-                    **base_kwargs,
-                )
-            msg = resp.choices[0].message if getattr(resp, "choices", None) else None
-            messages.append(_assistant_dict(msg))
-            return _emit_final(resp, json_out)
+            return _force_final(
+                f"chat: reached --max-tool-calls ({max_tool_calls}); "
+                "requesting a final answer"
+            )

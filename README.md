@@ -633,6 +633,14 @@ Details and safety:
   the block is handed back to the model, which adapts. `--yes` auto-approves every
   paid call (this bypasses the per-call cap — `--max-tool-calls` still bounds the
   count). The model itself can never raise its spending authority.
+- **Session spend cap** (`--session-max-spend`, #66) meters the *chat completions
+  themselves* — not just paid tools. Each turn's server-reported `usage` is
+  priced against the session model's per-1M-token catalog rate; once the running
+  total reaches the cap the loop stops starting new turns and forces a final
+  answer (chat has no pre-call quote, so it bounds *further* spend, not a turn
+  already in flight). Config-backable via `defaults.chat.session_max_spend` /
+  `defaults.code.session_max_spend`. Distinct from `--max-spend` (the per-call
+  tool cap). A model with unknown pricing is counted (tokens) but not charged.
 - `--output DIR` sets where generated files are written (default: cwd).
 - **Non-streamed in v1.** The tool path buffers each turn, so `--stream` is ignored
   when `--tools` is on; `--json` prints the final completion object.
@@ -643,6 +651,7 @@ Details and safety:
 | `--tool NAME` | restrict to this tool (repeatable; default: all of them) |
 | `--max-tool-calls N` | cap tool invocations before forcing an answer (default 8) |
 | `--max-spend USD` | per-call auto-approve cap for paid tools |
+| `--session-max-spend USD` | cap total chat-completion spend for the session |
 | `--yes` / `-y` | auto-approve every paid tool call and side-effecting MCP tool |
 | `--output DIR` / `-o` | directory for generated files |
 | `--mcp NAME` | attach a registered external MCP server's tools (repeatable) |

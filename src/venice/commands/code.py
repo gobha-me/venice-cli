@@ -191,6 +191,13 @@ def register(subparsers) -> None:
         "runs stay within the context window (#48; costs a summarization call).",
     )
     grp.add_argument(
+        "--session-max-spend", type=float, default=None, metavar="USD",
+        dest="session_max_spend",
+        help="Cap total chat-completion spend for this run (#66): meters the "
+        "model's calls from server token usage and stops starting new turns at "
+        "the cap. Distinct from --max-spend (the per-call asset-tool cap).",
+    )
+    grp.add_argument(
         "--compact-threshold", type=int, default=None, dest="compact_threshold",
         metavar="TOKENS",
         help="Auto-compact once the prompt passes this many tokens "
@@ -403,10 +410,12 @@ def _run(args) -> int:
             label="venice code", max_tool_calls=_DEFAULT_MAX_TOOL_CALLS,
         )
 
-    return _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task)
+    return _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task,
+                        models)
 
 
-def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task) -> int:
+def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task,
+                 models=None) -> int:
     messages: List[dict] = [
         {"role": "system", "content": system},
         {"role": "user", "content": task},
@@ -483,17 +492,18 @@ def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task
     )
     final_text = None
     budget = _budget_for(args)
+    ledger = _agent.ledger_from_args(args, models, model)  # #66 spend cap
     try:
         if args.json:
             with _capture_stdout() as buf:
                 _agent.run_loop(oai, model, messages, gen_kwargs, tools,
                                 max_tool_calls=max_calls, yes=yes, json_out=False,
-                                budget=budget)
+                                budget=budget, ledger=ledger)
             final_text = buf.getvalue().strip()
         else:
             _agent.run_loop(oai, model, messages, gen_kwargs, tools,
                             max_tool_calls=max_calls, yes=yes, json_out=False,
-                            budget=budget)
+                            budget=budget, ledger=ledger)
     except openai.OpenAIError as e:
         return _openai.status_to_exit(openai, e, "code")
 

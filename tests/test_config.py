@@ -170,6 +170,22 @@ class TestApplyDefaults(_Base):
         self.assertEqual(code_args.compact_keep_turns, 6)
         self.assertIsNone(code_args.compact_threshold)
 
+    def test_apply_session_max_spend_chat_and_code(self):
+        doc = {"defaults": {
+            "chat": {"session_max_spend": 1.5},
+            "code": {"session_max_spend": "2.25"},
+        }}
+        chat_args = argparse.Namespace(session_max_spend=None)
+        uc.apply_defaults(chat_args, "chat", doc)
+        self.assertEqual(chat_args.session_max_spend, 1.5)
+        code_args = argparse.Namespace(session_max_spend=None)
+        uc.apply_defaults(code_args, "code", doc)
+        self.assertEqual(code_args.session_max_spend, 2.25)  # coerced from str
+        # explicit CLI value always wins
+        cli = argparse.Namespace(session_max_spend=9.0)
+        uc.apply_defaults(cli, "chat", doc)
+        self.assertEqual(cli.session_max_spend, 9.0)
+
 
 # --------------------------------------------------------------------------- #
 # #57 config parity -- Class A: flags that already default None become

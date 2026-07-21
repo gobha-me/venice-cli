@@ -235,6 +235,32 @@ class TestRepl(unittest.TestCase):
         self.assertEqual(len(calls), 0)
         self.assertIn("nothing to compact", err.getvalue())
 
+    def test_slash_cost_without_cap_reports_no_tracking(self):
+        err = io.StringIO()
+        rc, fake, calls = _run_repl(
+            _args(interactive=True),
+            [], ["/cost", "/exit"], stderr=err,
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("no session cost tracking", err.getvalue())
+
+    def test_slash_cost_with_cap_reports_running_total(self):
+        # Turn 1 streams a reply with usage; /cost then reports it. The test
+        # catalog advertises no pricing, so the ledger is unpriced (tokens only).
+        err = io.StringIO()
+        results = [[FakeChunk("hi"),
+                    FakeChunk(usage={"prompt_tokens": 1000, "completion_tokens": 500,
+                                     "total_tokens": 1500})]]
+        rc, fake, calls = _run_repl(
+            _args(interactive=True, session_max_spend=1.0),
+            results, ["hey", "/cost", "/exit"], stderr=err,
+            urlopen=_urlopen_ok(),
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("unpriced", err.getvalue())
+        self.assertIn("prompt=1000", err.getvalue())
+        self.assertIn("completion=500", err.getvalue())
+
     def test_slash_compact_then_turn_sees_summary(self):
         with tempfile.TemporaryDirectory() as d:
             resume = self._resume_history(d, pairs=6)

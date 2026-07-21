@@ -42,6 +42,7 @@ Commands:
   /auto            auto-accept paid/side-effecting tool calls for following turns
   /manual          confirm each paid/side-effecting tool call (undo /auto)
   /compact [N]     summarize older history to shrink the context (keeps last N turns)
+  /cost            show this session's estimated spend (needs --session-max-spend to cap)
   /reset           clear the conversation (keeps the system prompt)
   /save [file]     write the transcript JSON (default: the --resume file)
   /help            show this help
@@ -51,8 +52,8 @@ Anything else is sent to the model as your next message."""
 # Slash-commands, in help order -- the single source of truth for tab-completion
 # (#40). Keep in sync with `_dispatch_slash` and `_HELP`.
 _COMMANDS = (
-    "/system", "/model", "/models", "/auto", "/manual", "/compact", "/reset",
-    "/save", "/help", "/exit", "/quit",
+    "/system", "/model", "/models", "/auto", "/manual", "/compact", "/cost",
+    "/reset", "/save", "/help", "/exit", "/quit",
 )
 
 
@@ -236,12 +237,19 @@ def _do_turn(oai, openai, chat, text, messages, gen_kwargs, state, args) -> None
     the stream's final chunk.
     """
     budget = state.get("budget")
+    ledger = state.get("ledger")
     _compact.maybe_compact(
         oai, state["model"], messages, budget, gen_kwargs,
         on_compact=lambda b, a: print(
             f"(auto-compacted history: {b} -> {a} messages)", file=sys.stderr,
         ),
     )
+    # Spend gate (#66): refuse a new turn once the session cap is hit (the
+    # tool-loop gates mid-run; a streamed turn gates here).
+    if ledger is not None and ledger.over():
+        print(f"(max-spend reached: {ledger.summary()}; turn skipped)",
+              file=sys.stderr)
+        return
     mark = len(messages)
     messages.append({"role": "user", "content": text})
     try:
@@ -252,11 +260,14 @@ def _do_turn(oai, openai, chat, text, messages, gen_kwargs, state, args) -> None
                 yes=state["yes"],
                 json_out=False,
                 budget=budget,
+                ledger=ledger,
             )
         else:
             reply, usage = _stream_turn(oai, chat, state["model"], messages, gen_kwargs)
             if budget is not None:
                 budget.observe(usage)
+            if ledger is not None:
+                ledger.record(usage)
             messages.append({"role": "assistant", "content": reply})
     except KeyboardInterrupt:
         # Ctrl-C aborts just this turn -- roll it back and keep the session.
@@ -346,6 +357,15 @@ def _dispatch_slash(line, messages, state, args, models, oai=None, gen_kwargs=No
             )
         else:
             print("(nothing to compact)", file=sys.stderr)
+    elif cmd == "cost":
+        # Session spend so far (#66). The ledger exists only when the session is
+        # spend-capped; otherwise there's nothing to report.
+        led = state.get("ledger")
+        if led is None:
+            print("(no session cost tracking; start with --session-max-spend)",
+                  file=sys.stderr)
+        else:
+            print(led.summary(), file=sys.stderr)
     elif cmd == "save":
         target = rest or getattr(args, "resume", None)
         if not target:
@@ -432,6 +452,9 @@ def run(args, oai, openai, client, models, model, initial=None, *,
         # Auto-compaction (#48) is opt-in: `--auto-compact` or
         # `defaults.<cmd>.auto_compact` (it costs a summarization call).
         state["budget"] = _compact.budget_from_args(args)
+        # Spend cap (#66): `--max-spend` / `defaults.*.max_spend` meters the
+        # session's model calls (asset tools are gated separately).
+        state["ledger"] = _agent.ledger_from_args(args, models, model)
 
         if _rl is not None:
             _install_completer(_rl, models, stack)
