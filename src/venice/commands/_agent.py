@@ -318,9 +318,11 @@ _BUILTINS = [
     (
         "venice_model_details",
         "model_details_tool",
-        "Get one model's details -- pricing (cost), input context/prompt-length "
-        "limits (your input budget), and capabilities -- so you can budget input "
-        "and confirm a model fits before using it. Read-only; not spend-gated.",
+        "Get one model's details: pricing (cost), capabilities (text models: "
+        "supportsVision/supportsFunctionCalling/...), and constraints (image/media "
+        "models: aspectRatios, resolutions, qualities, promptCharacterLimit) -- plus "
+        "the full model_spec. Use it to budget input and confirm a model fits before "
+        "using it. Read-only; not spend-gated.",
         _MODEL_DETAILS_SCHEMA,
         False,
     ),
