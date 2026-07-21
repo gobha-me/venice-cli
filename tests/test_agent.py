@@ -194,5 +194,72 @@ class TestProgress(unittest.TestCase):
         self.assertIn("· t", err.getvalue())  # per-tool-call activity line
 
 
+class TestToolSection(unittest.TestCase):
+    def test_section_derivation(self):
+        self.assertEqual(_agent._tool_section("venice_image"), "image")
+        self.assertEqual(_agent._tool_section("venice_image_edit"), "image_edit")
+        self.assertEqual(_agent._tool_section("project_search"), "project_search")
+
+
+class TestConfigDefaults(unittest.TestCase):
+    """#58: defaults.<cmd>.* are layered UNDER a tool's model-supplied args."""
+
+    def _spy(self):
+        captured = {}
+
+        def image_tool(client, prompt=None, *, hide_watermark=None, steps=None,
+                       safe_mode=None, confirm=False, max_spend=None,
+                       output_dir=None, **kw):
+            captured.update(hide_watermark=hide_watermark, steps=steps,
+                            safe_mode=safe_mode)
+            captured.update(kw)
+            return {"status": "ok"}
+
+        return captured, image_tool
+
+    def _tool(self, spy, doc):
+        from venice.commands import _mcp
+        with mock.patch.object(_mcp, "image_tool", spy):
+            return _agent.builtin_tools(object(), config=doc,
+                                        only={"venice_image"})[0]
+
+    def test_injected_and_model_wins(self):
+        captured, spy = self._spy()
+        doc = {"defaults": {"image": {"hide_watermark": True, "steps": 40}}}
+        tool = self._tool(spy, doc)
+        tool.invoke({"prompt": "p"})                     # model set no preference
+        self.assertIs(captured["hide_watermark"], True)  # from config
+        self.assertEqual(captured["steps"], 40)
+        captured.clear()
+        tool.invoke({"prompt": "p", "hide_watermark": False, "steps": 5})
+        self.assertIs(captured["hide_watermark"], False)  # explicit model arg wins
+        self.assertEqual(captured["steps"], 5)
+
+    def test_no_config_no_injection(self):
+        captured, spy = self._spy()
+        tool = self._tool(spy, None)
+        tool.invoke({"prompt": "p"})
+        self.assertIsNone(captured["hide_watermark"])  # tool's own default applies
+        self.assertIsNone(captured["steps"])
+
+    def test_only_accepted_allowlisted_keys_inject(self):
+        # `preset` is config-backable for image (#57) but image_tool takes no such
+        # param -> must NOT be injected; the accepted key still is.
+        captured, spy = self._spy()
+        doc = {"defaults": {"image": {"preset": "foo", "safe_mode": False}}}
+        tool = self._tool(spy, doc)
+        tool.invoke({"prompt": "p"})
+        self.assertNotIn("preset", captured)
+        self.assertIs(captured["safe_mode"], False)
+
+    def test_string_config_value_is_coerced(self):
+        captured, spy = self._spy()
+        doc = {"defaults": {"image": {"hide_watermark": "true", "steps": "12"}}}
+        tool = self._tool(spy, doc)
+        tool.invoke({"prompt": "p"})
+        self.assertIs(captured["hide_watermark"], True)  # _as_bool
+        self.assertEqual(captured["steps"], 12)          # int
+
+
 if __name__ == "__main__":
     unittest.main()

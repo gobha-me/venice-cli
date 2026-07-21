@@ -24,6 +24,7 @@ and passes the combined list to :func:`run_loop`. Nothing in the loop changes.
 """
 from __future__ import annotations
 
+import inspect
 import itertools
 import json
 import sys
@@ -31,6 +32,7 @@ import threading
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional
 
+from .. import userconfig
 from . import _mcp
 from .models import MODEL_TYPES
 
@@ -354,12 +356,20 @@ def _clean(arguments) -> dict:
     return {k: v for k, v in arguments.items() if k not in _CONTROLLED}
 
 
+def _tool_section(name: str) -> str:
+    """Config section for a tool: `venice_image` -> `image` (matches userconfig
+    `_COMMAND_MAP` / the CLI command). Tools with no matching section (e.g.
+    `venice_models`, `project_search`) simply resolve nothing."""
+    return name[len("venice_"):] if name.startswith("venice_") else name
+
+
 def builtin_tools(
     client,
     *,
     max_spend: Optional[float] = None,
     output_dir: Optional[str] = None,
     only: Optional[set] = None,
+    config: Optional[dict] = None,
 ) -> List[Tool]:
     """Build the in-process venice tools, bound to `client`.
 
@@ -368,23 +378,56 @@ def builtin_tools(
     unknown name raises ValueError so the caller can exit 2). With `only=None` the
     set is exactly `_BUILTINS` (chat's default); passing `only=` also makes the
     `_CODE_ASSET_BUILTINS` extras (e.g. `venice_image_edit`) selectable.
+
+    `config` is a userconfig doc (issue #58): `defaults.<section>.*` values are
+    layered UNDER the model's tool arguments, so an explicit tool arg still wins
+    (precedence: model arg > config default > tool hardcoded default). Only keys
+    in `userconfig._COMMAND_MAP[section]` (the #57 allow-list) that the tool
+    function actually accepts are injected.
     """
 
-    def _make_paid(impl):
+    def _config_defaults(section, impl) -> dict:
+        if config is None:
+            return {}
+        section_map = userconfig._COMMAND_MAP.get(section)
+        if not section_map:
+            return {}
+        try:
+            params = set(inspect.signature(impl).parameters)
+        except (TypeError, ValueError):
+            return {}
+        out: dict = {}
+        for key, (dest, coerce) in section_map.items():
+            if dest not in params:
+                continue  # tool doesn't take this preference
+            raw = userconfig.resolve_default(section, key, config)
+            if raw is None:
+                continue
+            try:
+                out[dest] = coerce(raw)
+            except (TypeError, ValueError):
+                pass  # a bad config value shouldn't break tool building
+        return out
+
+    def _make_paid(impl, section):
+        defaults = _config_defaults(section, impl)
+
         def invoke(arguments, *, confirm: bool = False):
             return impl(
                 client,
                 confirm=confirm,
                 max_spend=max_spend,
                 output_dir=output_dir,
-                **_clean(arguments),
+                **{**defaults, **_clean(arguments)},
             )
 
         return invoke
 
-    def _make_free(impl):
+    def _make_free(impl, section):
+        defaults = _config_defaults(section, impl)
+
         def invoke(arguments, *, confirm: bool = False):
-            return impl(client, **_clean(arguments))
+            return impl(client, **{**defaults, **_clean(arguments)})
 
         return invoke
 
@@ -395,9 +438,9 @@ def builtin_tools(
             description=desc,
             parameters=schema,
             invoke=(
-                _make_paid(getattr(_mcp, impl_name))
+                _make_paid(getattr(_mcp, impl_name), _tool_section(name))
                 if paid
-                else _make_free(getattr(_mcp, impl_name))
+                else _make_free(getattr(_mcp, impl_name), _tool_section(name))
             ),
             paid=paid,
         )
