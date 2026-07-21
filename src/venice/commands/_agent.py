@@ -34,6 +34,7 @@ from typing import Callable, Dict, List, Optional
 
 from .. import userconfig
 from . import _mcp
+from . import _models
 from . import _compact
 from .models import MODEL_TYPES
 
@@ -328,6 +329,22 @@ _MODEL_DETAILS_SCHEMA = _obj(
     required=["model"],
 )
 
+_VISION_SCHEMA = _obj(
+    {
+        "input_path": _p("string", "Path to a local image file to look at."),
+        "image_url": _p("string", "URL of an image (instead of input_path)."),
+        "prompt": _p(
+            "string",
+            "What to ask about the image (default: describe it in detail).",
+        ),
+        "model": _p(
+            "string",
+            "A vision-capable text model id (default: auto-picked from the catalog).",
+        ),
+        "max_tokens": _p("integer"),
+    },
+)
+
 # Schema for a tool folded in ONLY via `only=` (e.g. `venice code --assets`), so it
 # is not part of chat's default advertised set. Curated subset of
 # `_mcp.image_edit_tool`; `confirm`/`max_spend`/`output_dir` omitted (loop-injected).
@@ -448,6 +465,16 @@ _BUILTINS = [
         "the full model_spec. Use it to budget input and confirm a model fits before "
         "using it. Read-only; not spend-gated.",
         _MODEL_DETAILS_SCHEMA,
+        False,
+    ),
+    (
+        "venice_vision",
+        "vision_tool",
+        "Look at an image (a local input_path OR an image_url) with a vision-capable "
+        "Venice text model and return what it sees as text. Optional prompt directs "
+        "the question (default: a detailed description). Auto-picks a supportsVision "
+        "model when model is omitted (see venice_model_details). Not spend-gated.",
+        _VISION_SCHEMA,
         False,
     ),
     (
@@ -613,19 +640,7 @@ def supports_function_calling(models, model_id) -> Optional[bool]:
     None when it can't be determined (no catalog, model absent, or the field is
     missing) -- the caller then attempts the loop with a soft note.
     """
-    if not models:
-        return None
-    for m in models:
-        if not isinstance(m, dict) or m.get("id") != model_id:
-            continue
-        spec = m.get("model_spec") or {}
-        caps = spec.get("capabilities")
-        if not isinstance(caps, dict):
-            return None
-        norm = {str(k).lower().replace("_", ""): v for k, v in caps.items()}
-        val = norm.get("supportsfunctioncalling")
-        return bool(val) if val is not None else None
-    return None
+    return _models.supports_capability(models, model_id, "supportsFunctionCalling")
 
 
 # --------------------------------------------------------------------------- #
