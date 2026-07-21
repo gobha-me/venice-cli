@@ -610,5 +610,49 @@ class TestHideWatermarkConfig(unittest.TestCase):
         self.assertTrue(args.hide_watermark)  # _as_bool coerces "true"
 
 
+class TestSafeModeConfig(unittest.TestCase):
+    """`--safe-mode` is tri-state + config-backable (issue #57 Class B)."""
+
+    def _parse(self, *argv):
+        from venice.cli import build_parser
+        return build_parser().parse_args(["image", "p", *argv])
+
+    def test_flag_is_tristate(self):
+        self.assertIsNone(self._parse().safe_mode)              # unset
+        self.assertTrue(self._parse("--safe-mode").safe_mode)
+        self.assertFalse(self._parse("--no-safe-mode").safe_mode)
+
+    def test_body_none_stays_safe(self):
+        from venice.commands import image
+        body = image._build_body("p", _build_args(safe_mode=None))
+        self.assertEqual(body["safe_mode"], True)  # None -> stay safe
+
+    def test_config_default_disables_safe_mode(self):
+        from venice.commands import image
+        from venice import userconfig
+        doc = {"version": 1, "mcpServers": {},
+               "defaults": {"image": {"safe_mode": False}}}
+        args = self._parse()  # nothing on the CLI
+        userconfig.apply_defaults(args, "image", doc)
+        self.assertFalse(args.safe_mode)
+        self.assertEqual(image._build_body("p", args)["safe_mode"], False)
+
+    def test_cli_safe_mode_overrides_config(self):
+        from venice import userconfig
+        doc = {"version": 1, "mcpServers": {},
+               "defaults": {"image": {"safe_mode": False}}}
+        args = self._parse("--safe-mode")  # explicit on wins
+        userconfig.apply_defaults(args, "image", doc)
+        self.assertTrue(args.safe_mode)
+
+    def test_config_string_value_coerced(self):
+        from venice import userconfig
+        doc = {"version": 1, "mcpServers": {},
+               "defaults": {"image": {"safe_mode": "false"}}}
+        args = self._parse()
+        userconfig.apply_defaults(args, "image", doc)
+        self.assertFalse(args.safe_mode)  # _as_bool coerces "false"
+
+
 if __name__ == "__main__":
     unittest.main()

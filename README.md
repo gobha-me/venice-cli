@@ -994,7 +994,8 @@ safety), it should be settable in config." Currently config-backable:
 
 - `defaults.image.*` — `width`, `height`, `aspect_ratio`, `resolution`,
   `style_prefix`, `preset`, `preset_file`, `negative_prompt`, `cfg_scale`,
-  `steps`, `style_preset`, `hide_watermark`
+  `steps`, `style_preset`, `hide_watermark`, `safe_mode` (tri-state
+  `--safe-mode`/`--no-safe-mode`; set `false` to skip Venice's safety blur)
 - `defaults.image_edit.*` — `model`, `aspect_ratio`, `resolution`, `output_format`
 - `defaults.tts.*` — `voice`, `speed`, `play`
 - `defaults.sfx.*` — `play`

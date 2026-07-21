@@ -244,9 +244,10 @@ _COMMAND_MAP = {
         "exec_timeout": ("exec_timeout", int),
     },
     "image": {
-        # `--hide-watermark` is tri-state (default None) so this default can win;
-        # an explicit --hide-watermark/--no-hide-watermark on the CLI still wins.
+        # `--hide-watermark` / `--safe-mode` are tri-state (default None) so these
+        # defaults can win; an explicit CLI flag still wins over config.
         "hide_watermark": ("hide_watermark", _as_bool),
+        "safe_mode": ("safe_mode", _as_bool),
         # Sizing / style / passthrough knobs (all default None on the CLI).
         "width": ("width", int),
         "height": ("height", int),
