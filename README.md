@@ -530,6 +530,9 @@ calls for following turns), `/compact [N]` (summarize older history into one
 message, keeping the last `N` turns verbatim), `/reset` (clear history, keep
 the system prompt),
 `/save [file]` (write the transcript JSON; defaults to the `--resume` file),
+`/paste` (compose a multi-line message a line at a time, ending with `/end` —
+`/cancel` aborts), `/edit [text]` (compose your next message in `$EDITOR`, like
+`git commit`, optionally pre-seeded with `text`),
 `/help`, and `/exit` (or `/quit`, or Ctrl-D). Ctrl-C aborts the current turn
 without ending the session. Tab completes slash-commands (and model ids after
 `/model `). At a per-tool confirmation prompt, `a` accepts that call **and**

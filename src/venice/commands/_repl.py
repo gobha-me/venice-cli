@@ -25,7 +25,11 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
+import shlex
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import List, Optional
 
@@ -33,6 +37,7 @@ from . import _agent, _compact, _models
 
 
 _PROMPT = "you> "
+_CONT_PROMPT = "... "  # continuation prompt for /paste block mode (#65)
 
 _HELP = """\
 Commands:
@@ -45,15 +50,18 @@ Commands:
   /cost            show this session's estimated spend (needs --session-max-spend to cap)
   /reset           clear the conversation (keeps the system prompt)
   /save [file]     write the transcript JSON (default: the --resume file)
+  /paste           compose a multi-line message; end with /end (/cancel aborts)
+  /edit [text]     compose your next message in $EDITOR (like git commit)
   /help            show this help
   /exit, /quit     leave the REPL
 Anything else is sent to the model as your next message."""
 
 # Slash-commands, in help order -- the single source of truth for tab-completion
-# (#40). Keep in sync with `_dispatch_slash` and `_HELP`.
+# (#40). Keep in sync with `_dispatch_slash` and `_HELP`. (/end and /cancel are
+# only meaningful inside a /paste block, so they stay out of top-level completion.)
 _COMMANDS = (
     "/system", "/model", "/models", "/auto", "/manual", "/compact", "/cost",
-    "/reset", "/save", "/help", "/exit", "/quit",
+    "/reset", "/save", "/paste", "/edit", "/help", "/exit", "/quit",
 )
 
 
@@ -209,6 +217,66 @@ def _install_completer(rl, models, stack) -> None:
         rl.parse_and_bind("bind ^I rl_complete")
     else:
         rl.parse_and_bind("tab: complete")
+
+
+# --------------------------------------------------------------------------- #
+# Multi-line composition (#65)
+# --------------------------------------------------------------------------- #
+def _read_paste_block() -> Optional[str]:
+    """Read a multi-line block for `/paste`. Accumulate raw lines (formatting and
+    indentation preserved) until a line that is `/end` (send) or `/cancel` (abort);
+    EOF (^D) finishes with what's accumulated, Ctrl-C aborts. Returns the joined
+    text, or None when there's nothing to send (cancelled or empty)."""
+    lines: List[str] = []
+    while True:
+        try:
+            line = input(_CONT_PROMPT)
+        except EOFError:
+            print(file=sys.stderr)  # newline after ^D, then send what we have
+            break
+        except KeyboardInterrupt:
+            print("\n(paste cancelled)", file=sys.stderr)
+            return None
+        stripped = line.strip()
+        if stripped == "/end":
+            break
+        if stripped == "/cancel":
+            print("(paste cancelled)", file=sys.stderr)
+            return None
+        lines.append(line)
+    text = "\n".join(lines).strip()
+    return text or None
+
+
+def _compose_in_editor(initial: str = "") -> Optional[str]:
+    """Compose a turn in `$EDITOR` (like `git commit`). Opens the user's editor on
+    a temp file (optionally pre-seeded with `initial`), reads the saved buffer, and
+    returns it. Returns None when the buffer is empty, the editor exits non-zero
+    (treated as an abort), or no editor is available."""
+    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
+    fd, path = tempfile.mkstemp(suffix=".md", prefix="venice-edit-")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            if initial:
+                fh.write(initial)
+        try:
+            rc = subprocess.call(shlex.split(editor) + [path])
+        except (FileNotFoundError, OSError) as e:
+            print(f"(could not launch editor {editor!r}: {e}; set $EDITOR)",
+                  file=sys.stderr)
+            return None
+        if rc != 0:
+            print(f"(editor exited {rc}; nothing sent)", file=sys.stderr)
+            return None
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read().strip()
+        if not text:
+            print("(empty; nothing sent)", file=sys.stderr)
+            return None
+        return text
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(path)
 
 
 # --------------------------------------------------------------------------- #
@@ -479,6 +547,17 @@ def run(args, oai, openai, client, models, model, initial=None, *,
             if not line:
                 continue
             if line.startswith("/"):
+                # /paste and /edit compose a multi-line turn, then submit it like a
+                # normal message. They're handled here (not in _dispatch_slash, which
+                # lacks `openai`/`chat`) so they can call _do_turn directly. (#65)
+                cmd, _, rest = line[1:].partition(" ")
+                if cmd.lower() in ("paste", "edit"):
+                    text = (_read_paste_block() if cmd.lower() == "paste"
+                            else _compose_in_editor(rest.strip()))
+                    if text:
+                        _do_turn(oai, openai, chat, text, messages, gen_kwargs,
+                                 state, args)
+                    continue
                 if _dispatch_slash(
                     line, messages, state, args, models, oai=oai, gen_kwargs=gen_kwargs
                 ) == "exit":
