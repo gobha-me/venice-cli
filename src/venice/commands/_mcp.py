@@ -790,6 +790,8 @@ def model_details_tool(client, *, model: str) -> dict:
     `capabilities` (supportsVision/supportsFunctionCalling/... ) is populated only
     for text/LLM models. Image/media models expose their metadata under
     `constraints` (aspectRatios, resolutions, qualities, promptCharacterLimit).
+    `voices` lists the voice ids available for TTS models (null otherwise), so the
+    agent can pick a valid `voice` for venice_tts without guessing.
     The full `model_spec` is returned too so nothing is dropped. Read-only; not
     spend-gated. May scan the catalog by type to locate the id.
     """
@@ -820,6 +822,8 @@ def model_details_tool(client, *, model: str) -> dict:
             else spec.get("promptCharacterLimit")
         ),
         "traits": spec.get("traits"),
+        # TTS voice-id list (flat list of strings); null for non-voice models.
+        "voices": spec.get("voices"),
         # Full spec so nothing curated-away is lost (#59 / kimi-k3 feedback).
         "model_spec": spec,
     }

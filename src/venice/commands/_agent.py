@@ -109,6 +109,8 @@ _IMAGE_SCHEMA = _obj(
         "cfg_scale": _p("number"),
         "steps": _p("integer"),
         "style_preset": _p("string"),
+        "safe_mode": _p("boolean", "Blur adult/NSFW content. Defaults to on; set false to disable."),
+        "hide_watermark": _p("boolean", "Omit the Venice watermark. Defaults to off; set true to hide it."),
     },
     required=["prompt"],
 )
@@ -319,8 +321,9 @@ _BUILTINS = [
         "venice_model_details",
         "model_details_tool",
         "Get one model's details: pricing (cost), capabilities (text models: "
-        "supportsVision/supportsFunctionCalling/...), and constraints (image/media "
-        "models: aspectRatios, resolutions, qualities, promptCharacterLimit) -- plus "
+        "supportsVision/supportsFunctionCalling/...), constraints (image/media "
+        "models: aspectRatios, resolutions, qualities, promptCharacterLimit), and "
+        "voices (TTS models: the valid voice ids for venice_tts) -- plus "
         "the full model_spec. Use it to budget input and confirm a model fits before "
         "using it. Read-only; not spend-gated.",
         _MODEL_DETAILS_SCHEMA,

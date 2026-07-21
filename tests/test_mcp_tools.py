@@ -570,6 +570,19 @@ class TestModelDetailsTool(_ToolTest):
         out = self._details({"promptCharacterLimit": 800, "constraints": {}})
         self.assertEqual(out["prompt_character_limit"], 800)
 
+    def test_tts_model_surfaces_voices(self):
+        # #64: TTS models expose model_spec.voices (flat list of ids); surface it so
+        # the agent can pick a valid voice for venice_tts without guessing.
+        spec = {"name": "Kokoro", "pricing": {"input": {"usd": 3.5}},
+                "voices": ["Achernar", "Aiden", "Alex"]}
+        out = self._details(spec, mtype="tts")
+        self.assertEqual(out["voices"], ["Achernar", "Aiden", "Alex"])
+
+    def test_non_voice_model_voices_is_none(self):
+        # image/text models have no voices -> null, like capabilities/constraints.
+        out = self._details({"name": "SD35", "constraints": {}}, mtype="image")
+        self.assertIsNone(out["voices"])
+
     def test_unknown_model_errors(self):
         from venice.commands.models import MODEL_TYPES
         empty = json.dumps({"data": []}).encode()

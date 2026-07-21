@@ -260,6 +260,16 @@ class TestConfigDefaults(unittest.TestCase):
         self.assertIs(captured["hide_watermark"], True)  # _as_bool
         self.assertEqual(captured["steps"], 12)          # int
 
+    def test_safety_flags_flow_through_and_model_wins(self):
+        # #61: safe_mode/hide_watermark are now on _IMAGE_SCHEMA, so a model-supplied
+        # value must reach image_tool and override a conflicting config default.
+        captured, spy = self._spy()
+        doc = {"defaults": {"image": {"safe_mode": True, "hide_watermark": False}}}
+        tool = self._tool(spy, doc)
+        tool.invoke({"prompt": "p", "safe_mode": False, "hide_watermark": True})
+        self.assertIs(captured["safe_mode"], False)      # explicit model arg wins
+        self.assertIs(captured["hide_watermark"], True)
+
 
 if __name__ == "__main__":
     unittest.main()

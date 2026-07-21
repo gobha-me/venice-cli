@@ -764,6 +764,19 @@ class TestBuiltinToolsRegistry(unittest.TestCase):
             self.assertNotIn(banned, props)
         self.assertEqual(_agent._IMAGE_EDIT_SCHEMA.get("required"), ["prompt"])
 
+    def test_image_schema_exposes_safety_flags(self):
+        # #61: the agent must be able to toggle safe_mode/hide_watermark per call
+        # (parity with venice_image_edit's no_safe_mode).
+        from venice.commands import _agent
+        props = _agent._IMAGE_SCHEMA["properties"]
+        self.assertIn("safe_mode", props)
+        self.assertIn("hide_watermark", props)
+        self.assertEqual(props["safe_mode"]["type"], "boolean")
+        self.assertEqual(props["hide_watermark"]["type"], "boolean")
+        for banned in ("confirm", "max_spend", "output_dir"):
+            self.assertNotIn(banned, props)
+        self.assertEqual(_agent._IMAGE_SCHEMA.get("required"), ["prompt"])
+
     def test_video_schema_excludes_controlled(self):
         from venice.commands import _agent
         props = _agent._VIDEO_SCHEMA["properties"]
