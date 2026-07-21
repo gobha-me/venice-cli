@@ -246,6 +246,15 @@ class TestCodeFactory(unittest.TestCase):
         self.assertNotIn("venice_chat", names)   # excluded by design
         self.assertIn("venice_video", names)
 
+    def test_models_tool_present_with_client(self):
+        by = {t.name: t for t in _code.code_tools("/tmp", client=object())}
+        self.assertIn("venice_models", by)   # free model-catalog lookup for the agent
+        self.assertFalse(by["venice_models"].paid)   # read-only, not spend-gated
+
+    def test_models_tool_absent_without_client(self):
+        names = {t.name for t in _code.code_tools("/tmp")}
+        self.assertNotIn("venice_models", names)   # needs a client for the /models GET
+
     def test_asset_tools_are_paid(self):
         by = {t.name: t for t in _code.code_tools("/tmp", client=object(),
                                                   assets=True)}

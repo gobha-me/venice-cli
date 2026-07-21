@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional
 
 from . import _mcp
+from .models import MODEL_TYPES
 
 
 # --------------------------------------------------------------------------- #
@@ -182,6 +183,19 @@ _SEARCH_SCHEMA = _obj(
     required=["query"],
 )
 
+_MODELS_SCHEMA = _obj(
+    {
+        "type": {
+            "type": "string",
+            "enum": ["all", *MODEL_TYPES],
+            "description": "Which catalog type to list model ids for "
+            "(text, code, image, video, music, tts, embedding, upscale), "
+            "or 'all' for a {type: [ids]} map.",
+        },
+    },
+    required=["type"],
+)
+
 # Schema for a tool folded in ONLY via `only=` (e.g. `venice code --assets`), so it
 # is not part of chat's default advertised set. Curated subset of
 # `_mcp.image_edit_tool`; `confirm`/`max_spend`/`output_dir` omitted (loop-injected).
@@ -280,6 +294,16 @@ _BUILTINS = [
         "Delegate a one-shot sub-completion to a Venice text model (optionally a "
         "different model or character) and return its reply text. Not spend-gated.",
         _CHAT_SCHEMA,
+        False,
+    ),
+    (
+        "venice_models",
+        "models_tool",
+        "List available Venice model ids for a catalog type (text/code/image/video/"
+        "music/tts/embedding/upscale, or 'all') via the free /models catalog. Use it "
+        "to choose a valid `model` for the other venice_* tools instead of guessing. "
+        "Read-only; not spend-gated.",
+        _MODELS_SCHEMA,
         False,
     ),
     (

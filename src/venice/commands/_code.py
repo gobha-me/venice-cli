@@ -527,6 +527,11 @@ def code_tools(
             _SEARCH_SCHEMA, search_invoke, paid=False,
         ))
 
+    # A free model-catalog lookup so the agent can pick a valid `model` for the
+    # asset tools instead of guessing (needs a client for the /models GET).
+    if client is not None:
+        tools.extend(_agent.builtin_tools(client, only={"venice_models"}))
+
     if assets and client is not None:
         asset_dir = os.environ.get("VENICE_MCP_OUTPUT_DIR") or root
         tools.extend(_agent.builtin_tools(
