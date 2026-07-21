@@ -248,11 +248,19 @@ _TTS_SCHEMA = _obj(
     required=["text"],
 )
 
+_BACKGROUND_PARAM = _p(
+    "boolean",
+    "Queue the render and return a job handle immediately instead of blocking "
+    "(default false). When true, poll venice_job_status and fetch the file with "
+    "venice_job_result using the returned queue_id, type, and model.",
+)
+
 _SFX_SCHEMA = _obj(
     {
         "prompt": _p("string", "What the sound effect should be."),
         "model": _p("string"),
         "duration": _p("integer", "Length in seconds."),
+        "background": _BACKGROUND_PARAM,
     },
     required=["prompt"],
 )
@@ -265,8 +273,35 @@ _MUSIC_SCHEMA = _obj(
         "instrumental": _p("boolean", "Force an instrumental (no vocals)."),
         "lyrics": _p("string"),
         "speed": _p("number"),
+        "background": _BACKGROUND_PARAM,
     },
     required=["prompt"],
+)
+
+_JOB_STATUS_SCHEMA = _obj(
+    {
+        "queue_id": _p("string", "The queue_id from a background venice_sfx/music/video call."),
+        "type": _p("string", "sfx, music, or video -- the tool that started the job."),
+        "model": _p("string", "The model id from the job handle."),
+        "download_url": _p("string", "The download_url from the job handle (VPS video only)."),
+    },
+    required=["queue_id", "type", "model"],
+)
+
+_JOB_RESULT_SCHEMA = _obj(
+    {
+        "queue_id": _p("string", "The queue_id from a background venice_sfx/music/video call."),
+        "type": _p("string", "sfx, music, or video -- the tool that started the job."),
+        "model": _p("string", "The model id from the job handle."),
+        "download_url": _p("string", "The download_url from the job handle (VPS video only)."),
+        "max_wait": _p(
+            "number",
+            "Seconds to block-poll for the file (default 0 = one non-blocking "
+            "attempt; returns status 'processing' if not ready yet). Capped at the "
+            "render's server-side limit (300s audio, 900s video).",
+        ),
+    },
+    required=["queue_id", "type", "model"],
 )
 
 _UPSCALE_SCHEMA = _obj(
@@ -378,6 +413,7 @@ _VIDEO_SCHEMA = _obj(
         "no_audio": _p("boolean", "Generate silent video (no soundtrack)."),
         "image_url": _p("string", "URL of a start/reference image (image-to-video)."),
         "end_image_url": _p("string", "URL of an end frame to interpolate toward."),
+        "background": _BACKGROUND_PARAM,
     },
     required=["prompt"],
 )
@@ -407,7 +443,8 @@ _BUILTINS = [
         "venice_sfx",
         "sfx_tool",
         "Generate a short sound effect via Venice's async audio queue (blocks with a "
-        "capped wait). Writes an audio file and returns its path. Paid.",
+        "capped wait). Writes an audio file and returns its path. Pass background=true "
+        "to queue and return immediately, then fetch via venice_job_result. Paid.",
         _SFX_SCHEMA,
         True,
     ),
@@ -415,7 +452,9 @@ _BUILTINS = [
         "venice_music",
         "music_tool",
         "Generate long-form music/ambience via Venice's async audio queue (blocks "
-        "with a capped wait). Writes an audio file and returns its path. Paid.",
+        "with a capped wait). Writes an audio file and returns its path. Pass "
+        "background=true to queue and return immediately, then fetch via "
+        "venice_job_result. Paid.",
         _MUSIC_SCHEMA,
         True,
     ),
@@ -488,6 +527,27 @@ _BUILTINS = [
         _SEARCH_SCHEMA,
         False,
     ),
+    (
+        "venice_job_status",
+        "job_status_tool",
+        "Peek at a backgrounded media render started with background=true on "
+        "venice_sfx/venice_music/venice_video. Pass back the job handle's queue_id, "
+        "type (sfx/music/video), and model. Returns processing/done/failed/not_found. "
+        "Read-only, non-blocking; not spend-gated.",
+        _JOB_STATUS_SCHEMA,
+        False,
+    ),
+    (
+        "venice_job_result",
+        "job_result_tool",
+        "Fetch a backgrounded media render's file once ready (started with "
+        "background=true). Pass back the job handle's queue_id, type, model (and "
+        "download_url for VPS video). Writes the file and returns its path, or "
+        "status 'processing' if not ready yet -- retry later. Free (charged at "
+        "queue time); not spend-gated.",
+        _JOB_RESULT_SCHEMA,
+        False,
+    ),
 ]
 
 # Extra paid tools NOT advertised by chat's default set. Folded in only when a
@@ -509,7 +569,9 @@ _CODE_ASSET_BUILTINS = [
         "video_tool",
         "Generate a short video via Venice's async video queue (blocks with a capped "
         "wait; can be slow). Optionally image-to-video from image_url. Writes an .mp4 "
-        "and returns its path. Dynamic pricing, so it always needs confirmation.",
+        "and returns its path. Pass background=true to queue and return immediately, "
+        "then fetch via venice_job_result. Dynamic pricing, so it always needs "
+        "confirmation.",
         _VIDEO_SCHEMA,
         True,
     ),

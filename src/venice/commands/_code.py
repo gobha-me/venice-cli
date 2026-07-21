@@ -664,11 +664,15 @@ def code_tools(
     # Free model-catalog lookups so the agent can pick a valid `model` for the
     # asset tools (and see cost/context limits) instead of guessing, plus
     # venice_vision so it can see images (screenshots/mockups/its own
-    # generations) instead of working blind (need a client for the API calls).
+    # generations) instead of working blind, plus the async job tools so it can
+    # poll/fetch a background=true media render (need a client for the API calls).
     if client is not None:
         tools.extend(_agent.builtin_tools(
             client,
-            only={"venice_models", "venice_model_details", "venice_vision"},
+            only={
+                "venice_models", "venice_model_details", "venice_vision",
+                "venice_job_status", "venice_job_result",
+            },
             config=config))
 
     if assets and client is not None:

@@ -421,6 +421,32 @@ class TestToolSection(unittest.TestCase):
         self.assertEqual(_agent._tool_section("project_search"), "project_search")
 
 
+class TestAsyncJobSchemas(unittest.TestCase):
+    """#62: background param on media schemas + the two async job-tool schemas."""
+
+    def test_background_in_media_schemas(self):
+        for schema in (_agent._SFX_SCHEMA, _agent._MUSIC_SCHEMA, _agent._VIDEO_SCHEMA):
+            props = schema["properties"]
+            self.assertIn("background", props)
+            self.assertEqual(props["background"]["type"], "boolean")
+
+    def test_job_schemas_require_handle_fields_and_hide_controls(self):
+        for schema in (_agent._JOB_STATUS_SCHEMA, _agent._JOB_RESULT_SCHEMA):
+            self.assertEqual(schema.get("required"), ["queue_id", "type", "model"])
+            props = schema["properties"]
+            for banned in ("confirm", "max_spend", "output_dir"):
+                self.assertNotIn(banned, props)
+        # only job_result exposes max_wait (block-poll seconds)
+        self.assertIn("max_wait", _agent._JOB_RESULT_SCHEMA["properties"])
+        self.assertNotIn("max_wait", _agent._JOB_STATUS_SCHEMA["properties"])
+
+    def test_job_tools_are_free(self):
+        by = {t.name: t for t in _agent.builtin_tools(
+            object(), only={"venice_job_status", "venice_job_result"})}
+        self.assertFalse(by["venice_job_status"].paid)
+        self.assertFalse(by["venice_job_result"].paid)
+
+
 class TestConfigDefaults(unittest.TestCase):
     """#58: defaults.<cmd>.* are layered UNDER a tool's model-supplied args."""
 

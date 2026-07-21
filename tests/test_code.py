@@ -342,15 +342,21 @@ class TestCodeFactory(unittest.TestCase):
         self.assertIn("venice_models", by)   # free model-catalog lookup for the agent
         self.assertIn("venice_model_details", by)   # cost/context-limit lookup
         self.assertIn("venice_vision", by)   # the agent's eyes (#60)
+        self.assertIn("venice_job_status", by)   # #62 async render poll
+        self.assertIn("venice_job_result", by)   # #62 async render fetch
         self.assertFalse(by["venice_models"].paid)   # read-only, not spend-gated
         self.assertFalse(by["venice_model_details"].paid)
         self.assertFalse(by["venice_vision"].paid)
+        self.assertFalse(by["venice_job_status"].paid)   # charged at queue time
+        self.assertFalse(by["venice_job_result"].paid)
 
     def test_models_tool_absent_without_client(self):
         names = {t.name for t in _code.code_tools("/tmp")}
         self.assertNotIn("venice_models", names)   # needs a client for the /models GET
         self.assertNotIn("venice_model_details", names)
         self.assertNotIn("venice_vision", names)
+        self.assertNotIn("venice_job_status", names)
+        self.assertNotIn("venice_job_result", names)
 
     def test_asset_tools_are_paid(self):
         by = {t.name: t for t in _code.code_tools("/tmp", client=object(),
