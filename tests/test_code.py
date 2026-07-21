@@ -174,6 +174,97 @@ class TestCodeTools(unittest.TestCase):
         self.assertIn("not unique", self.tools["edit_file"].invoke(
             {"path": "e.py", "old": "x", "new": "y"})["message"])
 
+    # --- apply_patch (#63) ---
+    def test_apply_patch_gate_then_confirm(self):
+        self._write("a.py", "x = 1\n")
+        gate = self.tools["apply_patch"].invoke(
+            {"patches": [{"path": "a.py", "edits": [{"old": "1", "new": "2"}]}]})
+        self.assertEqual(gate["status"], "confirmation_required")
+        self.assertEqual(Path(self.root, "a.py").read_text(), "x = 1\n")  # untouched
+        ok = self.tools["apply_patch"].invoke(
+            {"patches": [{"path": "a.py", "edits": [{"old": "1", "new": "2"}]}]},
+            confirm=True)
+        self.assertEqual(ok["status"], "ok")
+        self.assertEqual(ok["total_edits"], 1)
+        self.assertEqual(Path(self.root, "a.py").read_text(), "x = 2\n")
+
+    def test_apply_patch_multi_hunk_in_order(self):
+        self._write("a.py", "foo\nbar\nbaz\n")
+        ok = self.tools["apply_patch"].invoke({"patches": [
+            {"path": "a.py", "edits": [
+                {"old": "foo", "new": "FOO"},
+                {"old": "baz", "new": "BAZ"},
+            ]}]}, confirm=True)
+        self.assertEqual(ok["status"], "ok")
+        self.assertEqual(Path(self.root, "a.py").read_text(), "FOO\nbar\nBAZ\n")
+
+    def test_apply_patch_occurrence_resolves_non_unique(self):
+        self._write("a.py", "x\nx\nx\n")
+        ok = self.tools["apply_patch"].invoke({"patches": [
+            {"path": "a.py", "edits": [{"old": "x", "new": "MID", "occurrence": 2}]}]},
+            confirm=True)
+        self.assertEqual(ok["status"], "ok")
+        self.assertEqual(Path(self.root, "a.py").read_text(), "x\nMID\nx\n")
+
+    def test_apply_patch_non_unique_without_occurrence_errors(self):
+        self._write("a.py", "x\nx\n")
+        r = self.tools["apply_patch"].invoke({"patches": [
+            {"path": "a.py", "edits": [{"old": "x", "new": "y"}]}]}, confirm=True)
+        self.assertEqual(r["status"], "error")
+        self.assertIn("not unique", r["message"])
+        self.assertIn("occurrence", r["message"])
+        self.assertEqual(Path(self.root, "a.py").read_text(), "x\nx\n")  # unchanged
+
+    def test_apply_patch_atomic_per_file_on_failure(self):
+        # Second hunk fails -> the whole file is left untouched (no partial edit).
+        self._write("a.py", "keep\n")
+        r = self.tools["apply_patch"].invoke({"patches": [
+            {"path": "a.py", "edits": [
+                {"old": "keep", "new": "CHANGED"},
+                {"old": "MISSING", "new": "y"},
+            ]}]}, confirm=True)
+        self.assertEqual(r["status"], "error")
+        self.assertIn("not found", r["message"])
+        self.assertEqual(Path(self.root, "a.py").read_text(), "keep\n")
+
+    def test_apply_patch_multiple_files(self):
+        self._write("a.py", "a1\n")
+        self._write("b.py", "b1\n")
+        ok = self.tools["apply_patch"].invoke({"patches": [
+            {"path": "a.py", "edits": [{"old": "a1", "new": "a2"}]},
+            {"path": "b.py", "edits": [{"old": "b1", "new": "b2"}]},
+        ]}, confirm=True)
+        self.assertEqual(ok["status"], "ok")
+        self.assertEqual(ok["total_edits"], 2)
+        self.assertEqual(len(ok["files"]), 2)
+        self.assertEqual(Path(self.root, "a.py").read_text(), "a2\n")
+        self.assertEqual(Path(self.root, "b.py").read_text(), "b2\n")
+
+    def test_apply_patch_sandbox_and_shape_errors(self):
+        r = self.tools["apply_patch"].invoke({"patches": [
+            {"path": "../escape.py", "edits": [{"old": "a", "new": "b"}]}]},
+            confirm=True)
+        self.assertEqual(r["status"], "error")
+        self.assertIn("escapes", r["message"])
+        self.assertEqual(self.tools["apply_patch"].invoke(
+            {"patches": []})["status"], "error")
+        self.assertEqual(self.tools["apply_patch"].invoke(
+            {"patches": [{"path": "a.py", "edits": []}]})["status"], "error")
+
+    def test_apply_patch_occurrence_out_of_range(self):
+        self._write("a.py", "x\nx\n")
+        r = self.tools["apply_patch"].invoke({"patches": [
+            {"path": "a.py", "edits": [{"old": "x", "new": "y", "occurrence": 5}]}]},
+            confirm=True)
+        self.assertEqual(r["status"], "error")
+        self.assertIn("out of range", r["message"])
+
+    def test_apply_patch_missing_file(self):
+        r = self.tools["apply_patch"].invoke({"patches": [
+            {"path": "nope.py", "edits": [{"old": "a", "new": "b"}]}]}, confirm=True)
+        self.assertEqual(r["status"], "error")
+        self.assertIn("no such file", r["message"])
+
     # --- run ---
     def test_run_gate_then_exec_cwd_and_scrub(self):
         gate = self.tools["run"].invoke({"command": "echo hi"})

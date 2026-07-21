@@ -286,6 +286,101 @@ def edit_file(root: str, path, old, new, *, confirm: bool = False) -> dict:
     return _ok(path=rel, action="edited")
 
 
+def _apply_one_hunk(text: str, hunk: dict, index: int):
+    """Apply one {old,new[,occurrence]} hunk to `text`.
+
+    Returns (new_text, error_message). `occurrence` (1-based) picks which match
+    to replace when `old` is not unique; without it, a non-unique `old` is an
+    error (same rule as edit_file). Errors name the hunk index so the model can
+    retry surgically.
+    """
+    old = hunk.get("old")
+    new = hunk.get("new")
+    if old is None or new is None:
+        return None, f"hunk {index}: both old and new are required"
+    old, new = str(old), str(new)
+    if old == "":
+        return None, f"hunk {index}: old must be a non-empty string"
+    occ = text.count(old)
+    if occ == 0:
+        return None, f"hunk {index}: old string not found"
+    occurrence = hunk.get("occurrence")
+    if occurrence is None:
+        if occ > 1:
+            return None, (
+                f"hunk {index}: old string is not unique ({occ} occurrences); "
+                "pass occurrence=N (1-based) or add surrounding context"
+            )
+        return text.replace(old, new, 1), None
+    try:
+        n = int(occurrence)
+    except (TypeError, ValueError):
+        return None, f"hunk {index}: occurrence must be an integer"
+    if not 1 <= n <= occ:
+        return None, f"hunk {index}: occurrence {n} out of range (1..{occ})"
+    return _replace_nth(text, old, new, n), None
+
+
+def _replace_nth(text: str, old: str, new: str, n: int) -> str:
+    """Replace the n-th (1-based) occurrence of `old` with `new`."""
+    start = -1
+    for _ in range(n):
+        start = text.find(old, start + 1)
+    return text[:start] + new + text[start + len(old):]
+
+
+def apply_patch(root: str, patches, *, confirm: bool = False) -> dict:
+    """Apply a batch of edits, grouped per file, atomically per file.
+
+    `patches` is a list of ``{path, edits: [{old, new, occurrence?}, ...]}``.
+    Each file's hunks are validated and applied in order against the in-memory
+    text; only if every hunk for that file applies is it written (so a partial
+    failure never leaves a half-edited file). Hunks are checked sequentially --
+    a later hunk sees the result of the earlier ones.
+    """
+    if not isinstance(patches, list) or not patches:
+        return _err("patches must be a non-empty list of {path, edits}")
+    plan = []  # (real, rel, new_text, n_edits)
+    for fi, entry in enumerate(patches):
+        if not isinstance(entry, dict):
+            return _err(f"patches[{fi}]: must be an object with path + edits")
+        path = entry.get("path")
+        edits = entry.get("edits")
+        if not isinstance(edits, list) or not edits:
+            return _err(f"patches[{fi}]: edits must be a non-empty list")
+        try:
+            real, rel = _safe_path(root, path, must_exist=True)
+        except _PathError as e:
+            return _err(f"patches[{fi}]: {e}")
+        if os.path.isdir(real):
+            return _err(f"patches[{fi}]: {rel} is a directory")
+        _data, text = _index.read_text(Path(real))
+        if text is None:
+            return _err(f"patches[{fi}]: {rel} is binary or unreadable")
+        for hi, hunk in enumerate(edits):
+            if not isinstance(hunk, dict):
+                return _err(f"patches[{fi}] hunk {hi}: must be an object")
+            text, err = _apply_one_hunk(text, hunk, hi)
+            if err is not None:
+                return _err(f"{rel}: {err}")
+        plan.append((real, rel, text, len(edits)))
+    if not confirm:
+        total = sum(n for _r, _l, _t, n in plan)
+        files = ", ".join(rel for _r, rel, _t, _n in plan)
+        return _confirm(
+            f"apply_patch will apply {total} edit(s) across {len(plan)} file(s): {files}"
+        )
+    results = []
+    for real, rel, text, n in plan:
+        try:
+            _atomic_write(real, text)
+        except OSError as e:
+            return _err(f"write failed for {rel}: {e}")
+        results.append({"path": rel, "edits": n})
+    return _ok(action="patched", files=results,
+               total_edits=sum(r["edits"] for r in results))
+
+
 def _scrubbed_env() -> dict:
     return {k: v for k, v in os.environ.items() if k not in _SECRET_ENV}
 
@@ -414,6 +509,38 @@ _EDIT_SCHEMA = _obj(
     },
     ["path", "old", "new"],
 )
+_PATCH_HUNK = _obj(
+    {
+        "old": _p("string", "Exact text to replace."),
+        "new": _p("string", "Replacement text."),
+        "occurrence": _p(
+            "integer",
+            "Which match to replace (1-based) when `old` is not unique; omit to "
+            "require a unique match.",
+        ),
+    },
+    ["old", "new"],
+)
+_PATCH_SCHEMA = _obj(
+    {
+        "patches": {
+            "type": "array",
+            "description": "Edits grouped per file; applied atomically per file.",
+            "items": _obj(
+                {
+                    "path": _p("string", "File to edit, relative to the root."),
+                    "edits": {
+                        "type": "array",
+                        "items": _PATCH_HUNK,
+                        "description": "Hunks applied in order against the file.",
+                    },
+                },
+                ["path", "edits"],
+            ),
+        },
+    },
+    ["patches"],
+)
 _RUN_SCHEMA = _obj(
     {
         "command": _p("string", "Shell command to run (via /bin/sh -c) in the root."),
@@ -506,6 +633,12 @@ def code_tools(
                     "(preferred over write_file for small changes). Mutating -- "
                     "requires confirmation.",
                     _EDIT_SCHEMA, paid(edit_file), paid=True),
+        _agent.Tool("apply_patch",
+                    "Apply a batch of edits grouped per file, atomically per file "
+                    "(#63). Prefer this over edit_file for multi-hunk changes or "
+                    "when a string is not unique (use occurrence=N); use edit_file "
+                    "for a single unique change. Mutating -- requires confirmation.",
+                    _PATCH_SCHEMA, paid(apply_patch), paid=True),
         _agent.Tool("run",
                     "Run a shell command (/bin/sh -c) with the working directory "
                     "set to the project root; returns exit code + captured output. "
