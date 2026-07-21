@@ -527,24 +527,48 @@ class TestModelsTool(_ToolTest):
 
 
 class TestModelDetailsTool(_ToolTest):
-    def test_returns_curated_details(self):
-        # `text` is first in MODEL_TYPES, so _find_model matches on the first GET.
-        spec = {"name": "Big", "pricing": {"input": {"usd": 1.5}},
-                "availableContextTokens": 131072, "promptCharacterLimit": 1500,
-                "capabilities": {"supportsFunctionCalling": True},
-                "traits": ["default"]}
+    def _details(self, spec, mtype="text"):
+        # _find_model matches by id on the first catalog it queries, so one
+        # response containing the model is enough regardless of `type`.
         catalog = json.dumps(
-            {"data": [{"id": "big-model", "type": "text", "model_spec": spec}]}
+            {"data": [{"id": "m1", "type": mtype, "model_spec": spec}]}
         ).encode()
         with mock.patch("venice.client.urllib.request.urlopen",
                         _seq(FakeResp(200, catalog))), self.stdout_guard():
-            out = _mcp.model_details_tool(_client(), model="big-model")
+            return _mcp.model_details_tool(_client(), model="m1")
+
+    def test_image_model_surfaces_constraints(self):
+        # Image models: metadata lives under model_spec.constraints, and
+        # promptCharacterLimit is nested there (the bug kimi-k3 hit).
+        spec = {"name": "SD35", "pricing": {"input": {"usd": 0.01}},
+                "capabilities": None,
+                "constraints": {"promptCharacterLimit": 1500,
+                                "aspectRatios": ["1:1", "16:9"],
+                                "resolutions": ["1K", "2K", "4K"]},
+                "traits": ["eliza-default"]}
+        out = self._details(spec, mtype="image")
         self.assertEqual(out["status"], "ok")
-        self.assertEqual(out["id"], "big-model")
+        self.assertEqual(out["prompt_character_limit"], 1500)  # from constraints
+        self.assertEqual(out["constraints"]["aspectRatios"], ["1:1", "16:9"])
+        self.assertEqual(out["pricing"], {"input": {"usd": 0.01}})
+        self.assertIsNone(out["capabilities"])          # image -> null (API reality)
+        self.assertEqual(out["traits"], ["eliza-default"])
+        self.assertEqual(out["model_spec"], spec)       # full spec, nothing dropped
+
+    def test_text_model_capabilities_and_context(self):
+        spec = {"name": "LLM", "availableContextTokens": 131072,
+                "capabilities": {"supportsFunctionCalling": True,
+                                 "supportsVision": True},
+                "constraints": {"temperature": {"default": 0.8}}}
+        out = self._details(spec, mtype="text")
         self.assertEqual(out["available_context_tokens"], 131072)
-        self.assertEqual(out["prompt_character_limit"], 1500)
-        self.assertEqual(out["pricing"], {"input": {"usd": 1.5}})
-        self.assertTrue(out["capabilities"]["supportsFunctionCalling"])
+        self.assertTrue(out["capabilities"]["supportsVision"])
+        self.assertIsNone(out["prompt_character_limit"])  # not applicable to text
+
+    def test_prompt_limit_top_level_fallback(self):
+        # if a model ever puts promptCharacterLimit at the top level, still read it
+        out = self._details({"promptCharacterLimit": 800, "constraints": {}})
+        self.assertEqual(out["prompt_character_limit"], 800)
 
     def test_unknown_model_errors(self):
         from venice.commands.models import MODEL_TYPES
