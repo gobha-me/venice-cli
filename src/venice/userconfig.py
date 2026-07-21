@@ -210,6 +210,9 @@ _COMMAND_MAP = {
         "tools": ("tools", _as_bool),
         "max_tool_calls": ("max_tool_calls", int),
         "mcp": ("mcp", _as_list),
+        "auto_compact": ("auto_compact", _as_bool),
+        "compact_threshold": ("compact_threshold", int),
+        "compact_keep_turns": ("compact_keep_turns", int),
     },
     "embed": {
         "model": ("model", str),
@@ -242,6 +245,9 @@ _COMMAND_MAP = {
         "assets": ("assets", _as_bool),
         "max_tool_calls": ("max_tool_calls", int),
         "exec_timeout": ("exec_timeout", int),
+        "auto_compact": ("auto_compact", _as_bool),
+        "compact_threshold": ("compact_threshold", int),
+        "compact_keep_turns": ("compact_keep_turns", int),
     },
     "image": {
         # `--hide-watermark` / `--safe-mode` are tri-state (default None) so these

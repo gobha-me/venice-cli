@@ -15,13 +15,17 @@ from tests.test_chat import FakeToolCompletion, _FnCall
 
 def _fake_oai(seq):
     """A fake `oai` whose chat.completions.create() returns queued completions
-    and records each call's kwargs."""
+    and records each call's kwargs. A queued `Exception` instance is raised
+    (not returned), so tests can exercise a failing API call."""
     calls = []
     it = iter(seq)
 
     def _create(**kw):
         calls.append(kw)
-        return next(it)
+        item = next(it)
+        if isinstance(item, Exception):
+            raise item
+        return item
 
     fake = mock.MagicMock()
     fake.chat.completions.create.side_effect = _create
@@ -155,6 +159,103 @@ class TestRunLoopBudget(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("max-tool-calls", err.getvalue())
         self.assertEqual(calls[-1]["tool_choice"], "none")  # forced final answer
+
+
+class TestAutoCompact(unittest.TestCase):
+    """Auto-compaction in run_loop (#48)."""
+
+    def _big_history(self, pairs=8):
+        msgs = [{"role": "system", "content": "sys"}]
+        for i in range(pairs):
+            msgs.append({"role": "user", "content": f"u{i} " + "x" * 200})
+            msgs.append({"role": "assistant", "content": f"a{i} " + "y" * 200})
+        return msgs
+
+    def test_compacts_before_capped_turn(self):
+        # Turn 1 answers with usage over threshold; the run then needs a second
+        # (forced-final) turn -- which must compact first instead of sending the
+        # full history again.
+        history = self._big_history()
+        usage = {"prompt_tokens": 5000, "completion_tokens": 3, "total_tokens": 5003}
+        seq = [
+            FakeToolCompletion(tool_calls=[_FnCall("c1", "t", "{}")], usage=usage),
+            FakeToolCompletion("summary of the work so far"),  # compaction turn
+            FakeToolCompletion("done"),                        # forced final
+        ]
+        fake, calls = _fake_oai(seq)
+        budget = _agent._compact.Budget(threshold_tokens=1000, keep_turns=2)
+        with mock.patch.object(sys, "stdout", io.StringIO()), \
+             mock.patch.object(sys, "stderr", io.StringIO()):
+            rc = _agent.run_loop(
+                fake, "m", history, {}, [_free_tool()],
+                max_tool_calls=1, yes=True, json_out=False, budget=budget,
+            )
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 3)
+        compact_call, final_call = calls[1], calls[2]
+        self.assertEqual(compact_call["tool_choice"], "none")
+        self.assertNotIn("tools", compact_call)
+        # The final turn saw the compacted history: summary system message, not
+        # the full original prefix.
+        final_msgs = final_call["messages"]
+        self.assertLess(len(final_msgs), 17)
+        self.assertTrue(any(
+            m.get("role") == "system" and "summary of the work" in str(m.get("content"))
+            for m in final_msgs
+        ))
+        # The caller's history was compacted in place too.
+        self.assertEqual(history[1]["role"], "system")
+        self.assertIn("summary of the work", history[1]["content"])
+
+    def test_no_budget_means_no_compaction(self):
+        history = self._big_history()
+        before = list(history)
+        seq = [FakeToolCompletion("done")]
+        fake, calls = _fake_oai(seq)
+        with mock.patch.object(sys, "stdout", io.StringIO()), \
+             mock.patch.object(sys, "stderr", io.StringIO()):
+            rc = _agent.run_loop(
+                fake, "m", history, {}, [_free_tool()],
+                max_tool_calls=0, yes=True, json_out=False,
+            )
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 1)  # no summarization call snuck in
+        self.assertEqual(history[: len(before)], before)  # only appended after
+        self.assertEqual(history[1]["role"], "user")
+
+    def test_under_budget_no_compaction(self):
+        history = self._big_history(pairs=3)
+        seq = [FakeToolCompletion("done")]
+        fake, calls = _fake_oai(seq)
+        budget = _agent._compact.Budget(threshold_tokens=10**9, keep_turns=2)
+        with mock.patch.object(sys, "stdout", io.StringIO()), \
+             mock.patch.object(sys, "stderr", io.StringIO()):
+            _agent.run_loop(
+                fake, "m", history, {}, [_free_tool()],
+                max_tool_calls=0, yes=True, json_out=False, budget=budget,
+            )
+        self.assertEqual(len(calls), 1)
+
+    def test_failed_compaction_run_continues(self):
+        history = self._big_history()
+        usage = {"prompt_tokens": 5000, "completion_tokens": 3, "total_tokens": 5003}
+        seq = [
+            FakeToolCompletion(tool_calls=[_FnCall("c1", "t", "{}")], usage=usage),
+            RuntimeError("summary boom"),   # compaction call raises
+            FakeToolCompletion("done"),
+        ]
+        fake, calls = _fake_oai(seq)
+        budget = _agent._compact.Budget(threshold_tokens=1000, keep_turns=2)
+        with mock.patch.object(sys, "stdout", io.StringIO()), \
+             mock.patch.object(sys, "stderr", io.StringIO()):
+            rc = _agent.run_loop(
+                fake, "m", history, {}, [_free_tool()],
+                max_tool_calls=1, yes=True, json_out=False, budget=budget,
+            )
+        self.assertEqual(rc, 0)
+        # History NOT compacted (the failed summary changed nothing).
+        self.assertEqual(history[1]["role"], "user")
+        self.assertNotIn("[Summary", str(history))
 
 
 class TestProgress(unittest.TestCase):

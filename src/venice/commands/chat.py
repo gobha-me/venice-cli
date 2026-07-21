@@ -19,7 +19,7 @@ from typing import Optional
 
 from .. import auth, userconfig
 from ..client import build_client_from_auth
-from . import _agent, _mcp, _mcp_client, _models, _openai, _repl
+from . import _agent, _compact, _mcp, _mcp_client, _models, _openai, _repl
 
 
 def register(subparsers) -> None:
@@ -75,6 +75,24 @@ def register(subparsers) -> None:
         "--resume", default=None, metavar="FILE", dest="resume",
         help="Load a saved transcript JSON and continue it interactively "
         "(pairs with /save).",
+    )
+    it.add_argument(
+        "--auto-compact", action="store_true", default=None, dest="auto_compact",
+        help="Summarize older history once it crosses the token budget, so long "
+        "sessions stay within the context window (#48; costs a summarization "
+        "call). Manual: /compact in the REPL.",
+    )
+    it.add_argument(
+        "--compact-threshold", type=int, default=None, dest="compact_threshold",
+        metavar="TOKENS",
+        help="Auto-compact once the prompt passes this many tokens "
+        f"(default {_compact.DEFAULT_THRESHOLD_TOKENS}).",
+    )
+    it.add_argument(
+        "--compact-keep-turns", type=int, default=None, dest="compact_keep_turns",
+        metavar="N",
+        help="Turns kept verbatim when compacting "
+        f"(default {_compact.DEFAULT_KEEP_TURNS}); older ones are summarized.",
     )
 
     # --- Venice extensions -> venice_parameters ---
@@ -424,6 +442,7 @@ def _run_agent(args, oai, openai, client, models, model, kwargs) -> Optional[int
                 max_tool_calls=(args.max_tool_calls if args.max_tool_calls is not None else 8),
                 yes=bool(args.yes),
                 json_out=args.json,
+                budget=_compact.budget_from_args(args),  # #48 auto-compact parity
             )
         except openai.OpenAIError as e:
             return _openai.status_to_exit(openai, e, "chat")
@@ -450,6 +469,16 @@ def _consume_stream(stream) -> str:
     and the REPL turn helper, which needs the accumulated text to append the
     assistant turn to its persistent history.
     """
+    text, _usage = _consume_stream_full(stream)
+    return text
+
+
+def _consume_stream_full(stream):
+    """Like `_consume_stream`, but also return the stream's final `usage`.
+
+    The REPL's auto-compact budget (#48) observes the server-reported prompt
+    token count; printing behavior is identical to `_consume_stream`.
+    """
     citations = None
     usage = None
     parts: list = []
@@ -469,7 +498,7 @@ def _consume_stream(stream) -> str:
         sys.stdout.write("\n")
     _print_citations(citations)
     _print_usage(usage)
-    return "".join(parts)
+    return "".join(parts), usage
 
 
 def _run_stream(oai, kwargs: dict) -> int:

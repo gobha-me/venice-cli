@@ -526,13 +526,26 @@ In-REPL slash-commands: `/system [text]` (show/set the system prompt),
 `/model [name]` (switch model; with no name, show the current one and list the
 catalog), `/models` (list the available models, marking the current and the
 default), `/auto` and `/manual` (toggle auto-accepting paid/side-effecting tool
-calls for following turns), `/reset` (clear history, keep the system prompt),
+calls for following turns), `/compact [N]` (summarize older history into one
+message, keeping the last `N` turns verbatim), `/reset` (clear history, keep
+the system prompt),
 `/save [file]` (write the transcript JSON; defaults to the `--resume` file),
 `/help`, and `/exit` (or `/quit`, or Ctrl-D). Ctrl-C aborts the current turn
 without ending the session. Tab completes slash-commands (and model ids after
 `/model `). At a per-tool confirmation prompt, `a` accepts that call **and**
 auto-accepts the rest of the run. `--max-tool-calls 0` runs until the model
 stops on its own (instead of capping at the default and asking to continue).
+
+Long sessions can also compact automatically. `--auto-compact` (or
+`defaults.chat.auto_compact` / `defaults.code.auto_compact`) summarizes the
+older prefix into one synthetic message once the prompt crosses
+`--compact-threshold` tokens (default 100 000), keeping the system prompt and
+the last `--compact-keep-turns` turns (default 10) verbatim. The trigger uses
+the server-reported `usage.prompt_tokens` when a turn provides it (falling
+back to a chars-per-token estimate otherwise), so it fires on the real prompt
+size rather than a guess. Compaction is best-effort — a failed summarization
+call leaves the history untouched — and never orphans a tool result from its
+assistant turn. It's off by default because it costs a summarization call.
 
 ### Venice extensions
 
@@ -889,6 +902,7 @@ forced cwd, timeout, and env-scrub — which is why it always confirms. git muta
 | `--max-tool-calls N` | cap tool invocations before forcing a final answer (default 25) |
 | `--exec-timeout SECS` | timeout for `run`/`git` (default 120) |
 | `--assets` | also expose the in-process asset-generation tools (image / image-edit / sfx / music / tts / upscale / bg-remove / video) so the agent can create images, audio & video in the project; paid — each confirms per call unless `--auto` |
+| `--auto-compact` | summarize older history once the prompt crosses `--compact-threshold` tokens (default 100 000), keeping the last `--compact-keep-turns` turns (default 10); long runs stay in-context |
 | `-i`, `--json`, `--model`, `--system` | interactive REPL · JSON envelope · model · extra system instructions |
 
 With `--assets`, generated files land in `$VENICE_MCP_OUTPUT_DIR` or, by default, under

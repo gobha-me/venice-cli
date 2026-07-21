@@ -199,6 +199,94 @@ class TestRepl(unittest.TestCase):
         self.assertEqual(len(calls), 0)
         self.assertIn("transcript", err.getvalue())
 
+    def _resume_history(self, tmpdir, pairs=6):
+        """Write a resumable transcript of `pairs` user/assistant turns."""
+        path = Path(tmpdir) / "session.json"
+        msgs = []
+        for i in range(pairs):
+            msgs.append({"role": "user", "content": f"u{i}"})
+            msgs.append({"role": "assistant", "content": f"a{i}"})
+        path.write_text(json.dumps(msgs))
+        return str(path)
+
+    def test_slash_compact_summarizes_prefix(self):
+        with tempfile.TemporaryDirectory() as d:
+            resume = self._resume_history(d, pairs=6)
+            err = io.StringIO()
+            # 1st create(): the /compact summarization turn (a plain completion).
+            rc, fake, calls = _run_repl(
+                _args(interactive=True, resume=resume),
+                [FakeToolCompletion("we discussed u0..u5")],
+                ["/compact 2", "/exit"], stderr=err,
+            )
+            self.assertEqual(rc, 0)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0]["tool_choice"], "none")
+            self.assertIn("compacted:", err.getvalue())
+
+    def test_slash_compact_nothing_to_do(self):
+        # A fresh session has nothing to compact: no API call, a note instead.
+        err = io.StringIO()
+        rc, fake, calls = _run_repl(
+            _args(interactive=True),
+            [], ["/compact", "/exit"], stderr=err,
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 0)
+        self.assertIn("nothing to compact", err.getvalue())
+
+    def test_slash_compact_then_turn_sees_summary(self):
+        with tempfile.TemporaryDirectory() as d:
+            resume = self._resume_history(d, pairs=6)
+            results = [
+                FakeToolCompletion("summary of u0..u3"),  # the /compact turn
+                [FakeChunk("reply")],                      # the next chat turn
+            ]
+            rc, fake, calls = _run_repl(
+                _args(interactive=True, resume=resume),
+                results, ["/compact 2", "next question", "/exit"],
+                stderr=io.StringIO(),
+            )
+            self.assertEqual(rc, 0)
+            self.assertEqual(len(calls), 2)
+            # The chat turn's history carries the summary as a system message
+            # plus the kept tail -- not the original six pairs.
+            msgs = calls[1]["messages"]
+            self.assertEqual(msgs[0]["role"], "system")
+            self.assertIn("summary of u0..u3", msgs[0]["content"])
+            self.assertLess(len(msgs), 13)
+
+    def test_auto_compact_fires_before_overbudget_turn(self):
+        with tempfile.TemporaryDirectory() as d:
+            resume = self._resume_history(d, pairs=6)
+            err = io.StringIO()
+            results = [
+                # Turn 1: a normal streamed reply whose usage crosses the budget.
+                [FakeChunk("r1"),
+                 FakeChunk(usage={"prompt_tokens": 5000, "completion_tokens": 2,
+                                  "total_tokens": 5002})],
+                # Turn 2's auto-compact summarization call.
+                FakeToolCompletion("compact summary"),
+                # Turn 2 itself.
+                [FakeChunk("r2")],
+            ]
+            rc, fake, calls = _run_repl(
+                _args(interactive=True, resume=resume,
+                      auto_compact=True, compact_threshold=1000,
+                      compact_keep_turns=2),
+                results, ["first", "second", "/exit"], stderr=err,
+            )
+            self.assertEqual(rc, 0)
+            self.assertEqual(len(calls), 3)
+            self.assertEqual(calls[1]["tool_choice"], "none")  # the compact call
+            self.assertIn("auto-compacted", err.getvalue())
+            # Turn 2 saw the compacted history.
+            msgs = calls[2]["messages"]
+            self.assertTrue(any(
+                m.get("role") == "system" and "compact summary" in str(m.get("content"))
+                for m in msgs
+            ))
+
     def test_malformed_resume_exit_2(self):
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "bad.json"

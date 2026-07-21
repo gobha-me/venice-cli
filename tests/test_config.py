@@ -151,6 +151,25 @@ class TestApplyDefaults(_Base):
         self.assertIsNone(args.temperature)  # unchanged
         self.assertIn("temperature", err)
 
+    def test_apply_compact_defaults_chat_and_code(self):
+        doc = {"defaults": {
+            "chat": {"auto_compact": True, "compact_threshold": 80000},
+            "code": {"auto_compact": "yes", "compact_keep_turns": 6},
+        }}
+        chat_args = argparse.Namespace(auto_compact=None, compact_threshold=None,
+                                       compact_keep_turns=None)
+        uc.apply_defaults(chat_args, "chat", doc)
+        self.assertIs(chat_args.auto_compact, True)
+        self.assertEqual(chat_args.compact_threshold, 80000)
+        self.assertIsNone(chat_args.compact_keep_turns)  # unset for chat
+
+        code_args = argparse.Namespace(auto_compact=None, compact_threshold=None,
+                                       compact_keep_turns=None)
+        uc.apply_defaults(code_args, "code", doc)
+        self.assertIs(code_args.auto_compact, True)      # coerced from "yes"
+        self.assertEqual(code_args.compact_keep_turns, 6)
+        self.assertIsNone(code_args.compact_threshold)
+
 
 # --------------------------------------------------------------------------- #
 # #57 config parity -- Class A: flags that already default None become

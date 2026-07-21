@@ -41,9 +41,19 @@ from typing import List, Optional
 
 from .. import auth, config, userconfig
 from ..client import build_client_from_auth
-from . import _agent, _code, _models, _openai, _repl
+from . import _agent, _code, _compact, _models, _openai, _repl
 
 _DEFAULT_MAX_TOOL_CALLS = 25
+
+
+def _budget_for(args) -> Optional[_compact.Budget]:
+    """The auto-compact budget for a run, or None when it isn't opted into (#48).
+
+    Enabled by `--auto-compact` / `defaults.code.auto_compact`; threshold and
+    keep-turns fall back to the `_compact` defaults when unset. Thin alias for
+    the shared builder so every surface opts in identically.
+    """
+    return _compact.budget_from_args(args)
 
 CODING_SYSTEM_PROMPT = """\
 You are vcoder, an autonomous coding agent working inside a single project directory.
@@ -174,6 +184,23 @@ def register(subparsers) -> None:
         "image_edit, sfx, music, tts, upscale, bg_remove, video) so the agent can "
         "create images/audio/video in the project. Paid: each confirms per call "
         "unless --auto.",
+    )
+    grp.add_argument(
+        "--auto-compact", action="store_true", default=None, dest="auto_compact",
+        help="Summarize older history once it crosses the token budget, so long "
+        "runs stay within the context window (#48; costs a summarization call).",
+    )
+    grp.add_argument(
+        "--compact-threshold", type=int, default=None, dest="compact_threshold",
+        metavar="TOKENS",
+        help="Auto-compact once the prompt passes this many tokens "
+        f"(default {_compact.DEFAULT_THRESHOLD_TOKENS}).",
+    )
+    grp.add_argument(
+        "--compact-keep-turns", type=int, default=None, dest="compact_keep_turns",
+        metavar="N",
+        help="Turns kept verbatim when compacting "
+        f"(default {_compact.DEFAULT_KEEP_TURNS}); older ones are summarized.",
     )
 
     it = p.add_argument_group("Interactive")
@@ -455,15 +482,18 @@ def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task
         else _DEFAULT_MAX_TOOL_CALLS
     )
     final_text = None
+    budget = _budget_for(args)
     try:
         if args.json:
             with _capture_stdout() as buf:
                 _agent.run_loop(oai, model, messages, gen_kwargs, tools,
-                                max_tool_calls=max_calls, yes=yes, json_out=False)
+                                max_tool_calls=max_calls, yes=yes, json_out=False,
+                                budget=budget)
             final_text = buf.getvalue().strip()
         else:
             _agent.run_loop(oai, model, messages, gen_kwargs, tools,
-                            max_tool_calls=max_calls, yes=yes, json_out=False)
+                            max_tool_calls=max_calls, yes=yes, json_out=False,
+                            budget=budget)
     except openai.OpenAIError as e:
         return _openai.status_to_exit(openai, e, "code")
 
