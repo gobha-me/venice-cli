@@ -433,5 +433,35 @@ class TestDispatch(_Base):
                          {"command": "venice", "args": ["mcp-serve"]})
 
 
+class TestShellPolicy(_Base):
+    """The top-level `shell` allow/deny reader (#33), mirroring mcp_map."""
+
+    def test_missing_section_is_empty(self):
+        self.assertEqual(uc.shell_policy({}), {"allow": [], "deny": []})
+
+    def test_malformed_section_is_empty(self):
+        self.assertEqual(uc.shell_policy({"shell": "nope"}), {"allow": [], "deny": []})
+
+    def test_reads_lists(self):
+        doc = {"shell": {"allow": ["git", "ls"], "deny": ["rm *", "sudo *"]}}
+        self.assertEqual(
+            uc.shell_policy(doc),
+            {"allow": ["git", "ls"], "deny": ["rm *", "sudo *"]},
+        )
+
+    def test_scalar_string_coerced_to_list(self):
+        # Mirrors _as_list: a bare string becomes a single-element list.
+        self.assertEqual(
+            uc.shell_policy({"shell": {"allow": "git", "deny": "rm"}}),
+            {"allow": ["git"], "deny": ["rm"]},
+        )
+
+    def test_dotted_key_set_roundtrips_through_generic_store(self):
+        # `venice config set shell.deny '["rm *"]'` works with no bespoke plumbing.
+        doc = uc.load_config()
+        uc.set_value(doc, "shell.deny", ["rm *"])
+        self.assertEqual(uc.shell_policy(doc), {"allow": [], "deny": ["rm *"]})
+
+
 if __name__ == "__main__":
     unittest.main()

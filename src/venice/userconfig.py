@@ -170,6 +170,28 @@ def mcp_remove(doc: dict, name: str) -> bool:
 
 
 # --------------------------------------------------------------------------- #
+# Shell allow/deny policy (issue #33)
+# --------------------------------------------------------------------------- #
+def shell_policy(doc: dict) -> dict:
+    """Read the top-level ``shell`` policy section (single source of truth for both
+    `venice chat --shell` and `venice code`'s `run` tool). Returns
+    ``{"allow": [...], "deny": [...]}`` -- string lists, empty when unset/malformed.
+
+    Mirrors :func:`mcp_map`: a non-`defaults` top-level section with its own reader
+    (it isn't a per-command preference, so it doesn't flow through `apply_defaults`).
+    ``venice config set shell.deny '["rm *"]'`` round-trips through the generic
+    dotted-key store with no extra plumbing.
+    """
+    section = doc.get("shell")
+    if not isinstance(section, dict):
+        return {"allow": [], "deny": []}
+    return {
+        "allow": _as_list(section["allow"]) if section.get("allow") else [],
+        "deny": _as_list(section["deny"]) if section.get("deny") else [],
+    }
+
+
+# --------------------------------------------------------------------------- #
 # #17 default-flag loader
 # --------------------------------------------------------------------------- #
 def _as_path(v):

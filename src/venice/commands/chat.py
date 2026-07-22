@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Optional
@@ -176,6 +177,32 @@ def register(subparsers) -> None:
                     "external MCP tool (skips the confirm gate).")
     ag.add_argument("--output", "-o", type=Path, default=None,
                     help="Directory tools write generated files to. Default: cwd.")
+    ag.add_argument(
+        "--shell", "--exec", action="store_true", dest="shell", default=None,
+        help="Add a gated `shell` tool (/bin/sh -c in the cwd) so the agent can run "
+        "gh/git/curl/etc. Implies --tools. Confirms per command unless --yes; scope "
+        "it with --shell-allow/--shell-deny or the config `shell` section (#33).",
+    )
+    ag.add_argument(
+        "--shell-allow", action="append", dest="shell_allow", default=None,
+        metavar="CMD",
+        help="Allow only these commands for --shell (repeatable; globs ok, matched "
+        "on the leading token). A non-empty allowlist also requires a single simple "
+        "command (no operators/pipes/redirects). Adds to the config shell.allow list.",
+    )
+    ag.add_argument(
+        "--shell-deny", action="append", dest="shell_deny", default=None,
+        metavar="PATTERN",
+        help="Refuse commands matching these globs (repeatable; matched on the whole "
+        "line and each token, always enforced, wins over --shell-allow). Adds to "
+        "config shell.deny.",
+    )
+    ag.add_argument(
+        "--shell-unrestricted", action="store_true", dest="shell_unrestricted",
+        default=None,
+        help="Acknowledge running --shell with an empty allowlist under --yes "
+        "(auto-approved arbitrary shell). Required for that combination.",
+    )
 
     # --- External MCP servers (#21) ---
     mc = p.add_argument_group("External MCP tools")
@@ -301,6 +328,10 @@ def _is_interactive(args, message) -> bool:
 
 def _run(args) -> int:
     userconfig.apply_defaults(args, "chat")
+    # --shell (#33) is a tool, so it implies the agent loop -- flip --tools on so
+    # both the one-shot trigger below and the REPL's tools gate pick it up.
+    if getattr(args, "shell", None) and not getattr(args, "tools", None):
+        args.tools = True
     # A startup persona (--persona or defaults.chat.persona) seeds the same lever
     # both one-shot and REPL modes read -- args.system -- so it flows through
     # _build_kwargs and _seed_messages unchanged. An explicit system prompt
@@ -378,13 +409,35 @@ def _tools_for(args, client, models, model):
             "attempting tools",
             file=sys.stderr,
         )
+    doc = userconfig.load_config()  # #58 tool defaults + #33 shell policy
+    shell_on = bool(getattr(args, "shell", None))
+    shell_allow, shell_deny = (), ()
+    if shell_on:
+        pol = userconfig.shell_policy(doc)
+        shell_allow = list(pol["allow"]) + list(getattr(args, "shell_allow", None) or [])
+        shell_deny = list(pol["deny"]) + list(getattr(args, "shell_deny", None) or [])
+        # Loud-unrestricted guard (#33): auto-approving arbitrary shell must be
+        # explicit -- an empty allowlist under --yes needs --shell-unrestricted.
+        if (not shell_allow and getattr(args, "yes", None)
+                and not getattr(args, "shell_unrestricted", None)):
+            print(
+                "chat: refusing to enable an unrestricted shell with --yes; pass "
+                "--shell-unrestricted to confirm, or scope it with --shell-allow "
+                "(or the config shell.allow list).",
+                file=sys.stderr,
+            )
+            return None, 2
     try:
         tools = _agent.builtin_tools(
             client,
             max_spend=args.max_spend,
             output_dir=str(args.output) if args.output else None,
             only=set(args.tool) if args.tool else None,
-            config=userconfig.load_config(),  # #58: honor defaults.<cmd>.* in tools
+            config=doc,  # #58: honor defaults.<cmd>.* in tools
+            shell=shell_on,
+            shell_root=os.getcwd(),
+            shell_allow=shell_allow,
+            shell_deny=shell_deny,
         )
     except ValueError as e:
         print(f"chat: {e}", file=sys.stderr)

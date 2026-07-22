@@ -29,6 +29,8 @@ def _args(**ov):
         # --- agent / tools (#15) ---
         tools=None, tool=None, max_tool_calls=None,
         max_spend=None, yes=None, output=None,
+        # --- shell exec tool (#33) ---
+        shell=None, shell_allow=None, shell_deny=None, shell_unrestricted=None,
         # --- external MCP client (#21) ---
         mcp=None, no_mcp=False,
         # --- interactive / REPL (#22) ---
@@ -490,6 +492,100 @@ class TestChatAgent(unittest.TestCase):
         self.assertEqual(len(tool_msgs), 1)
         self.assertEqual(tool_msgs[0]["tool_call_id"], "call_1")
         self.assertIn("hola", tool_msgs[0]["content"])
+
+    # --- shell exec tool (#33) ---
+
+    def test_shell_flag_implies_tools_and_invokes_shell(self):
+        out = io.StringIO()
+        seq = [
+            FakeToolCompletion(tool_calls=[
+                _FnCall("call_1", "shell", '{"command": "echo hola"}')]),
+            FakeToolCompletion("done"),
+        ]
+        # --shell alone (no --tools), auto-approved via --yes with an allowlist so
+        # the loud-unrestricted guard doesn't trip. The shell tool runs `echo` in cwd.
+        rc, fake, calls = self._run_seq(
+            _args(message="hi", stream=False, shell=True, shell_allow=["echo"],
+                  yes=True),
+            seq, stdout=out,
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.getvalue().strip(), "done")
+        # first turn advertised a `shell` tool (implies-tools worked)
+        names = [t["function"]["name"] for t in calls[0]["tools"]]
+        self.assertIn("shell", names)
+        # the tool result carried the command output back to the model
+        tool_msgs = [m for m in calls[1]["messages"] if m.get("role") == "tool"]
+        self.assertIn("hola", tool_msgs[0]["content"])
+
+    def test_shell_deny_refuses_command(self):
+        out = io.StringIO()
+        seq = [
+            FakeToolCompletion(tool_calls=[
+                _FnCall("call_1", "shell", '{"command": "sudo reboot"}')]),
+            FakeToolCompletion("understood"),
+        ]
+        rc, fake, calls = self._run_seq(
+            _args(message="hi", stream=False, shell=True, shell_deny=["sudo"],
+                  yes=True, shell_unrestricted=True),
+            seq, stdout=out,
+        )
+        self.assertEqual(rc, 0)
+        tool_msgs = [m for m in calls[1]["messages"] if m.get("role") == "tool"]
+        self.assertIn("deny", tool_msgs[0]["content"])
+
+    def test_shell_unrestricted_with_yes_requires_ack(self):
+        # Empty allowlist + --yes without --shell-unrestricted -> refuse (exit 2).
+        err = io.StringIO()
+        rc, fake, calls = self._run_seq(
+            _args(message="hi", stream=False, shell=True, yes=True),
+            [FakeCompletion("unused")], stderr=err,
+        )
+        self.assertEqual(rc, 2)
+        self.assertIn("shell-unrestricted", err.getvalue())
+
+    def test_shell_unrestricted_ack_allows_empty_allowlist(self):
+        out = io.StringIO()
+        rc, fake, calls = self._run_seq(
+            _args(message="hi", stream=False, shell=True, yes=True,
+                  shell_unrestricted=True),
+            [FakeToolCompletion("ok")], stdout=out,
+        )
+        self.assertEqual(rc, 0)
+
+    def test_shell_flags_parse(self):
+        from venice import cli
+        args = cli.build_parser().parse_args([
+            "chat", "hi", "--shell",
+            "--shell-allow", "git", "--shell-allow", "ls",
+            "--shell-deny", "rm *", "--shell-unrestricted",
+        ])
+        self.assertTrue(args.shell)
+        self.assertEqual(args.shell_allow, ["git", "ls"])
+        self.assertEqual(args.shell_deny, ["rm *"])
+        self.assertTrue(args.shell_unrestricted)
+        # --exec is an alias for --shell
+        self.assertTrue(cli.build_parser().parse_args(["chat", "hi", "--exec"]).shell)
+
+    def test_shell_config_policy_reaches_tool(self):
+        # A config `shell.deny` (no CLI flag) still scopes the tool.
+        cfg = {"version": 1, "mcpServers": {}, "defaults": {},
+               "shell": {"deny": ["sudo"]}}
+        out = io.StringIO()
+        seq = [
+            FakeToolCompletion(tool_calls=[
+                _FnCall("call_1", "shell", '{"command": "sudo rm -rf /"}')]),
+            FakeToolCompletion("noted"),
+        ]
+        with mock.patch("venice.userconfig.load_config", lambda *a, **k: cfg):
+            rc, fake, calls = self._run_seq(
+                _args(message="hi", stream=False, shell=True, shell_allow=["sudo"],
+                      yes=True),
+                seq, stdout=out,
+            )
+        self.assertEqual(rc, 0)
+        tool_msgs = [m for m in calls[1]["messages"] if m.get("role") == "tool"]
+        self.assertIn("deny", tool_msgs[0]["content"])
 
     def test_tools_auto_compact_hands_budget_to_loop(self):
         # #48 parity: chat --tools must honor --auto-compact by giving run_loop a
