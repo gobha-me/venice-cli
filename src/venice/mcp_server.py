@@ -14,12 +14,41 @@ from typing import List, Optional
 
 from mcp.server.fastmcp import FastMCP
 
+from . import userconfig
 from .commands import _mcp
 
 
-def build_server(client) -> FastMCP:
-    """Build a FastMCP server exposing venice tools, all bound to `client`."""
+def _merged(defaults: dict, host: dict) -> dict:
+    """Layer config `defaults` UNDER host-supplied args (#58): an explicit (non-None)
+    host value wins; where the host omitted an arg (FastMCP fills the wrapper's None
+    default) the config default applies; keys the wrapper never exposes (e.g. image
+    safe_mode/hide_watermark) come purely from config. Same precedence as
+    `_agent._make_paid`'s `{**defaults, **_clean(arguments)}`."""
+    return {**defaults, **{k: v for k, v in host.items() if v is not None}}
+
+
+def build_server(client, doc=None) -> FastMCP:
+    """Build a FastMCP server exposing venice tools, all bound to `client`.
+
+    `doc` is a userconfig document (issue #58): `defaults.<section>.*` values are
+    layered UNDER each host-supplied tool arg, so an explicit arg still wins
+    (precedence: host arg > config default > tool hardcoded default) -- the same
+    contract `venice chat`/`code` already honor. `doc=None` loads the config file.
+    """
     server = FastMCP("venice")
+    if doc is None:
+        doc = userconfig.load_config()
+    _defaults = {
+        "image": userconfig.config_defaults_for("image", _mcp.image_tool, doc),
+        "tts": userconfig.config_defaults_for("tts", _mcp.tts_tool, doc),
+        "sfx": userconfig.config_defaults_for("sfx", _mcp.sfx_tool, doc),
+        "music": userconfig.config_defaults_for("music", _mcp.music_tool, doc),
+        "upscale": userconfig.config_defaults_for("upscale", _mcp.upscale_tool, doc),
+        "bg_remove": userconfig.config_defaults_for("bg_remove", _mcp.bg_remove_tool, doc),
+        "video": userconfig.config_defaults_for("video", _mcp.video_tool, doc),
+        "image_edit": userconfig.config_defaults_for("image_edit", _mcp.image_edit_tool, doc),
+        "chat": userconfig.config_defaults_for("chat", _mcp.chat_tool, doc),
+    }
 
     @server.tool()
     def venice_image(
@@ -34,20 +63,28 @@ def build_server(client) -> FastMCP:
         cfg_scale: Optional[float] = None,
         steps: Optional[int] = None,
         style_preset: Optional[str] = None,
+        safe_mode: Optional[bool] = None,
+        hide_watermark: Optional[bool] = None,
         output_dir: Optional[str] = None,
         confirm: bool = False,
         max_spend: Optional[float] = None,
     ) -> dict:
         """Generate 1-4 image variants from a text prompt via Venice /image/generate.
         Writes PNG/WebP/JPEG file(s) and returns their paths (never inline blobs).
-        Paid: the cost is estimated up front; if it is over the auto-approve cap the
-        call returns status=confirmation_required and you must re-call with
-        confirm=true."""
+        safe_mode blurs adult content; hide_watermark removes the Venice watermark
+        (both fall back to your config defaults.image.* when omitted). Paid: the cost
+        is estimated up front; if it is over the auto-approve cap the call returns
+        status=confirmation_required and you must re-call with confirm=true."""
         return _mcp.image_tool(
-            client, prompt, model=model, variants=variants, format=format,
-            width=width, height=height, negative_prompt=negative_prompt, seed=seed,
-            cfg_scale=cfg_scale, steps=steps, style_preset=style_preset,
-            output_dir=output_dir, confirm=confirm, max_spend=max_spend,
+            client, prompt,
+            **_merged(_defaults["image"], dict(
+                model=model, variants=variants, format=format,
+                width=width, height=height, negative_prompt=negative_prompt,
+                seed=seed, cfg_scale=cfg_scale, steps=steps,
+                style_preset=style_preset, safe_mode=safe_mode,
+                hide_watermark=hide_watermark, output_dir=output_dir,
+                confirm=confirm, max_spend=max_spend,
+            )),
         )
 
     @server.tool()
@@ -65,8 +102,11 @@ def build_server(client) -> FastMCP:
         and returns its path. Paid: cost is estimated per character; over-cap calls
         need confirm=true."""
         return _mcp.tts_tool(
-            client, text, model=model, voice=voice, format=format, speed=speed,
-            output_dir=output_dir, confirm=confirm, max_spend=max_spend,
+            client, text,
+            **_merged(_defaults["tts"], dict(
+                model=model, voice=voice, format=format, speed=speed,
+                output_dir=output_dir, confirm=confirm, max_spend=max_spend,
+            )),
         )
 
     @server.tool()
@@ -82,8 +122,11 @@ def build_server(client) -> FastMCP:
         capped wait until ready). Writes an audio file and returns its path. Paid: a
         quote is fetched first; over-cap quotes need confirm=true."""
         return _mcp.sfx_tool(
-            client, prompt, model=model, duration=duration, output_dir=output_dir,
-            confirm=confirm, max_spend=max_spend,
+            client, prompt,
+            **_merged(_defaults["sfx"], dict(
+                model=model, duration=duration, output_dir=output_dir,
+                confirm=confirm, max_spend=max_spend,
+            )),
         )
 
     @server.tool()
@@ -102,9 +145,12 @@ def build_server(client) -> FastMCP:
         (blocks with a capped wait). Writes an audio file and returns its path. Paid:
         a quote is fetched first; over-cap quotes need confirm=true."""
         return _mcp.music_tool(
-            client, prompt, model=model, duration=duration, instrumental=instrumental,
-            lyrics=lyrics, speed=speed, output_dir=output_dir, confirm=confirm,
-            max_spend=max_spend,
+            client, prompt,
+            **_merged(_defaults["music"], dict(
+                model=model, duration=duration, instrumental=instrumental,
+                lyrics=lyrics, speed=speed, output_dir=output_dir, confirm=confirm,
+                max_spend=max_spend,
+            )),
         )
 
     @server.tool()
@@ -123,10 +169,13 @@ def build_server(client) -> FastMCP:
         the result and returns its path. Pricing is dynamic (no up-front estimate), so
         this ALWAYS requires confirm=true."""
         return _mcp.upscale_tool(
-            client, input_path, scale=scale, enhance=enhance,
-            enhance_creativity=enhance_creativity, enhance_prompt=enhance_prompt,
-            replication=replication, output_dir=output_dir, confirm=confirm,
-            max_spend=max_spend,
+            client, input_path,
+            **_merged(_defaults["upscale"], dict(
+                scale=scale, enhance=enhance,
+                enhance_creativity=enhance_creativity, enhance_prompt=enhance_prompt,
+                replication=replication, output_dir=output_dir, confirm=confirm,
+                max_spend=max_spend,
+            )),
         )
 
     @server.tool()
@@ -142,8 +191,11 @@ def build_server(client) -> FastMCP:
         the result and returns its path. Dynamic pricing, so ALWAYS requires
         confirm=true."""
         return _mcp.bg_remove_tool(
-            client, input_path, image_url=image_url, output_dir=output_dir,
-            confirm=confirm, max_spend=max_spend,
+            client, input_path,
+            **_merged(_defaults["bg_remove"], dict(
+                image_url=image_url, output_dir=output_dir,
+                confirm=confirm, max_spend=max_spend,
+            )),
         )
 
     @server.tool()
@@ -160,8 +212,11 @@ def build_server(client) -> FastMCP:
         text (and token usage when available). web_search is one of auto/on/off. Not
         spend-gated. Requires the [openai] extra."""
         return _mcp.chat_tool(
-            client, message, model=model, system=system, temperature=temperature,
-            max_tokens=max_tokens, web_search=web_search, character=character,
+            client, message,
+            **_merged(_defaults["chat"], dict(
+                model=model, system=system, temperature=temperature,
+                max_tokens=max_tokens, web_search=web_search, character=character,
+            )),
         )
 
     @server.tool()
@@ -193,17 +248,20 @@ def build_server(client) -> FastMCP:
         up to max_wait seconds (a host may time out). Paid: a quote is fetched first;
         over-cap or dynamic quotes need confirm=true."""
         return _mcp.video_tool(
-            client, prompt, model=model, duration=duration,
-            negative_prompt=negative_prompt, resolution=resolution,
-            aspect_ratio=aspect_ratio, no_audio=no_audio, image_url=image_url,
-            end_image_url=end_image_url, video_url=video_url, audio_url=audio_url,
-            reference_image_urls=reference_image_urls,
-            reference_video_urls=reference_video_urls,
-            reference_audio_urls=reference_audio_urls,
-            scene_image_urls=scene_image_urls,
-            reference_video_duration=reference_video_duration,
-            output_dir=output_dir, confirm=confirm, max_spend=max_spend,
-            max_wait=max_wait,
+            client, prompt,
+            **_merged(_defaults["video"], dict(
+                model=model, duration=duration,
+                negative_prompt=negative_prompt, resolution=resolution,
+                aspect_ratio=aspect_ratio, no_audio=no_audio, image_url=image_url,
+                end_image_url=end_image_url, video_url=video_url, audio_url=audio_url,
+                reference_image_urls=reference_image_urls,
+                reference_video_urls=reference_video_urls,
+                reference_audio_urls=reference_audio_urls,
+                scene_image_urls=scene_image_urls,
+                reference_video_duration=reference_video_duration,
+                output_dir=output_dir, confirm=confirm, max_spend=max_spend,
+                max_wait=max_wait,
+            )),
         )
 
     @server.tool()
@@ -226,16 +284,19 @@ def build_server(client) -> FastMCP:
         overlays) route to /image/multi-edit. Pricing is dynamic (no up-front estimate),
         so this ALWAYS requires confirm=true."""
         return _mcp.image_edit_tool(
-            client, prompt, input_path=input_path, image_url=image_url,
-            layer_paths=layer_paths, model=model, aspect_ratio=aspect_ratio,
-            resolution=resolution, output_format=output_format,
-            no_safe_mode=no_safe_mode, output_dir=output_dir, confirm=confirm,
-            max_spend=max_spend,
+            client, prompt,
+            **_merged(_defaults["image_edit"], dict(
+                input_path=input_path, image_url=image_url,
+                layer_paths=layer_paths, model=model, aspect_ratio=aspect_ratio,
+                resolution=resolution, output_format=output_format,
+                no_safe_mode=no_safe_mode, output_dir=output_dir, confirm=confirm,
+                max_spend=max_spend,
+            )),
         )
 
     return server
 
 
-def serve(client) -> None:
+def serve(client, doc=None) -> None:
     """Build the server and run it over stdio (blocks until the transport closes)."""
-    build_server(client).run(transport="stdio")
+    build_server(client, doc=doc).run(transport="stdio")

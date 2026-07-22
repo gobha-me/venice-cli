@@ -13,6 +13,7 @@ owns only the "config file" layer. The API key NEVER lives here -- it stays in
 ``credentials`` (see auth.py). The file is written mode 0600 because an MCP
 ``env``/``headers`` entry can carry a bearer token.
 """
+import inspect
 import json
 import os
 import sys
@@ -343,6 +344,39 @@ def resolve_default(command: str, key: str, doc=None):
     if isinstance(val, dict):  # a command section, not a global scalar
         return None
     return val
+
+
+def config_defaults_for(section: str, impl, doc=None) -> dict:
+    """Config-backed defaults for a tool `impl`, as a kwargs dict (issue #58).
+
+    Only keys in ``_COMMAND_MAP[section]`` (the #57 allow-list) whose ``dest`` the
+    `impl` actually accepts are included; each value is coerced. ``doc=None`` (no
+    config) or an unknown section yields ``{}``. Never raises -- a bad value is
+    skipped so tool building can't be broken by config. Callers layer this UNDER a
+    tool's explicit args (precedence: explicit arg > config default > impl hardcoded
+    default), the tool-path analogue of the CLI-side :func:`apply_defaults`.
+    """
+    if doc is None:
+        return {}
+    section_map = _COMMAND_MAP.get(section)
+    if not section_map:
+        return {}
+    try:
+        params = set(inspect.signature(impl).parameters)
+    except (TypeError, ValueError):
+        return {}
+    out: dict = {}
+    for key, (dest, coerce) in section_map.items():
+        if dest not in params:
+            continue  # tool doesn't take this preference
+        raw = resolve_default(section, key, doc)
+        if raw is None:
+            continue
+        try:
+            out[dest] = coerce(raw)
+        except (TypeError, ValueError):
+            pass  # a bad config value shouldn't break tool building
+    return out
 
 
 def apply_defaults(args, command: str, doc=None) -> None:
