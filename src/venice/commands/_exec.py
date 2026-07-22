@@ -89,7 +89,8 @@ _GIT_SCHEMA = _obj(
     {
         "subcommand": _p("string", "Read-only git subcommand (status/diff/log/show/...)."),
         "args": {"type": "array", "items": {"type": "string"},
-                 "description": "Extra arguments for the subcommand."},
+                 "description": "Extra arguments for the subcommand -- do NOT "
+                                "repeat the subcommand itself here."},
     },
     ["subcommand"],
 )
@@ -204,6 +205,12 @@ def git_cmd(root: str, subcommand, *, args=None,
     if args:
         if not isinstance(args, list):
             return _err("args must be a list of strings")
+        if args and str(args[0]).strip() == sub:
+            return _err(
+                f"git: don't repeat the subcommand in 'args'; pass only the "
+                f"flags/arguments that follow {sub!r} (got args starting with "
+                f"{sub!r}, which would run 'git {sub} {sub} ...')"
+            )
         for a in args:
             if not isinstance(a, (str, int, float)):
                 return _err("each arg must be a string")

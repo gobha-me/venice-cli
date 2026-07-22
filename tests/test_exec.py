@@ -6,6 +6,7 @@ throwaway tmpdir (no network, no real key). stdlib-only, runs on the 3.9 floor.
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 from venice.commands import _exec
 
@@ -103,6 +104,30 @@ class TestRunCmd(unittest.TestCase):
         r = _exec.run_cmd(self.root, "sleep 5", exec_timeout=1, confirm=True)
         self.assertEqual(r["status"], "error")
         self.assertIn("timed out", r["message"])
+
+
+class TestGitCmd(unittest.TestCase):
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+
+    def test_duplicate_subcommand_in_args_rejected_before_exec(self):
+        # #69: passing the subcommand inside args (mirroring a CLI invocation)
+        # would run `git remote remote -v`; reject it with a tool error and never
+        # reach subprocess.
+        with mock.patch("venice.commands._exec.subprocess.run") as run:
+            r = _exec.git_cmd(self.root, "remote", args=["remote", "-v"])
+        self.assertEqual(r["status"], "error")
+        self.assertIn("don't repeat the subcommand", r["message"])
+        run.assert_not_called()
+
+    def test_normal_args_are_unchanged(self):
+        # Regression guard: args that do NOT repeat the subcommand still build the
+        # expected argv and run.
+        with mock.patch("venice.commands._exec.subprocess.run") as run:
+            run.return_value = mock.Mock(returncode=0, stdout="origin\n", stderr="")
+            r = _exec.git_cmd(self.root, "remote", args=["-v"])
+        self.assertEqual(r["status"], "ok")
+        self.assertEqual(run.call_args[0][0], ["git", "remote", "-v"])
 
 
 if __name__ == "__main__":
