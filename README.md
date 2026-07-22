@@ -90,6 +90,26 @@ resolves the repo path itself, so the clone can live wherever you like.
 > edits stop taking effect with no error. Pick one; `pip uninstall venice-cli`
 > or `./uninstall.sh` to back the other out.
 
+### Shell completion
+
+`venice completion [bash|zsh]` prints a tab-completion script to stdout, generated
+by introspecting the CLI so it never drifts from the real commands and flags:
+
+```sh
+# bash -- current shell:
+source <(venice completion bash)
+# bash -- persistent (per-user):
+venice completion bash > ~/.local/share/bash-completion/completions/venice
+
+# zsh -- drop it somewhere on your $fpath, named `_venice`:
+venice completion zsh > "${fpath[1]}/_venice"   # then restart zsh
+```
+
+`./install.sh` writes the bash script for you (source installs only); a
+`pip install` uses the `source <(...)` line above. Completion covers subcommands,
+the `config`/`secret` nested actions (with their aliases), and each command's
+flags.
+
 ## First-time setup
 
 ```sh
@@ -1220,6 +1240,7 @@ The player list (`paplay` -> `aplay` -> `ffplay` -> `mpg123` -> `play`
 | `venice mcp-serve` | run an MCP server (stdio) exposing venice tools (needs `[mcp]`) |
 | `venice config add\|list\|remove\|show` | manage the MCP server registry |
 | `venice config get\|set\|unset KEY [VALUE]` | manage default flag values |
+| `venice completion bash\|zsh` | print a shell tab-completion script (generated from the parser) |
 
 ## Tests
 
