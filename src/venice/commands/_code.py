@@ -579,24 +579,29 @@ def code_tools(
         _agent.Tool("read_file",
                     "Read a UTF-8 text file inside the project root and return its "
                     "lines. Use before editing. Read-only.",
-                    _READ_SCHEMA, free(read_file), paid=False),
+                    _READ_SCHEMA, free(read_file), paid=False,
+                    category="fs", tags=("read",)),
         _agent.Tool("list_dir",
                     "List the entries of a directory inside the project root "
                     "(secret-shaped files are hidden). Read-only.",
-                    _LIST_SCHEMA, free(list_dir), paid=False),
+                    _LIST_SCHEMA, free(list_dir), paid=False,
+                    category="fs", tags=("read",)),
         _agent.Tool("grep",
                     "Search project files for a regular expression and return "
                     "matching path:line:text. Read-only.",
-                    _GREP_SCHEMA, free(grep_files), paid=False),
+                    _GREP_SCHEMA, free(grep_files), paid=False,
+                    category="fs", tags=("read", "search")),
         _agent.Tool("write_file",
                     "Create or overwrite a file inside the project root with new "
                     "contents. Mutating -- requires confirmation.",
-                    _WRITE_SCHEMA, paid(write_file), paid=True),
+                    _WRITE_SCHEMA, paid(write_file), paid=True,
+                    category="fs", tags=("write",)),
         _agent.Tool("edit_file",
                     "Replace an exact, unique string in a file inside the root "
                     "(preferred over write_file for small changes). Mutating -- "
                     "requires confirmation.",
-                    _EDIT_SCHEMA, paid(edit_file), paid=True),
+                    _EDIT_SCHEMA, paid(edit_file), paid=True,
+                    category="fs", tags=("write",)),
         _agent.Tool("apply_patch",
                     "Apply a batch of edits grouped per file, atomically across "
                     "all files (validated first, then written all-or-nothing). "
@@ -604,16 +609,19 @@ def code_tools(
                     "string is not unique (use occurrence=N); use edit_file for a "
                     "single unique change. Pass dry_run=true to preview the "
                     "changes without writing. Mutating -- requires confirmation.",
-                    _PATCH_SCHEMA, paid(apply_patch), paid=True),
+                    _PATCH_SCHEMA, paid(apply_patch), paid=True,
+                    category="fs", tags=("write",)),
         _agent.Tool("run",
                     "Run a shell command (/bin/sh -c) with the working directory "
                     "set to the project root; returns exit code + captured output. "
                     "Use for tests/build/git-mutations. Requires confirmation.",
-                    _RUN_SCHEMA, run_invoke, paid=True),
+                    _RUN_SCHEMA, run_invoke, paid=True,
+                    category="exec", tags=("exec", "mutate")),
         _agent.Tool("git",
                     "Run a read-only git subcommand (status/diff/log/show/...) in "
                     "the project root. For commits/adds use the run tool.",
-                    _GIT_SCHEMA, git_invoke, paid=False),
+                    _GIT_SCHEMA, git_invoke, paid=False,
+                    category="vcs", tags=("read",)),
     ]
 
     if include_search and client is not None and _index.discover_store(None) is not None:
@@ -626,6 +634,7 @@ def code_tools(
             "Read-only. Results are a SNAPSHOT of the last index build -- call "
             "reindex after edits, or use grep for live matches.",
             _SEARCH_SCHEMA, search_invoke, paid=False,
+            category="search", tags=("read",),
         ))
 
         def reindex_invoke(arguments, *, confirm: bool = False):
@@ -637,6 +646,7 @@ def code_tools(
             "Re-embeds only changed files. Takes no arguments. Paid -- requires "
             "confirmation.",
             _REINDEX_SCHEMA, reindex_invoke, paid=True,
+            category="search", tags=("write",),
         ))
 
     # Free model-catalog lookups so the agent can pick a valid `model` for the
@@ -647,21 +657,20 @@ def code_tools(
     if client is not None:
         tools.extend(_agent.builtin_tools(
             client,
-            only={
-                "venice_models", "venice_model_details", "venice_vision",
-                "venice_job_status", "venice_job_result",
-            },
+            # #50: the free catalog/vision/job tools, selected by capability
+            # (== {venice_models, venice_model_details, venice_vision,
+            # venice_job_status, venice_job_result}).
+            only=_agent.select(categories={"catalog", "vision", "jobs"}),
             config=config))
 
     if assets and client is not None:
         asset_dir = os.environ.get("VENICE_MCP_OUTPUT_DIR") or root
         tools.extend(_agent.builtin_tools(
             client, max_spend=max_spend, output_dir=asset_dir,
-            only={
-                "venice_image", "venice_image_edit", "venice_sfx",
-                "venice_music", "venice_tts", "venice_upscale", "venice_bg_remove",
-                "venice_video",
-            },
+            # #50: the image/audio/video generation tools, selected by capability
+            # (== the 8 asset names incl. venice_image_edit/venice_video, which live
+            # in _CODE_ASSET_BUILTINS -- select scans the union).
+            only=_agent.select(categories={"image", "audio", "video"}),
             config=config,  # #58: asset tools honor defaults.<cmd>.*
         ))
 

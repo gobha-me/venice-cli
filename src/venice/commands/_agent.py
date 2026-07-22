@@ -29,7 +29,7 @@ import json
 import sys
 import threading
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, NamedTuple, Optional, Tuple
 
 from .. import userconfig
 from . import _exec
@@ -49,6 +49,14 @@ class Tool:
     ``invoke(arguments, *, confirm=False) -> dict`` takes the model-supplied
     arguments object and returns a JSON-serializable result dict. ``paid`` marks
     tools whose result can be a ``confirmation_required`` gate.
+
+    ``category`` (e.g. ``image``/``fs``/``exec``) and ``tags`` are the capability
+    axis (#50): a runtime label carried by every built tool so callers can filter a
+    ``list[Tool]`` by capability. It is ORTHOGONAL to which surface advertises the
+    tool (that split lives in the ``_BUILTINS``/``_CODE_ASSET_BUILTINS`` registries).
+    The registry-level selectors :func:`select`/:func:`tools_in` read the same
+    categories over the built-in registry; category is empty on tools with no
+    registry row (e.g. remote MCP tools).
     """
 
     name: str
@@ -56,6 +64,8 @@ class Tool:
     parameters: dict
     invoke: Callable[..., dict]
     paid: bool = False
+    category: str = ""
+    tags: Tuple[str, ...] = ()
 
 
 def to_openai_tools(tools: List[Tool]) -> List[dict]:
@@ -626,11 +636,30 @@ _BROWSER_CAPTURE_SCHEMA = _obj(
 )
 
 
-# (tool name, `_mcp` impl attribute, description, schema, paid). The impl is
-# stored by NAME and resolved via getattr(_mcp, ...) at builtin_tools() time, so a
-# single source of truth wins and tests can patch `_mcp.<impl>`.
+class ToolSpec(NamedTuple):
+    """One built-in tool's registry row (#50).
+
+    The impl is stored by NAME and resolved via ``getattr(_mcp, impl)`` at
+    :func:`builtin_tools` time, so a single source of truth wins and tests can patch
+    ``_mcp.<impl>``. ``category`` (single, required) + optional ``tags`` are the
+    capability axis the composition API (:func:`select`/:func:`tools_in`) reads.
+    """
+
+    name: str
+    impl: str
+    description: str
+    parameters: dict
+    paid: bool
+    category: str
+    tags: Tuple[str, ...] = ()
+
+
+# The built-in venice tools. ``category`` reproduces the hand-maintained `only=`
+# sets `code_tools` used to pass (see :func:`select`); it is ORTHOGONAL to the
+# `_BUILTINS` vs `_CODE_ASSET_BUILTINS` split, which is the surface/advertisement
+# axis (what `venice chat` shows by default).
 _BUILTINS = [
-    (
+    ToolSpec(
         "venice_image",
         "image_tool",
         "Generate 1-4 image variants from a text prompt via Venice /image/generate. "
@@ -638,16 +667,18 @@ _BUILTINS = [
         "over-cap calls need confirmation.",
         _IMAGE_SCHEMA,
         True,
+        "image",
     ),
-    (
+    ToolSpec(
         "venice_tts",
         "tts_tool",
         "Synthesize speech from text via Venice /audio/speech. Writes an audio file "
         "and returns its path. Paid.",
         _TTS_SCHEMA,
         True,
+        "audio",
     ),
-    (
+    ToolSpec(
         "venice_sfx",
         "sfx_tool",
         "Generate a short sound effect via Venice's async audio queue (blocks with a "
@@ -655,8 +686,9 @@ _BUILTINS = [
         "to queue and return immediately, then fetch via venice_job_result. Paid.",
         _SFX_SCHEMA,
         True,
+        "audio",
     ),
-    (
+    ToolSpec(
         "venice_music",
         "music_tool",
         "Generate long-form music/ambience via Venice's async audio queue (blocks "
@@ -665,8 +697,9 @@ _BUILTINS = [
         "venice_job_result. Paid.",
         _MUSIC_SCHEMA,
         True,
+        "audio",
     ),
-    (
+    ToolSpec(
         "venice_upscale",
         "upscale_tool",
         "Upscale/enhance a local image (factor 1-4) via Venice /image/upscale. Writes "
@@ -674,8 +707,9 @@ _BUILTINS = [
         "confirmation.",
         _UPSCALE_SCHEMA,
         True,
+        "image",
     ),
-    (
+    ToolSpec(
         "venice_bg_remove",
         "bg_remove_tool",
         "Remove an image's background via Venice /image/background-remove, returning a "
@@ -683,16 +717,18 @@ _BUILTINS = [
         "pricing, so it always needs confirmation.",
         _BG_REMOVE_SCHEMA,
         True,
+        "image",
     ),
-    (
+    ToolSpec(
         "venice_chat",
         "chat_tool",
         "Delegate a one-shot sub-completion to a Venice text model (optionally a "
         "different model or character) and return its reply text. Not spend-gated.",
         _CHAT_SCHEMA,
         False,
+        "text",
     ),
-    (
+    ToolSpec(
         "venice_models",
         "models_tool",
         "List available Venice model ids for a catalog type (text/code/image/video/"
@@ -701,8 +737,9 @@ _BUILTINS = [
         "Read-only; not spend-gated.",
         _MODELS_SCHEMA,
         False,
+        "catalog",
     ),
-    (
+    ToolSpec(
         "venice_model_details",
         "model_details_tool",
         "Get one model's details: pricing (cost), capabilities (text models: "
@@ -713,8 +750,9 @@ _BUILTINS = [
         "using it. Read-only; not spend-gated.",
         _MODEL_DETAILS_SCHEMA,
         False,
+        "catalog",
     ),
-    (
+    ToolSpec(
         "venice_vision",
         "vision_tool",
         "Look at an image (a local input_path OR an image_url) with a vision-capable "
@@ -723,8 +761,9 @@ _BUILTINS = [
         "model when model is omitted (see venice_model_details). Not spend-gated.",
         _VISION_SCHEMA,
         False,
+        "vision",
     ),
-    (
+    ToolSpec(
         "project_search",
         "search_tool",
         "Semantic search over the current project's local .venice index (built by "
@@ -735,8 +774,9 @@ _BUILTINS = [
         "call reindex after editing files, or use grep for live matches.",
         _SEARCH_SCHEMA,
         False,
+        "search",
     ),
-    (
+    ToolSpec(
         "reindex",
         "reindex_tool",
         "Rebuild the project's .venice index so project_search reflects edits made "
@@ -746,8 +786,9 @@ _BUILTINS = [
         "confirmation. Errors if no index exists yet (run `venice index` first).",
         _REINDEX_SCHEMA,
         True,
+        "search",
     ),
-    (
+    ToolSpec(
         "venice_job_status",
         "job_status_tool",
         "Peek at a backgrounded media render started with background=true on "
@@ -756,8 +797,9 @@ _BUILTINS = [
         "Read-only, non-blocking; not spend-gated.",
         _JOB_STATUS_SCHEMA,
         False,
+        "jobs",
     ),
-    (
+    ToolSpec(
         "venice_job_result",
         "job_result_tool",
         "Fetch a backgrounded media render's file once ready (started with "
@@ -767,6 +809,7 @@ _BUILTINS = [
         "queue time); not spend-gated.",
         _JOB_RESULT_SCHEMA,
         False,
+        "jobs",
     ),
 ]
 
@@ -774,7 +817,7 @@ _BUILTINS = [
 # caller passes `only=` (e.g. `venice code --assets`), so chat's default stays 8
 # while `code_tools` can still select them by name.
 _CODE_ASSET_BUILTINS = [
-    (
+    ToolSpec(
         "venice_image_edit",
         "image_edit_tool",
         "Edit/inpaint an existing image via Venice /image/edit from a text prompt "
@@ -783,8 +826,9 @@ _CODE_ASSET_BUILTINS = [
         "Dynamic pricing, so it always needs confirmation.",
         _IMAGE_EDIT_SCHEMA,
         True,
+        "image",
     ),
-    (
+    ToolSpec(
         "venice_video",
         "video_tool",
         "Generate a short video via Venice's async video queue (blocks with a capped "
@@ -794,8 +838,67 @@ _CODE_ASSET_BUILTINS = [
         "confirmation.",
         _VIDEO_SCHEMA,
         True,
+        "video",
     ),
 ]
+
+
+# --------------------------------------------------------------------------- #
+# Composition API over the built-in registry (#50)
+#
+# `category` is the capability axis: it reproduces the hand-maintained `only=`
+# name-sets `code_tools` used to pass, so a caller selects tools by capability
+# instead of enumerating names. Read over the UNION of both registries so a
+# `_CODE_ASSET_BUILTINS`-only tool (venice_image_edit/venice_video) is selectable
+# by its category. This is orthogonal to the `_BUILTINS`/`_CODE_ASSET_BUILTINS`
+# split, which stays the surface/advertisement axis for `builtin_tools(only=None)`.
+# --------------------------------------------------------------------------- #
+_REGISTRY = _BUILTINS + _CODE_ASSET_BUILTINS
+
+
+def get(name: str) -> Optional[ToolSpec]:
+    """The registry row for `name` (metadata only, no client), or None."""
+    for spec in _REGISTRY:
+        if spec.name == name:
+            return spec
+    return None
+
+
+def list_categories() -> set:
+    """Every category present in the built-in registry."""
+    return {spec.category for spec in _REGISTRY}
+
+
+def tools_in(category: str) -> set:
+    """The names of registry tools in `category` (empty set if none)."""
+    return {spec.name for spec in _REGISTRY if spec.category == category}
+
+
+def select(categories=None, names=None, exclude=None) -> set:
+    """A set of built-in tool names selected by capability.
+
+    `categories` and/or `names` union into the selection (both None selects the
+    whole registry); `exclude` (names or categories) is subtracted last. Unknown
+    categories/names are simply ignored here -- the authoritative unknown-name guard
+    stays in :func:`builtin_tools` (whose ValueError drives chat's exit 2), so this
+    stays a pure name-set helper the `code_tools` call sites can compose with.
+    """
+    chosen = set()
+    if categories is None and names is None:
+        chosen = {spec.name for spec in _REGISTRY}
+    else:
+        if categories:
+            for cat in categories:
+                chosen |= tools_in(cat)
+        if names:
+            known = {spec.name for spec in _REGISTRY}
+            chosen |= {n for n in names if n in known}
+    if exclude:
+        exclude = set(exclude)
+        chosen -= exclude
+        chosen -= {spec.name for spec in _REGISTRY if spec.category in exclude}
+    return chosen
+
 
 # Loop-controlled kwargs the model must never supply (stripped defensively).
 _CONTROLLED = ("confirm", "max_spend", "output_dir")
@@ -854,6 +957,8 @@ def browser_tools(*, allow=(), deny=(), output_dir=None, config=None) -> List[To
             parameters=_WEB_FETCH_SCHEMA,
             invoke=_web_fetch_invoke,
             paid=False,
+            category="web",
+            tags=("read", "network"),
         ),
         Tool(
             name="browser_capture",
@@ -869,6 +974,8 @@ def browser_tools(*, allow=(), deny=(), output_dir=None, config=None) -> List[To
             parameters=_BROWSER_CAPTURE_SCHEMA,
             invoke=_browser_capture_invoke,
             paid=False,
+            category="web",
+            tags=("read", "network"),
         ),
     ]
 
@@ -943,17 +1050,19 @@ def builtin_tools(
     source = _BUILTINS if only is None else _BUILTINS + _CODE_ASSET_BUILTINS
     tools = [
         Tool(
-            name=name,
-            description=desc,
-            parameters=schema,
+            name=spec.name,
+            description=spec.description,
+            parameters=spec.parameters,
             invoke=(
-                _make_paid(getattr(_mcp, impl_name), _tool_section(name))
-                if paid
-                else _make_free(getattr(_mcp, impl_name), _tool_section(name))
+                _make_paid(getattr(_mcp, spec.impl), _tool_section(spec.name))
+                if spec.paid
+                else _make_free(getattr(_mcp, spec.impl), _tool_section(spec.name))
             ),
-            paid=paid,
+            paid=spec.paid,
+            category=spec.category,
+            tags=spec.tags,
         )
-        for (name, impl_name, desc, schema, paid) in source
+        for spec in source
     ]
 
     if only is not None:
@@ -988,6 +1097,8 @@ def builtin_tools(
             parameters=_exec._RUN_SCHEMA,
             invoke=_shell_invoke,
             paid=True,
+            category="exec",
+            tags=("exec", "mutate"),
         ))
 
     if browser:
