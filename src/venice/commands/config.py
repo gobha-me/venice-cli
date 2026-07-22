@@ -37,7 +37,11 @@ def register(subparsers) -> None:
         description=(
             "Register an MCP server by name. Give either --command (a stdio "
             "server, e.g. `venice config add venice --command venice --arg "
-            "mcp-serve`) or --url (an http/sse server)."
+            "mcp-serve`) or --url (an http/sse server). An --env or --header "
+            "value may contain `@secret:<name>` to pull the value from the "
+            "0600 secret store at attach time (e.g. --header "
+            "'Authorization: Bearer @secret:cluster') instead of storing the "
+            "token in plaintext; add the secret with `venice secret set <name>`."
         ),
     )
     add.add_argument("name", help="Registry name, e.g. 'venice' or 'filesystem'.")
@@ -47,13 +51,15 @@ def register(subparsers) -> None:
     add.add_argument("--arg", dest="arg", action="append", default=[], metavar="ARG",
                      help="Argument for the stdio command (repeatable).")
     add.add_argument("--env", dest="env", action="append", default=[], metavar="K=V",
-                     help="Environment variable for a stdio server (repeatable).")
+                     help="Environment variable for a stdio server (repeatable); "
+                          "the value may contain @secret:<name>.")
     add.add_argument("--url", dest="url", metavar="URL",
                      help="Endpoint for an http/sse server.")
     add.add_argument("--type", dest="server_type", choices=("http", "sse"),
                      default="http", help="Transport for a --url server (default: http).")
     add.add_argument("--header", dest="header", action="append", default=[], metavar="K: V",
-                     help="HTTP header for a --url server (repeatable).")
+                     help="HTTP header for a --url server (repeatable); the "
+                          "value may contain @secret:<name>.")
     add.add_argument("--force", action="store_true",
                      help="Overwrite an existing entry of the same name.")
     add.set_defaults(handler=_run_add)

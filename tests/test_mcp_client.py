@@ -64,6 +64,46 @@ class TestPureHelpers(unittest.TestCase):
         with self.assertRaises(ValueError):
             mc.resolve_specs(["bad"], doc)
 
+    # --- #70: @secret:<name> references resolved at attach time -------------
+    def test_resolve_secret_refs_substitutes_inline_token(self):
+        with mock.patch.object(mc.auth, "load_secret", return_value="tok123") as ls:
+            out = mc.resolve_secret_refs(
+                {"Authorization": "Bearer @secret:cluster"}, where="headers")
+        self.assertEqual(out, {"Authorization": "Bearer tok123"})
+        ls.assert_called_once_with("cluster")
+
+    def test_resolve_secret_refs_multiple_refs_in_one_value(self):
+        # Separate the two refs with a char outside the name set (a hyphen would
+        # be read as part of the first name, since [A-Za-z0-9_.-] allows it).
+        with mock.patch.object(mc.auth, "load_secret",
+                               side_effect=lambda n: {"a": "A", "b": "B"}[n]):
+            out = mc.resolve_secret_refs(
+                {"X": "@secret:a @secret:b"}, where="env")
+        self.assertEqual(out, {"X": "A B"})
+
+    def test_resolve_secret_refs_passes_through_plaintext(self):
+        # No @secret: token -> value untouched and load_secret never consulted
+        # (existing plaintext entries keep working).
+        with mock.patch.object(mc.auth, "load_secret",
+                               side_effect=AssertionError("must not be called")):
+            out = mc.resolve_secret_refs(
+                {"TOKEN": "literal-plaintext"}, where="env")
+        self.assertEqual(out, {"TOKEN": "literal-plaintext"})
+
+    def test_resolve_secret_refs_none_and_empty_are_noops(self):
+        self.assertIsNone(mc.resolve_secret_refs(None, where="env"))
+        self.assertEqual(mc.resolve_secret_refs({}, where="env"), {})
+
+    def test_resolve_secret_refs_missing_secret_raises(self):
+        with mock.patch.object(mc.auth, "load_secret", return_value=None):
+            with self.assertRaises(ValueError) as ctx:
+                mc.resolve_secret_refs(
+                    {"Authorization": "Bearer @secret:cluster"}, where="headers")
+        msg = str(ctx.exception)
+        self.assertIn("cluster", msg)     # names the missing secret
+        self.assertIn("headers", msg)     # names where it was referenced
+        self.assertIn("venice secret set", msg)  # actionable hint
+
     def test_advertised_name_namespaces_and_sanitizes(self):
         self.assertEqual(mc._advertised_name("fs", "read", set()), "fs__read")
         self.assertEqual(mc._advertised_name("my server", "a/b", set()), "my_server__a_b")

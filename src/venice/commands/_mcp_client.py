@@ -42,6 +42,7 @@ import sys
 import threading
 from typing import Dict, List, Optional, Tuple
 
+from .. import auth
 from .. import userconfig
 from . import _agent
 
@@ -67,6 +68,41 @@ def resolve_specs(names, doc) -> List[Tuple[str, dict]]:
             )
         specs.append((name, entry))
     return specs
+
+
+# Secret-name charset mirrors the #43 store validator (^[A-Za-z0-9_.-]+$).
+_SECRET_REF_RE = re.compile(r"@secret:([A-Za-z0-9_.-]+)")
+
+
+def resolve_secret_refs(mapping, *, where: str):
+    """Return a copy of ``mapping`` with each ``@secret:<name>`` token in a value
+    replaced by the live secret from the store (``auth.load_secret``).
+
+    ``@secret:<name>`` may appear anywhere inside a value (e.g. a bearer header
+    ``"Bearer @secret:cluster"``); every occurrence is substituted independently.
+    Values with no ref pass through unchanged, so existing plaintext ``env`` /
+    ``headers`` entries are untouched (#70 is fully back-compatible). Raises
+    ``ValueError`` (naming the secret + ``where``) if a referenced secret is unset,
+    so a missing token surfaces as a clear attach-time error instead of a
+    downstream 401.
+    """
+    if not mapping:
+        return mapping
+
+    def _sub(m):
+        name = m.group(1)
+        val = auth.load_secret(name)
+        if val is None:
+            raise ValueError(
+                f"MCP server secret {name!r} referenced in {where} is not set -- "
+                f"add it with 'venice secret set {name}' or set its env var"
+            )
+        return val
+
+    resolved = {}
+    for key, value in mapping.items():
+        resolved[key] = _SECRET_REF_RE.sub(_sub, value) if isinstance(value, str) else value
+    return resolved
 
 
 _NAME_RE = re.compile(r"[^A-Za-z0-9_-]")
@@ -313,7 +349,8 @@ class _Bridge:
             # StdioServerParameters.env REPLACES the child environment (no merge),
             # so a bare {"TOKEN": ...} would strip PATH/HOME and the server would
             # fail to spawn. Layer the registry env over the SDK's safe default.
-            env = {**get_default_environment(), **(entry.get("env") or {})}
+            env = {**get_default_environment(),
+                   **(resolve_secret_refs(entry.get("env"), where="env") or {})}
             params = StdioServerParameters(
                 command=entry["command"],
                 args=list(entry.get("args") or []),
@@ -327,7 +364,7 @@ class _Bridge:
             return read, write
 
         url = entry.get("url")
-        headers = entry.get("headers") or None
+        headers = resolve_secret_refs(entry.get("headers"), where="headers") or None
         if entry.get("type") == "sse":
             from mcp.client.sse import sse_client
 
