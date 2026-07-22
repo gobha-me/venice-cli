@@ -652,7 +652,9 @@ produces a final answer. These run **in-process on the `[openai]` extra alone**
 seven of the capabilities `venice mcp-serve` exposes (which adds `venice_video`
 and `venice_image_edit`) — plus `project_search`,
 a read-only [semantic search](#semantic-search) over the project's local
-`venice index` for locating code by meaning before acting on it, and
+`venice index` for locating code by meaning before acting on it (a **snapshot** of
+the last index build — pair it with `reindex`, a paid tool that rebuilds the index
+so recall reflects edits made this session), and
 `venice_models`, a read-only lookup that lists model ids for a given catalog
 type (its single `type` arg — text/code/image/video/music/tts/embedding/upscale,
 or `all`) so the model can pick a valid `model` for the other tools instead of
@@ -930,6 +932,16 @@ ignore `.venice/`. Config-backable per-flag via `defaults.index.*` /
 `project_search` tool (see **Agent / tool calling**), so a `venice chat --tools`
 session can locate code by meaning before acting on it.
 
+> **`project_search` is a snapshot; `grep` is live.** The `.venice` index is a
+> point-in-time build, so `project_search` returns pre-edit content for files the
+> agent changed this session, while the `grep` tool always walks the working tree.
+> After edits, the agent can call the **`reindex`** tool to rebuild the index (it
+> re-embeds only the files whose contents changed, reusing the index's existing
+> embedding backend). `reindex` is **paid** (it calls the embeddings API) and
+> routes through the same confirm gate as the other paid tools — approve it at the
+> `y/a/N` prompt (or run non-interactively with `--yes`). If no index exists yet it
+> tells you to run `venice index` first.
+
 ## Coding agent (venice code)
 
 `venice code` is a self-contained coding agent ("vcoder") built on the tool loop.
@@ -982,7 +994,8 @@ complete — a loud stderr warning is printed).
 | --- | --- | --- |
 | `read_file` / `list_dir` / `grep` | read a file, list a dir, regex-search the tree | no |
 | `git` | read-only git (`status`/`diff`/`log`/`show`/…) | no |
-| `project_search` | semantic search over the `.venice` index (if built) | no |
+| `project_search` | semantic search over the `.venice` index (if built) — a **snapshot** of the last build; use `grep` for live matches | no |
+| `reindex` | rebuild the `.venice` index so `project_search` reflects this session's edits (re-embeds only changed files); present only when an index exists | yes (paid) |
 | `venice_vision` | describe/inspect a local image or image URL via a vision-capable model | no |
 | `write_file` | create/overwrite a file (atomic) | yes |
 | `edit_file` | replace an exact, unique string in a file | yes |

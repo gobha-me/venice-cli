@@ -513,6 +513,7 @@ _SEARCH_SCHEMA = _obj(
     },
     ["query"],
 )
+_REINDEX_SCHEMA = _obj({})  # no parameters -- rebuilds the discovered .venice index
 
 
 # --------------------------------------------------------------------------- #
@@ -616,8 +617,20 @@ def code_tools(
             "project_search",
             "Semantic search over the project's local .venice index (built by "
             "`venice index`) for code relevant to a natural-language query. "
-            "Read-only.",
+            "Read-only. Results are a SNAPSHOT of the last index build -- call "
+            "reindex after edits, or use grep for live matches.",
             _SEARCH_SCHEMA, search_invoke, paid=False,
+        ))
+
+        def reindex_invoke(arguments, *, confirm: bool = False):
+            return _mcp.reindex_tool(client, confirm=confirm)
+        tools.append(_agent.Tool(
+            "reindex",
+            "Rebuild the project's .venice index so project_search reflects edits "
+            "made this session (project_search is a snapshot; grep is live). "
+            "Re-embeds only changed files. Takes no arguments. Paid -- requires "
+            "confirmation.",
+            _REINDEX_SCHEMA, reindex_invoke, paid=True,
         ))
 
     # Free model-catalog lookups so the agent can pick a valid `model` for the

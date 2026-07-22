@@ -749,9 +749,11 @@ class TestChatAgent(unittest.TestCase):
                     f"{t['function']['name']} leaks control kwarg {banned}",
                 )
         names = {t["function"]["name"] for t in tools}
-        # media/chat + project_search + models(+details) + vision + job status/result
-        self.assertEqual(len(names), 13)
+        # media/chat + project_search + reindex + models(+details) + vision
+        # + job status/result
+        self.assertEqual(len(names), 14)
         self.assertIn("project_search", names)
+        self.assertIn("reindex", names)
         self.assertIn("venice_models", names)
         self.assertIn("venice_model_details", names)
         self.assertIn("venice_vision", names)
@@ -886,7 +888,7 @@ class TestChatMcp(unittest.TestCase):
         names = self._tool_names(calls[0])
         self.assertIn("fs__read", names)          # remote tool advertised
         self.assertIn("venice_image", names)      # alongside the built-ins
-        self.assertEqual(len(names), 14)          # 13 built-ins + 1 remote
+        self.assertEqual(len(names), 15)          # 14 built-ins + 1 remote
         self.assertEqual(attach.specs, [("fs", {"command": "srv", "args": []})])
         tool_msgs = [m for m in calls[1]["messages"] if m.get("role") == "tool"]
         self.assertIn("127.0.0.1", tool_msgs[0]["content"])
@@ -900,7 +902,7 @@ class TestChatMcp(unittest.TestCase):
         )
         self.assertEqual(rc, 0)
         attach.assert_not_called()
-        self.assertEqual(len(self._tool_names(calls[0])), 13)  # built-ins only
+        self.assertEqual(len(self._tool_names(calls[0])), 14)  # built-ins only
 
     def test_unknown_mcp_server_exits_2_before_model(self):
         attach = mock.MagicMock()
@@ -988,8 +990,9 @@ class TestBuiltinToolsRegistry(unittest.TestCase):
         # chat's default advertisement must not grow when code gains asset tools
         from venice.commands import _agent
         names = {t.name for t in _agent.builtin_tools(object())}
-        # +venice_models +model_details +vision +job_status +job_result (all free)
-        self.assertEqual(len(names), 13)
+        # +venice_models +model_details +vision +job_status +job_result +reindex
+        self.assertEqual(len(names), 14)
+        self.assertIn("reindex", names)
         self.assertIn("venice_models", names)
         self.assertIn("venice_model_details", names)
         self.assertIn("venice_vision", names)

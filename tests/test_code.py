@@ -397,6 +397,20 @@ class TestCodeFactory(unittest.TestCase):
         names = {t.name for t in _code.code_tools("/tmp", client=object(),
                                                   include_search=True)}
         self.assertNotIn("project_search", names)  # no .venice index discoverable
+        self.assertNotIn("reindex", names)         # #44: reindex gated the same way
+
+    def test_reindex_present_with_index(self):
+        # #44: with an index discoverable, both project_search and reindex appear;
+        # reindex is paid (routes through the confirm gate).
+        with mock.patch.object(_code._index, "discover_store",
+                               return_value="/tmp/proj/.venice/index"):
+            by = {t.name: t for t in _code.code_tools("/tmp", client=object(),
+                                                      include_search=True)}
+        self.assertIn("project_search", by)
+        self.assertIn("reindex", by)
+        self.assertTrue(by["reindex"].paid)
+        self.assertFalse(by["project_search"].paid)
+        self.assertEqual(by["reindex"].parameters["properties"], {})
 
     def test_assets_absent_by_default(self):
         names = {t.name for t in _code.code_tools("/tmp", client=object())}

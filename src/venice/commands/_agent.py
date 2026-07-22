@@ -344,6 +344,8 @@ _SEARCH_SCHEMA = _obj(
     required=["query"],
 )
 
+_REINDEX_SCHEMA = _obj({})  # no parameters -- rebuilds the discovered .venice index
+
 _MODELS_SCHEMA = _obj(
     {
         "type": {
@@ -523,9 +525,21 @@ _BUILTINS = [
         "`venice index`) for the chunks most relevant to a natural-language query. "
         "Returns file paths with line ranges and a short preview -- use it to locate "
         "code by meaning before reading files. Read-only; not spend-gated. Errors if "
-        "no index exists yet.",
+        "no index exists yet. NOTE: results are a SNAPSHOT of the last index build; "
+        "call reindex after editing files, or use grep for live matches.",
         _SEARCH_SCHEMA,
         False,
+    ),
+    (
+        "reindex",
+        "reindex_tool",
+        "Rebuild the project's .venice index so project_search reflects edits made "
+        "this session (project_search is a snapshot; grep is live). Re-embeds only "
+        "files whose contents changed, reusing the index's existing embedding "
+        "backend. Takes no arguments. Paid (embeds changed files) -- always needs "
+        "confirmation. Errors if no index exists yet (run `venice index` first).",
+        _REINDEX_SCHEMA,
+        True,
     ),
     (
         "venice_job_status",
