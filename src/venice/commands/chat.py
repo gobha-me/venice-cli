@@ -20,7 +20,7 @@ from typing import Optional
 
 from .. import auth, userconfig
 from ..client import build_client_from_auth
-from . import _agent, _compact, _mcp, _mcp_client, _models, _openai, _persona, _repl
+from . import _agent, _compact, _mcp, _mcp_client, _models, _openai, _persona, _repl, _session
 
 
 def register(subparsers) -> None:
@@ -83,9 +83,18 @@ def register(subparsers) -> None:
         "/system /model /reset /save /exit.",
     )
     it.add_argument(
-        "--resume", default=None, metavar="FILE", dest="resume",
-        help="Load a saved transcript JSON and continue it interactively "
-        "(pairs with /save).",
+        "--resume", default=None, metavar="ID|FILE", dest="resume",
+        help="Resume a saved session by id (see `venice sessions ls`) or load a "
+        "transcript JSON file, continuing it interactively (#47).",
+    )
+    it.add_argument(
+        "--continue", "-c", action="store_true", default=None, dest="cont",
+        help="Resume the most recent chat session (#47).",
+    )
+    it.add_argument(
+        "--ephemeral", "--no-save", action="store_true", default=None,
+        dest="ephemeral",
+        help="Do not auto-save this session to ~/.config/venice/sessions/ (#47).",
     )
     it.add_argument(
         "--auto-compact", action="store_true", default=None, dest="auto_compact",
@@ -340,12 +349,22 @@ def _is_interactive(args, message) -> bool:
     """REPL when explicitly requested (`-i` / `--resume`) or when there is no
     message and stdin is an interactive terminal. A piped or `-` message is
     always one-shot."""
-    if getattr(args, "interactive", False) or getattr(args, "resume", None):
+    if getattr(args, "interactive", False) or getattr(args, "resume", None) \
+            or getattr(args, "cont", None):
         return True
     return message is None and sys.stdin.isatty()
 
 
 def _run(args) -> int:
+    # Resolve a resumed session (#47) BEFORE apply_defaults so restored settings
+    # (model/temperature/max_tokens/max_tool_calls) outrank config defaults: both
+    # only fill None dests, and the session runs first -> explicit flag > session > config.
+    try:
+        session = _session.resolve_from_args(args, "chat")
+    except _session.SessionError as e:
+        print(f"chat: {e}", file=sys.stderr)
+        return 2
+    _session.apply_to_args(args, session, "chat")
     userconfig.apply_defaults(args, "chat")
     # --shell (#33) and --browser (#71) are tools, so they imply the agent loop -- flip
     # --tools on so both the one-shot trigger below and the REPL's tools gate pick them up.
@@ -388,7 +407,8 @@ def _run(args) -> int:
     oai = _openai.build_openai(openai, client)
 
     if interactive:
-        return _repl.run(args, oai, openai, client, models, model, initial=message)
+        return _repl.run(args, oai, openai, client, models, model, initial=message,
+                         session=session, ephemeral=bool(getattr(args, "ephemeral", None)))
 
     kwargs = _build_kwargs(args, model, message)
 

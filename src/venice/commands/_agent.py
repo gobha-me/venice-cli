@@ -106,6 +106,19 @@ def _as_int(v) -> int:
     return 0
 
 
+def _as_float(v) -> float:
+    """A non-negative float from a stored cost field; 0.0 for None/garbage/negative.
+
+    Mirrors :func:`_as_int` (bool is never a real cost); used when restoring a
+    persisted ledger snapshot (#47) from a possibly hand-edited envelope.
+    """
+    if isinstance(v, bool):
+        return 0.0
+    if isinstance(v, (int, float)):
+        return float(v) if v > 0 else 0.0
+    return 0.0
+
+
 def _detail(usage: dict, section: str, key: str):
     """A nested usage sub-field (e.g. ``prompt_tokens_details.cached_tokens``).
 
@@ -156,6 +169,46 @@ class CostLedger:
         self._out = _usd_per_token(pricing, "output")
         self._cache_in = _usd_per_token(pricing, "cache_input")
         self._cache_write = _usd_per_token(pricing, "cache_write")
+
+    def to_dict(self) -> dict:
+        """Serialize the running accumulators for cross-resume persistence (#47/#75).
+
+        Only the tallies are stored -- the per-token rates and `max_spend` are
+        re-derived from the catalog/cap at construction, so a resumed ledger keeps
+        accruing at the *current* model's prices while carrying past totals forward.
+        """
+        return {
+            "total": self.total,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "cache_read_tokens": self.cache_read_tokens,
+            "cache_write_tokens": self.cache_write_tokens,
+            "reasoning_tokens": self.reasoning_tokens,
+            "unpriced": self.unpriced,
+        }
+
+    def restore(self, d) -> None:
+        """Seed the accumulators from a :meth:`to_dict` snapshot (resume, #47).
+
+        Additive onto the current (freshly-priced) ledger so a session resumed
+        mid-run keeps its cumulative token/cost totals. Tolerant of a partial or
+        foreign dict (missing keys count as 0) so a hand-edited envelope can't crash
+        the REPL. Also accepts the raw #75 usage field names as a fallback.
+        """
+        if not isinstance(d, dict):
+            return
+        self.total += _as_float(d.get("total"))
+        self.prompt_tokens += _as_int(d.get("prompt_tokens"))
+        self.completion_tokens += _as_int(d.get("completion_tokens"))
+        self.cache_read_tokens += _as_int(
+            d.get("cache_read_tokens", d.get("cached_tokens"))
+        )
+        self.cache_write_tokens += _as_int(
+            d.get("cache_write_tokens", d.get("cache_creation_input_tokens"))
+        )
+        self.reasoning_tokens += _as_int(d.get("reasoning_tokens"))
+        if d.get("unpriced"):
+            self.unpriced = True
 
     def record(self, usage) -> float:
         """Add one turn's `usage` (dict or SDK obj); return this turn's cost.

@@ -35,6 +35,8 @@ def _args(**ov):
         mcp=None, no_mcp=False,
         # --- interactive / REPL (#22) ---
         interactive=False, resume=None,
+        # --- session store (#47) ---
+        cont=None, ephemeral=None,
         # --- auto-compaction (#48) ---
         auto_compact=None, compact_threshold=None, compact_keep_turns=None,
         # --- session spend cap (#66) ---
@@ -42,6 +44,24 @@ def _args(**ov):
     )
     base.update(ov)
     return argparse.Namespace(**base)
+
+
+# Auto-save is on by default (#47): keep this module hermetic even though its
+# one-shot paths don't persist -- an interactive chat._run here would otherwise
+# write to ~/.config/venice/sessions.
+_SESSIONS_TMP = None
+
+
+def setUpModule():
+    global _SESSIONS_TMP
+    _SESSIONS_TMP = tempfile.mkdtemp()
+    os.environ["VENICE_SESSIONS_DIR"] = _SESSIONS_TMP
+
+
+def tearDownModule():
+    os.environ.pop("VENICE_SESSIONS_DIR", None)
+    if _SESSIONS_TMP:
+        __import__("shutil").rmtree(_SESSIONS_TMP, ignore_errors=True)
 
 
 # --- fake OpenAI response objects ---

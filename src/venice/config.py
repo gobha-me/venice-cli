@@ -16,6 +16,15 @@ SECRETS_FILE = CONFIG_DIR / "secrets.json"
 # `credentials` lives). Names resolve to <PERSONAS_DIR>/<name>.md|.txt only.
 PERSONAS_DIR = CONFIG_DIR / "personas"
 
+# `venice chat`/`venice code` auto-save each REPL session (id + settings + usage +
+# transcript) here (#47), so `--resume <id>` / `--continue` restore a session, not
+# just its messages. One JSON envelope per session at <SESSIONS_DIR>/<id>.json,
+# written 0600 (mirrors the credential store's hygiene, though transcripts are not
+# secrets). $VENICE_SESSIONS_DIR overrides the location (mirrors $VENICE_INDEX_DIR),
+# resolved at runtime so this module stays side-effect-free.
+SESSIONS_DIR = CONFIG_DIR / "sessions"
+ENV_SESSIONS_DIR = "VENICE_SESSIONS_DIR"
+
 ENV_API_KEY = "VENICE_API_KEY"
 ENV_BASE_URL = "VENICE_BASE_URL"
 DEFAULT_BASE_URL = "https://api.venice.ai/api/v1"

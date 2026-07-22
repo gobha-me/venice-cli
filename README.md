@@ -531,15 +531,23 @@ venice chat "ping" --json | jq '.choices[0].message.content'
 With `-i`/`--interactive` — or simply no message on a terminal — `venice chat`
 drops into a REPL that holds the conversation in memory across turns. All the
 Venice extensions and `--tools` (each turn becomes an
-[agent](#agent--tool-calling) turn) carry over. Transcripts are plain message JSON, so sessions are scriptable and
-survive restarts.
+[agent](#agent--tool-calling) turn) carry over. Each REPL is a **session** that
+auto-saves after every turn (see [Sessions](#sessions), below), so you can pick
+it back up later — settings and all.
 
 ```sh
 # Start a conversation (or just run `venice chat` on a TTY).
 venice chat -i --system "You are a terse assistant."
 
-# Resume a saved transcript and keep going.
+# Resume the most recent chat session, or a specific one by id.
+venice chat --continue
+venice chat --resume 20260722T220353-9ab8e7
+
+# Resume an old hand-saved transcript file (still works).
 venice chat --resume session.json
+
+# Don't persist this one.
+venice chat -i --ephemeral
 ```
 
 In-REPL slash-commands: `/system [text]` (show/set the system prompt),
@@ -574,6 +582,33 @@ back to a chars-per-token estimate otherwise), so it fires on the real prompt
 size rather than a guess. Compaction is best-effort — a failed summarization
 call leaves the history untouched — and never orphans a tool result from its
 assistant turn. It's off by default because it costs a summarization call.
+
+#### Sessions
+
+Every `venice chat` / `venice code` REPL is a **session** that auto-saves after
+each turn to `~/.config/venice/sessions/<id>.json` (mode 0600;
+`$VENICE_SESSIONS_DIR` overrides the location). Unlike a bare `/save` transcript,
+a session travels with its **settings** — model, system prompt, generation
+parameters, `max-tool-calls`, the `venice code` sandbox root, and the running
+token/cost usage — so resuming restores the whole context, not just the messages.
+The API key is never written to a session.
+
+```sh
+venice sessions ls              # list saved sessions (newest first)
+venice sessions show <id>       # settings + message summary for one session
+venice sessions rm <id>         # delete a session
+
+venice chat --continue          # resume the most recent chat session
+venice chat --resume <id>       # resume a specific session by id (restores settings)
+venice code --continue          # (code's most recent session re-sandboxes to its root)
+```
+
+Resume precedence is **explicit flag > saved session > config default**: passing
+e.g. `--model` on resume overrides the session's saved model, but omitting it
+keeps what the session used. `--resume` still accepts a plain transcript **file**
+for back-compat (it's imported into a fresh session, leaving the file untouched).
+Pass `--ephemeral` (alias `--no-save`) to run without persisting a session.
+`/save [file]` remains an explicit, separate transcript export.
 
 #### Personas (local system-prompt files)
 
@@ -1299,10 +1334,11 @@ The player list (`paplay` -> `aplay` -> `ffplay` -> `mpg123` -> `play`
 | `venice master INPUT [--loop] [--lufs N] [--bit-depth N] [...]` | master audio to WAV (48k/24-bit, LUFS/true-peak) |
 | `venice contact-sheet DIR_OR_GLOB [--cols N] [--cell WxH] [--label] [...]` | tile images into one contact sheet (no API call) |
 | `venice chat MESSAGE [--system S] [--model M] [--web-search on] [...]` | one-shot chat completion (OpenAI SDK) |
-| `venice chat [-i] [--resume FILE]` | interactive multi-turn REPL (conversation state, `/`-commands, transcripts) |
+| `venice chat [-i] [--continue\|--resume ID\|FILE] [--ephemeral]` | interactive multi-turn REPL (auto-saved sessions, `/`-commands, transcripts) |
+| `venice sessions ls\|show\|rm [ID]` | list/inspect/remove auto-saved chat & code sessions (`~/.config/venice/sessions/`, 0600) |
 | `venice embed [TEXT] [--from-file PATH] [--model M] [--dimensions N] [--json] [--embed-base-url URL --embed-model M [--embed-ca-bundle PATH \| --embed-insecure]]` | text embeddings (OpenAI SDK; alt/local backend) |
 | `venice index [PATH] [--model M] [--embed-base-url URL --embed-model M [--embed-ca-bundle PATH \| --embed-insecure]] [...]` / `venice search QUERY [-k N] [--json] [--embed-ca-bundle PATH \| --embed-insecure]` | build / query a local semantic index of a project tree |
-| `venice code [TASK] [--auto\|--manual] [--plan-only] [-i] [--root DIR] [--json] [...]` | coding agent: plan → accept → edit/run a project (needs `[openai]` + tool-calling model) |
+| `venice code [TASK] [--auto\|--manual] [--plan-only] [-i] [--root DIR] [--continue\|--resume ID\|FILE] [--ephemeral] [--json] [...]` | coding agent: plan → accept → edit/run a project (needs `[openai]` + tool-calling model) |
 | `venice mcp-serve` | run an MCP server (stdio) exposing venice tools (needs `[mcp]`) |
 | `venice config add\|list\|remove\|show` | manage the MCP server registry |
 | `venice config get\|set\|unset KEY [VALUE]` | manage default flag values |

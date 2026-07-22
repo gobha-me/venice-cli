@@ -18,6 +18,23 @@ from tests.test_chat import (
 )
 
 
+# Auto-save is on by default (#47): keep this module hermetic (belt-and-suspenders
+# on top of the per-run redirects) so no code._run ever writes to the real home.
+_SESSIONS_TMP = None
+
+
+def setUpModule():
+    global _SESSIONS_TMP
+    _SESSIONS_TMP = tempfile.mkdtemp()
+    os.environ["VENICE_SESSIONS_DIR"] = _SESSIONS_TMP
+
+
+def tearDownModule():
+    os.environ.pop("VENICE_SESSIONS_DIR", None)
+    if _SESSIONS_TMP:
+        __import__("shutil").rmtree(_SESSIONS_TMP, ignore_errors=True)
+
+
 def _code_args(**ov):
     base = dict(
         task=None, root=None, model=None, system=None, temperature=None,
@@ -25,7 +42,7 @@ def _code_args(**ov):
         plan_only=False, no_plan=False, no_verify=False, max_tool_calls=None,
         exec_timeout=None, interactive=False, resume=None, assets=None,
         auto_compact=None, compact_threshold=None, compact_keep_turns=None,
-        session_max_spend=None,
+        session_max_spend=None, cont=None, ephemeral=None,
     )
     base.update(ov)
     return argparse.Namespace(**base)
@@ -53,7 +70,10 @@ class TestCodeCommand(unittest.TestCase):
         fake, calls = _fake_openai_seq(seq)
         stdin = mock.MagicMock()
         stdin.isatty.return_value = False  # one-shot, non-interactive
-        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+        self._sess_dir = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(self._sess_dir, ignore_errors=True))
+        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake",
+                                          "VENICE_SESSIONS_DIR": self._sess_dir}), \
              mock.patch("venice.client.urllib.request.urlopen",
                         urlopen or _urlopen_ok()), \
              mock.patch("openai.OpenAI", return_value=fake), \
@@ -347,11 +367,14 @@ class TestCodeCommand(unittest.TestCase):
 
         def _fake_repl_run(args, oai, openai, client, models, model,
                            initial=None, *, tools_session=None, gen_kwargs=None,
-                           label="venice chat", max_tool_calls=8):
+                           label="venice chat", max_tool_calls=8, session=None,
+                           ephemeral=False, root=None, system_reseed=False):
             captured["tools_session"] = tools_session
             captured["label"] = label
             captured["initial"] = initial
             captured["max_tool_calls"] = max_tool_calls
+            captured["root"] = root
+            captured["system_reseed"] = system_reseed
             return 0
 
         stdin = mock.MagicMock()
@@ -372,6 +395,89 @@ class TestCodeCommand(unittest.TestCase):
         self.assertEqual(captured["initial"], "hi")
         # code -i gets its higher default budget (25), not the chat REPL's 8
         self.assertEqual(captured["max_tool_calls"], code._DEFAULT_MAX_TOOL_CALLS)
+        self.assertTrue(captured["system_reseed"])       # code always reseeds (#47)
+        self.assertEqual(captured["root"], self.root)
+
+    # --- session resume (#47) ---
+    def _mk_zone(self):
+        from venice.commands import _session
+        zone = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(zone, ignore_errors=True))
+        return zone, _session
+
+    def _run_interactive(self, args, seq, inputs, zone):
+        from venice.commands import code
+        fake, calls = _fake_openai_seq(seq)
+        stdin = mock.MagicMock()
+        stdin.isatty.return_value = True
+        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake",
+                                          "VENICE_SESSIONS_DIR": zone}), \
+             mock.patch("venice.client.urllib.request.urlopen", _urlopen_ok()), \
+             mock.patch("openai.OpenAI", return_value=fake), \
+             mock.patch("builtins.input", side_effect=inputs), \
+             mock.patch.object(sys, "stdin", stdin), \
+             mock.patch.object(sys, "stdout", io.StringIO()), \
+             mock.patch.object(sys, "stderr", io.StringIO()):
+            rc = code._run(args)
+        return rc, calls
+
+    def test_resume_rebuilds_system_prompt_against_new_root(self):
+        zone, _session = self._mk_zone()
+        stale = _session.new_session(
+            "code", label="venice code", model="llama-3.3-70b",
+            root="/nonexistent/oldroot",
+            messages=[{"role": "system", "content": "STALE root=/nonexistent/oldroot"},
+                      {"role": "user", "content": "prev"},
+                      {"role": "assistant", "content": "ok"}],
+        )
+        with mock.patch.dict(os.environ, {"VENICE_SESSIONS_DIR": zone}):
+            _session.save(stale)
+        # Resume by id with an explicit --root: the leading system message must be
+        # rebuilt against the NEW root, not the persisted stale one.
+        rc, calls = self._run_interactive(
+            _code_args(resume=stale.id, root=self.root, auto=True),
+            [FakeToolCompletion("done")],           # one turn, no tool calls -> ends
+            ["carry on", "/exit"], zone,
+        )
+        self.assertEqual(rc, 0)
+        sysmsg = calls[0]["messages"][0]
+        self.assertEqual(sysmsg["role"], "system")
+        self.assertIn(self.root, sysmsg["content"])
+        self.assertNotIn("/nonexistent/oldroot", sysmsg["content"])
+
+    def test_resume_restores_saved_root_when_no_root_flag(self):
+        zone, _session = self._mk_zone()
+        saved_root = os.path.realpath(self.root)
+        sess = _session.new_session(
+            "code", label="venice code", model="llama-3.3-70b", root=saved_root,
+            messages=[{"role": "user", "content": "prev"}],
+        )
+        with mock.patch.dict(os.environ, {"VENICE_SESSIONS_DIR": zone}):
+            _session.save(sess)
+
+        captured = {}
+
+        def _fake_repl_run(a, *rest, root=None, session=None, **kw):
+            captured["root"] = root
+            captured["session_id"] = session.id if session else None
+            return 0
+
+        from venice.commands import code
+        fake, _c = _fake_openai_seq([])
+        stdin = mock.MagicMock()
+        stdin.isatty.return_value = True
+        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake",
+                                          "VENICE_SESSIONS_DIR": zone}), \
+             mock.patch("venice.client.urllib.request.urlopen", _urlopen_ok()), \
+             mock.patch("openai.OpenAI", return_value=fake), \
+             mock.patch("venice.commands._repl.run", _fake_repl_run), \
+             mock.patch.object(sys, "stdin", stdin), \
+             mock.patch.object(sys, "stdout", io.StringIO()), \
+             mock.patch.object(sys, "stderr", io.StringIO()):
+            rc = code._run(_code_args(cont=True))       # --continue, no --root
+        self.assertEqual(rc, 0)
+        self.assertEqual(captured["root"], saved_root)   # faithful restore
+        self.assertEqual(captured["session_id"], sess.id)
 
 
 if __name__ == "__main__":
