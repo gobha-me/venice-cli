@@ -51,6 +51,19 @@ link() {
 link "$BIN_SRC" "$BIN_DST"
 link "$PKG_SRC" "$LIB_DST"
 
+# Bash completion (best-effort; source installs only). pip users instead run
+# `source <(venice completion bash)`. Never fatal: a missing dir or unwritable
+# path just skips it (a partial write on failure is cleaned up).
+COMPL_DST="${XDG_DATA_HOME:-$HOME/.local/share}/bash-completion/completions/venice"
+if mkdir -p "$(dirname "$COMPL_DST")" 2>/dev/null \
+   && "$BIN_SRC" completion bash > "$COMPL_DST" 2>/dev/null; then
+    echo "wrote    $COMPL_DST  (bash completion)"
+else
+    rm -f "$COMPL_DST" 2>/dev/null || true
+    echo "skip     bash completion (run: source <(venice completion bash))"
+fi
+
 echo
 echo "Done. Try: venice --help"
 echo "First-time setup: venice login"
+echo "Shell completion: source <(venice completion bash)   # or zsh"

@@ -25,6 +25,16 @@ unlink_if_ours() {
 unlink_if_ours "$HOME/.local/bin/venice" "$REPO/bin/venice"
 unlink_if_ours "$HOME/.local/lib/venice" "$REPO/src/venice"
 
+# Remove the bash completion install.sh wrote -- but only if it's ours (carries
+# the generated `complete -F _venice venice` line), never a hand-placed file.
+COMPL_DST="${XDG_DATA_HOME:-$HOME/.local/share}/bash-completion/completions/venice"
+if [ -f "$COMPL_DST" ] && grep -q "complete -F _venice venice" "$COMPL_DST" 2>/dev/null; then
+    rm -f "$COMPL_DST"
+    echo "removed  $COMPL_DST"
+elif [ -e "$COMPL_DST" ]; then
+    echo "skip     $COMPL_DST (not ours)"
+fi
+
 echo
 echo "Credentials at $HOME/.config/venice/credentials were NOT removed."
 echo "To wipe: shred -u ~/.config/venice/credentials && rmdir ~/.config/venice"
