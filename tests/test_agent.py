@@ -758,5 +758,87 @@ class TestConfigDefaults(unittest.TestCase):
         self.assertIs(captured["hide_watermark"], True)
 
 
+class TestToolRegistry(unittest.TestCase):
+    """#50: the category axis + the select/tools_in/list_categories/get API.
+
+    The core invariant is that `select(categories=...)` reproduces the exact
+    hand-maintained `only=` name-sets `code_tools` used to pass, so the refactor is
+    behavior-preserving. The drift guard catches a future tool added without a
+    category (or into a bogus one).
+    """
+
+    # The two legacy `_code.code_tools` only= sets, as of the refactor.
+    _CATALOG = {"venice_models", "venice_model_details", "venice_vision",
+                "venice_job_status", "venice_job_result"}
+    _ASSETS = {"venice_image", "venice_image_edit", "venice_sfx", "venice_music",
+               "venice_tts", "venice_upscale", "venice_bg_remove", "venice_video"}
+
+    def test_select_reproduces_catalog_block(self):
+        self.assertEqual(
+            _agent.select(categories={"catalog", "vision", "jobs"}), self._CATALOG)
+
+    def test_select_reproduces_asset_block(self):
+        # spans the union: venice_image_edit/venice_video live in _CODE_ASSET_BUILTINS
+        self.assertEqual(
+            _agent.select(categories={"image", "audio", "video"}), self._ASSETS)
+
+    def test_select_all_when_unfiltered(self):
+        names = {s.name for s in _agent._REGISTRY}
+        self.assertEqual(_agent.select(), names)
+        self.assertEqual(len(names), 16)
+
+    def test_select_names_ignores_unknown(self):
+        self.assertEqual(
+            _agent.select(names={"venice_tts", "does_not_exist"}), {"venice_tts"})
+
+    def test_select_exclude_by_name_and_category(self):
+        self.assertEqual(
+            _agent.select(categories={"image"}, exclude={"venice_image_edit"}),
+            {"venice_image", "venice_upscale", "venice_bg_remove"})
+        # excluding a whole category subtracts all its members
+        self.assertNotIn(
+            "venice_tts", _agent.select(categories={"audio", "image"},
+                                        exclude={"audio"}))
+
+    def test_tools_in_and_list_categories(self):
+        self.assertEqual(_agent.tools_in("catalog"),
+                         {"venice_models", "venice_model_details"})
+        self.assertEqual(_agent.tools_in("video"), {"venice_video"})
+        self.assertEqual(_agent.tools_in("nope"), set())
+        self.assertEqual(
+            _agent.list_categories(),
+            {"image", "audio", "video", "text", "catalog", "vision", "search", "jobs"})
+
+    def test_get_returns_spec_or_none(self):
+        spec = _agent.get("venice_image")
+        self.assertEqual(spec.category, "image")
+        self.assertTrue(spec.paid)
+        self.assertIsNone(_agent.get("venice_nope"))
+
+    def test_every_registry_tool_has_a_category(self):
+        # drift guard: a new tool with no/empty category fails here.
+        for spec in _agent._REGISTRY:
+            self.assertTrue(spec.category, f"{spec.name} has no category")
+
+    def test_categories_partition_the_registry(self):
+        # drift guard: union of every category == every registered name (no orphan,
+        # no name leaking into a category that doesn't round-trip).
+        allnames = {s.name for s in _agent._REGISTRY}
+        union = set().union(
+            *(_agent.tools_in(c) for c in _agent.list_categories()))
+        self.assertEqual(union, allnames)
+
+    def test_built_tool_carries_category(self):
+        by = {t.name: t for t in _agent.builtin_tools(object())}
+        self.assertEqual(by["venice_image"].category, "image")
+        self.assertEqual(by["venice_chat"].category, "text")
+
+    def test_select_output_drives_builtin_tools_unchanged(self):
+        # the actual call code_tools now makes: select(...) fed straight to only=.
+        names = {t.name for t in _agent.builtin_tools(
+            object(), only=_agent.select(categories={"image", "audio", "video"}))}
+        self.assertEqual(names, self._ASSETS)
+
+
 if __name__ == "__main__":
     unittest.main()
