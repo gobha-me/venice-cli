@@ -530,6 +530,9 @@ def code_tools(
     config=None,
     shell_allow=(),
     shell_deny=(),
+    browser: bool = False,
+    browser_allow=(),
+    browser_deny=(),
 ) -> List[_agent.Tool]:
     """Build the coding tools bound to a realpath-resolved project `root`.
 
@@ -542,6 +545,9 @@ def code_tools(
     tool -- the same policy `venice chat --shell` enforces (see `_exec.check_policy`).
     Empty lists leave `run` unrestricted (only the confirm gate), preserving the prior
     behavior of autonomous `venice code` runs.
+
+    `browser` (#71) appends the `web_fetch`/`browser_capture` rails, scoped by the
+    `browser_allow`/`browser_deny` URL policy (see `_agent.browser_tools`).
 
     When `assets` and a `client` are supplied, the in-process asset-generation tools
     (`venice_image`/`venice_image_edit`/`venice_sfx`/`venice_music`/`venice_tts`/
@@ -657,6 +663,15 @@ def code_tools(
                 "venice_video",
             },
             config=config,  # #58: asset tools honor defaults.<cmd>.*
+        ))
+
+    if browser:
+        # web_fetch/browser_capture rails (#71): no Venice API, so no client needed.
+        # Screenshots land in $VENICE_MCP_OUTPUT_DIR or under the project root.
+        tools.extend(_agent.browser_tools(
+            allow=browser_allow, deny=browser_deny,
+            output_dir=os.environ.get("VENICE_MCP_OUTPUT_DIR") or root,
+            config=config,
         ))
     return tools
 

@@ -1062,5 +1062,79 @@ class TestReindexTool(_ToolTest):
         self.assertIn("unreachable", r["message"])
 
 
+class TestWebFetchTool(_ToolTest):
+    """#71: the stdlib web_fetch tool. Print-free; free; URL-policy guarded."""
+
+    def test_blocked_url_errors_without_network(self):
+        with self.stdout_guard():
+            r = _mcp.web_fetch_tool("file:///etc/passwd")
+        self.assertEqual(r["status"], "error")
+        self.assertIn("scheme", r["message"])
+
+    def test_missing_url_errors(self):
+        with self.stdout_guard():
+            r = _mcp.web_fetch_tool("   ")
+        self.assertEqual(r["status"], "error")
+
+    def test_ok_shapes_result(self):
+        canned = {"ok": True, "final_url": "http://x/", "content_type": "text/html",
+                  "text": "hello", "truncated": False}
+        with mock.patch.object(_mcp._browser, "web_fetch", return_value=canned), \
+                self.stdout_guard():
+            r = _mcp.web_fetch_tool("http://x/", mode="text")
+        self.assertEqual(r["status"], "ok")
+        self.assertEqual(r["text"], "hello")
+        self.assertEqual(r["final_url"], "http://x/")
+
+    def test_error_from_backend_is_reported(self):
+        with mock.patch.object(_mcp._browser, "web_fetch",
+                               return_value={"ok": False, "error": "boom"}), \
+                self.stdout_guard():
+            r = _mcp.web_fetch_tool("http://x/")
+        self.assertEqual(r["status"], "error")
+        self.assertIn("boom", r["message"])
+
+
+class TestBrowserCaptureTool(_ToolTest):
+    """#71: the browser_capture tool. Writes a PNG path (never inline), free, guarded."""
+
+    def test_blocked_url_errors_and_writes_nothing(self):
+        with self.stdout_guard():
+            r = _mcp.browser_capture_tool("ftp://h/x", mode="screenshot", output_dir=self.td)
+        self.assertEqual(r["status"], "error")
+        self.assertEqual(list(Path(self.td).iterdir()), [])
+
+    def test_dom_result_with_assert(self):
+        canned = {"ok": True, "browser": "chromium", "family": "chromium",
+                  "dom": "<html>OK</html>", "truncated": False,
+                  "assert_contains": "OK", "contains": True}
+        with mock.patch.object(_mcp._browser, "capture", return_value=canned), \
+                self.stdout_guard():
+            r = _mcp.browser_capture_tool("http://localhost/", mode="dom", assert_contains="OK")
+        self.assertEqual(r["status"], "ok")
+        self.assertTrue(r["contains"])
+        self.assertEqual(r["dom"], "<html>OK</html>")
+
+    def test_screenshot_returns_path(self):
+        canned = {"ok": True, "browser": "firefox", "family": "firefox",
+                  "screenshot_path": os.path.join(self.td, "capture-localhost.png")}
+        with mock.patch.object(_mcp._browser, "capture", return_value=canned) as cap, \
+                self.stdout_guard():
+            r = _mcp.browser_capture_tool("http://localhost/", mode="screenshot",
+                                          output_dir=self.td)
+        self.assertEqual(r["status"], "ok")
+        self.assertTrue(r["screenshot_path"].endswith(".png"))
+        # the wrapper resolved an out_path under output_dir and passed it down
+        self.assertTrue(cap.call_args.kwargs["out_path"].startswith(self.td))
+
+    def test_no_browser_degrades_gracefully(self):
+        with mock.patch.object(_mcp._browser, "capture",
+                               return_value={"ok": False, "error": "no headless browser available"}), \
+                self.stdout_guard():
+            r = _mcp.browser_capture_tool("http://localhost/", mode="dom")
+        self.assertEqual(r["status"], "error")
+        self.assertIn("no headless browser", r["message"])
+
+
 if __name__ == "__main__":
     unittest.main()

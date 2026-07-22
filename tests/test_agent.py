@@ -520,6 +520,46 @@ class TestShellTool(unittest.TestCase):
         self.assertEqual(r["status"], "confirmation_required")
 
 
+class TestBrowserTools(unittest.TestCase):
+    """#71: the opt-in web_fetch/browser_capture rails; URL policy bound by the wiring."""
+
+    def _tools(self, **kw):
+        return {t.name: t for t in _agent.builtin_tools(object(), browser=True, **kw)}
+
+    def test_absent_by_default(self):
+        names = {t.name for t in _agent.builtin_tools(object())}
+        self.assertNotIn("web_fetch", names)
+        self.assertNotIn("browser_capture", names)
+
+    def test_present_free_and_hide_controls(self):
+        tools = self._tools()
+        for name in ("web_fetch", "browser_capture"):
+            self.assertIn(name, tools)
+            self.assertFalse(tools[name].paid)          # no confirm gate; URL policy guards
+            self.assertEqual(tools[name].parameters["required"], ["url"])
+            props = tools[name].parameters["properties"]
+            for banned in ("allow", "deny", "confirm", "max_spend", "output_dir"):
+                self.assertNotIn(banned, props)         # model can't set policy/controls
+
+    def test_survives_only_filter(self):
+        tools = _agent.builtin_tools(object(), only={"venice_chat"}, browser=True)
+        self.assertEqual({t.name for t in tools},
+                         {"venice_chat", "web_fetch", "browser_capture"})
+
+    def test_model_cannot_widen_deny_policy(self):
+        # deny is bound by the operator; a model smuggling deny=[] must not override it.
+        tool = self._tools(browser_deny=["evil.com"])["web_fetch"]
+        r = tool.invoke({"url": "http://evil.com/x", "deny": []})
+        self.assertEqual(r["status"], "error")
+        self.assertIn("deny", r["message"])
+
+    def test_model_cannot_widen_allow_policy(self):
+        tool = self._tools(browser_allow=["good.com"])["web_fetch"]
+        r = tool.invoke({"url": "http://evil.com/x", "allow": ["evil.com"]})
+        self.assertEqual(r["status"], "error")
+        self.assertIn("allowlist", r["message"])
+
+
 class TestConfigDefaults(unittest.TestCase):
     """#58: defaults.<cmd>.* are layered UNDER a tool's model-supplied args."""
 
