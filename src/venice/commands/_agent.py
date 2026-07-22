@@ -94,6 +94,30 @@ def _usd_per_token(pricing, key) -> Optional[float]:
     return None
 
 
+def _as_int(v) -> int:
+    """A non-negative int from a usage field; 0 for None/garbage/negative.
+
+    `bool` is an `int` subclass but is never a real token count, so it's garbage.
+    """
+    if isinstance(v, bool):
+        return 0
+    if isinstance(v, (int, float)):
+        return int(v) if v > 0 else 0
+    return 0
+
+
+def _detail(usage: dict, section: str, key: str):
+    """A nested usage sub-field (e.g. ``prompt_tokens_details.cached_tokens``).
+
+    The ``*_details`` blocks are nullable in the API, so guard the middle level;
+    returns None when the block is absent or not a dict.
+    """
+    block = usage.get(section)
+    if isinstance(block, dict):
+        return block.get(key)
+    return None
+
+
 class CostLedger:
     """Accumulates estimated USD spend for one agent run.
 
@@ -110,35 +134,78 @@ class CostLedger:
         self.total = 0.0
         self.prompt_tokens = 0
         self.completion_tokens = 0
+        # Cache buckets kept distinct -- they price differently and collapsing
+        # them mis-costs cache-heavy long sessions (#75). Both are subsets of
+        # `prompt_tokens`; `reasoning_tokens` is a subset of `completion_tokens`.
+        self.cache_read_tokens = 0
+        self.cache_write_tokens = 0
+        self.reasoning_tokens = 0
         self.unpriced = False  # saw a turn whose model price was unknown
-        self._in = None        # per-token input rate (USD)
-        self._out = None       # per-token output rate (USD)
+        self._in = None          # per-token input rate (USD)
+        self._out = None         # per-token output rate (USD)
+        self._cache_in = None    # per-token cache-read rate (USD); None -> use _in
+        self._cache_write = None  # per-token cache-write rate (USD); None -> use _in
 
     def bind_pricing(self, pricing) -> None:
-        """Set the per-token rates from a catalog `model_spec.pricing` block."""
+        """Set the per-token rates from a catalog `model_spec.pricing` block.
+
+        `cache_input`/`cache_write` are optional (present only for cache-capable
+        models); left None they fall back to the plain input rate at cost time.
+        """
         self._in = _usd_per_token(pricing, "input")
         self._out = _usd_per_token(pricing, "output")
+        self._cache_in = _usd_per_token(pricing, "cache_input")
+        self._cache_write = _usd_per_token(pricing, "cache_write")
 
     def record(self, usage) -> float:
-        """Add one turn's `usage` (dict or SDK obj); return this turn's cost."""
+        """Add one turn's `usage` (dict or SDK obj); return this turn's cost.
+
+        Keeps the cache buckets distinct: cache-read, cache-write, and uncached
+        input each price at their own rate, so a cache-heavy turn is costed
+        correctly instead of collapsed to a flat input rate (#75). Both cache
+        buckets are subsets of `prompt_tokens` in Venice's OpenAI-normalized
+        usage shape, so uncached input is the remainder. With no cache tokens and
+        no cache pricing this reduces exactly to the old `pt*in + ct*out`.
+        """
         if usage is None:
             return 0.0
         if hasattr(usage, "model_dump"):
             usage = usage.model_dump()
         if not isinstance(usage, dict):
             return 0.0
-        pt = usage.get("prompt_tokens") or 0
-        ct = usage.get("completion_tokens") or 0
-        if not isinstance(pt, (int, float)):
-            pt = 0
-        if not isinstance(ct, (int, float)):
-            ct = 0
-        self.prompt_tokens += int(pt)
-        self.completion_tokens += int(ct)
-        cost = 0.0
+        pt = _as_int(usage.get("prompt_tokens"))
+        ct = _as_int(usage.get("completion_tokens"))
+        cache_read = _as_int(_detail(usage, "prompt_tokens_details", "cached_tokens"))
+        cache_write = _as_int(
+            _detail(usage, "prompt_tokens_details", "cache_creation_input_tokens")
+        )
+        reasoning = _as_int(
+            _detail(usage, "completion_tokens_details", "reasoning_tokens")
+        )
+        # Clamp to subsets of prompt_tokens so a provider that reports the buckets
+        # additively (rather than as a breakdown) can't drive uncached negative.
+        cache_read = min(cache_read, pt)
+        cache_write = min(cache_write, pt - cache_read)
+        uncached = pt - cache_read - cache_write
+
+        self.prompt_tokens += pt
+        self.completion_tokens += ct
+        self.cache_read_tokens += cache_read
+        self.cache_write_tokens += cache_write
+        self.reasoning_tokens += min(reasoning, ct)
+
         if self._in is not None or self._out is not None:
-            cost = float(pt) * (self._in or 0.0) + float(ct) * (self._out or 0.0)
+            in_rate = self._in or 0.0
+            read_rate = self._cache_in if self._cache_in is not None else in_rate
+            write_rate = self._cache_write if self._cache_write is not None else in_rate
+            cost = (
+                uncached * in_rate
+                + cache_read * read_rate
+                + cache_write * write_rate
+                + ct * (self._out or 0.0)
+            )
         else:
+            cost = 0.0
             self.unpriced = True
         self.total += cost
         return cost
@@ -162,6 +229,43 @@ class CostLedger:
             s += " [partially unpriced]"
         return s
 
+    def usage_report(self) -> str:
+        """A multi-line token + cost breakdown for the REPL `/usage` command (#75).
+
+        Keeps the cache buckets visible -- showing the uncached vs cache-read
+        split is the whole point, since that split is what makes a long session's
+        cost (and its affordability) legible. Mirrors `summary`'s unpriced
+        handling; returns a one-line placeholder before any turn is recorded.
+        """
+        if self.prompt_tokens == 0 and self.completion_tokens == 0:
+            return "(no usage recorded yet)"
+        uncached = self.prompt_tokens - self.cache_read_tokens - self.cache_write_tokens
+        hit = (
+            self.cache_read_tokens / self.prompt_tokens * 100.0
+            if self.prompt_tokens else 0.0
+        )
+        lines = ["session usage:"]
+        lines.append(
+            f"  input   {self.prompt_tokens:>10,} tok  "
+            f"({uncached:,} uncached + {self.cache_read_tokens:,} cache-read "
+            f"+ {self.cache_write_tokens:,} cache-write)"
+        )
+        out = f"  output  {self.completion_tokens:>10,} tok"
+        if self.reasoning_tokens:
+            out += f"  (incl. {self.reasoning_tokens:,} reasoning)"
+        lines.append(out)
+        lines.append(f"  cache hit rate: {hit:.1f}%")
+        if self.unpriced and self.total == 0.0:
+            lines.append("  cost: (model rate unknown)")
+        else:
+            cost = f"  cost: ${self.total:.4f}"
+            if self.max_spend is not None:
+                cost += f" / cap ${self.max_spend:.2f}"
+            if self.unpriced:
+                cost += "  [partially unpriced]"
+            lines.append(cost)
+        return "\n".join(lines)
+
 
 def _pricing_for(models, model_id):
     """The catalog `model_spec.pricing` block for `model_id`, or None."""
@@ -171,6 +275,15 @@ def _pricing_for(models, model_id):
             if isinstance(spec, dict):
                 return spec.get("pricing")
     return None
+
+
+def _build_ledger(cap, models, model_id) -> CostLedger:
+    """A CostLedger bound to `model_id`'s catalog pricing (cap may be None)."""
+    ledger = CostLedger(max_spend=cap)
+    pricing = _pricing_for(models, model_id)
+    if pricing is not None:
+        ledger.bind_pricing(pricing)
+    return ledger
 
 
 def ledger_from_args(args, models, model_id) -> Optional[CostLedger]:
@@ -186,11 +299,18 @@ def ledger_from_args(args, models, model_id) -> Optional[CostLedger]:
     cap = getattr(args, "session_max_spend", None)
     if cap is None:
         return None
-    ledger = CostLedger(max_spend=cap)
-    pricing = _pricing_for(models, model_id)
-    if pricing is not None:
-        ledger.bind_pricing(pricing)
-    return ledger
+    return _build_ledger(cap, models, model_id)
+
+
+def usage_ledger(args, models, model_id) -> CostLedger:
+    """An always-on session ledger for the REPL's `/usage` + `/cost` (#75).
+
+    Unlike :func:`ledger_from_args` (None unless the session is spend-capped),
+    this always returns a priced ledger so `/usage` works in any interactive
+    session. `--session-max-spend`, when set, still supplies the cap; an uncapped
+    ledger meters usage without gating (`over()` is None-safe).
+    """
+    return _build_ledger(getattr(args, "session_max_spend", None), models, model_id)
 
 
 def dispatch_map(tools: List[Tool]) -> Dict[str, Tool]:

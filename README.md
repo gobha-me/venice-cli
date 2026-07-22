@@ -549,8 +549,11 @@ In-REPL slash-commands: `/system [text]` (show/set the system prompt),
 catalog), `/models` (list the available models, marking the current and the
 default), `/auto` and `/manual` (toggle auto-accepting paid/side-effecting tool
 calls for following turns), `/compact [N]` (summarize older history into one
-message, keeping the last `N` turns verbatim), `/reset` (clear history, keep
-the system prompt),
+message, keeping the last `N` turns verbatim),
+`/cost` (this session's estimated spend so far; `--session-max-spend` adds a
+cap), `/usage` (a token + cost breakdown for the session, keeping the
+cache-read/cache-write/uncached input split distinct so cache-heavy sessions
+cost out correctly), `/reset` (clear history, keep the system prompt),
 `/save [file]` (write the transcript JSON; defaults to the `--resume` file),
 `/paste` (compose a multi-line message a line at a time, ending with `/end` —
 `/cancel` aborts), `/edit [text]` (compose your next message in `$EDITOR`, like
