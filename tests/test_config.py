@@ -475,6 +475,26 @@ class TestShellPolicy(_Base):
         self.assertEqual(uc.shell_policy(doc), {"allow": [], "deny": ["rm *"]})
 
 
+class TestBrowserPolicy(_Base):
+    """The top-level `browser` URL allow/deny reader (#71), mirroring shell_policy."""
+
+    def test_missing_and_malformed_are_empty(self):
+        self.assertEqual(uc.browser_policy({}), {"allow": [], "deny": []})
+        self.assertEqual(uc.browser_policy({"browser": "nope"}), {"allow": [], "deny": []})
+
+    def test_reads_lists_and_coerces_scalar(self):
+        doc = {"browser": {"allow": ["example.com"], "deny": "*.internal"}}
+        self.assertEqual(
+            uc.browser_policy(doc),
+            {"allow": ["example.com"], "deny": ["*.internal"]},
+        )
+
+    def test_dotted_key_set_roundtrips(self):
+        doc = uc.load_config()
+        uc.set_value(doc, "browser.deny", ["*.internal"])
+        self.assertEqual(uc.browser_policy(doc), {"allow": [], "deny": ["*.internal"]})
+
+
 class TestConfigDefaultsFor(unittest.TestCase):
     """#58: the shared tool-path resolver -- allow-listed, coerced, signature-gated.
 
@@ -510,6 +530,18 @@ class TestConfigDefaultsFor(unittest.TestCase):
         out = uc.config_defaults_for("image", _mcp.image_tool, doc)
         self.assertNotIn("steps", out)               # int("not-an-int") -> skipped
         self.assertIs(out["safe_mode"], False)       # the good key still lands
+
+    def test_browser_section_gates_by_signature(self):
+        # #71: web_fetch/browser_capture share the `browser` section; each impl gets only
+        # the keys its signature accepts (capture: wait_ms/timeout; fetch: max_bytes/timeout).
+        from venice.commands import _mcp
+        doc = {"defaults": {"browser": {"wait_ms": "2000", "timeout": 10, "max_bytes": 5}}}
+        cap = uc.config_defaults_for("browser", _mcp.browser_capture_tool, doc)
+        self.assertEqual(cap, {"wait_ms": 2000, "timeout": 10})
+        self.assertNotIn("max_bytes", cap)           # browser_capture takes no max_bytes
+        fetch = uc.config_defaults_for("browser", _mcp.web_fetch_tool, doc)
+        self.assertEqual(fetch, {"timeout": 10, "max_bytes": 5})
+        self.assertNotIn("wait_ms", fetch)           # web_fetch takes no wait_ms
 
 
 if __name__ == "__main__":

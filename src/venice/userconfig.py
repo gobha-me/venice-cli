@@ -192,6 +192,25 @@ def shell_policy(doc: dict) -> dict:
     }
 
 
+def browser_policy(doc: dict) -> dict:
+    """Read the top-level ``browser`` policy section: the URL allow/deny lists for the
+    #71 ``web_fetch``/``browser_capture`` tools. Returns ``{"allow": [...], "deny": [...]}``
+    -- string lists, empty when unset/malformed.
+
+    Mirrors :func:`shell_policy` (a non-`defaults` top-level section with its own reader);
+    ``venice config set browser.deny '["*.internal"]'`` round-trips through the generic
+    dotted-key store with no extra plumbing. The hardcoded stops (http/https only, cloud
+    metadata blocked) live in ``_browser.check_url_policy`` and are not configurable.
+    """
+    section = doc.get("browser")
+    if not isinstance(section, dict):
+        return {"allow": [], "deny": []}
+    return {
+        "allow": _as_list(section["allow"]) if section.get("allow") else [],
+        "deny": _as_list(section["deny"]) if section.get("deny") else [],
+    }
+
+
 # --------------------------------------------------------------------------- #
 # #17 default-flag loader
 # --------------------------------------------------------------------------- #
@@ -325,6 +344,15 @@ _COMMAND_MAP = {
         "enhance_creativity": ("enhance_creativity", float),
         "enhance_prompt": ("enhance_prompt", str),
         "replication": ("replication", float),
+    },
+    # #71 browser tools -- safe knobs only. The URL allow/deny policy is NOT here: it must
+    # never be model-overridable, so it flows through `browser_policy` (like `shell_policy`),
+    # not the tool-argument merge path. `config_defaults_for` injects only the keys each
+    # impl accepts (web_fetch: max_bytes/timeout; browser_capture: wait_ms/timeout).
+    "browser": {
+        "wait_ms": ("wait_ms", int),
+        "timeout": ("timeout", int),
+        "max_bytes": ("max_bytes", int),
     },
 }
 

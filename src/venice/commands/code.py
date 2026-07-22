@@ -200,6 +200,25 @@ def register(subparsers) -> None:
         "unless --auto.",
     )
     grp.add_argument(
+        "--browser", action="store_true", dest="browser", default=None,
+        help="Expose web_fetch + browser_capture tools so the agent can fetch a URL "
+        "and headless-render a page (screenshot / post-JS DOM) to verify its own work. "
+        "http/https only; the cloud metadata endpoint is always blocked; scope hosts "
+        "with --browser-allow/--browser-deny or the config `browser` section (#71).",
+    )
+    grp.add_argument(
+        "--browser-allow", action="append", dest="browser_allow", default=None,
+        metavar="HOST",
+        help="Allow only these hosts for the browser tools (repeatable; globs ok, "
+        "matched on the URL host). Adds to the config browser.allow list.",
+    )
+    grp.add_argument(
+        "--browser-deny", action="append", dest="browser_deny", default=None,
+        metavar="PATTERN",
+        help="Refuse URLs whose host or full URL matches these globs (repeatable, "
+        "always enforced, wins over --browser-allow). Adds to config browser.deny.",
+    )
+    grp.add_argument(
         "--auto-compact", action="store_true", default=None, dest="auto_compact",
         help="Summarize older history once it crosses the token budget, so long "
         "runs stay within the context window (#48; costs a summarization call).",
@@ -405,6 +424,9 @@ def _run(args) -> int:
     pol = userconfig.shell_policy(doc)
     shell_allow = list(pol["allow"]) + list(getattr(args, "shell_allow", None) or [])
     shell_deny = list(pol["deny"]) + list(getattr(args, "shell_deny", None) or [])
+    bpol = userconfig.browser_policy(doc)  # #71 URL allow/deny policy
+    browser_allow = list(bpol["allow"]) + list(getattr(args, "browser_allow", None) or [])
+    browser_deny = list(bpol["deny"]) + list(getattr(args, "browser_deny", None) or [])
     tools = _code.code_tools(
         root, client,
         exec_timeout=args.exec_timeout or _code.DEFAULT_EXEC_TIMEOUT,
@@ -413,6 +435,9 @@ def _run(args) -> int:
         config=doc,  # #58: honor defaults.<cmd>.* in tools
         shell_allow=shell_allow,  # #33: `run` honors the shared allow/deny policy
         shell_deny=shell_deny,
+        browser=bool(getattr(args, "browser", None)),  # #71
+        browser_allow=browser_allow,
+        browser_deny=browser_deny,
     )
     system = _system_prompt(args, root, tools)
     gen_kwargs = _gen_kwargs(args)

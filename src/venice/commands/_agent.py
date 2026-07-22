@@ -420,6 +420,39 @@ _VIDEO_SCHEMA = _obj(
     required=["prompt"],
 )
 
+# Browser/web tools (#71). Rails like `shell`: the URL allow/deny policy is bound by the
+# wiring, so `allow`/`deny` are DELIBERATELY absent from these schemas -- the model can't
+# widen its own reach (mirrors how confirm/max_spend/output_dir are loop-injected).
+_WEB_FETCH_SCHEMA = _obj(
+    {
+        "url": _p("string", "The http(s) URL to fetch."),
+        "mode": _p("string", "text (default; HTML tags stripped) or html (raw)."),
+        "max_bytes": _p("integer", "Cap on bytes downloaded."),
+        "timeout": _p("integer", "Timeout in seconds."),
+    },
+    required=["url"],
+)
+_BROWSER_CAPTURE_SCHEMA = _obj(
+    {
+        "url": _p("string", "The http(s) URL to render."),
+        "mode": _p(
+            "string",
+            "dom (default: post-JS HTML), text (DOM stripped to text), screenshot "
+            "(writes a PNG, returns its path), or both. dom/text/both need a "
+            "Chromium-family browser; Firefox is screenshot-only.",
+        ),
+        "wait_ms": _p("integer", "Milliseconds for JS to settle before capture."),
+        "assert_contains": _p(
+            "string",
+            "Substring to check for in the rendered DOM; returns contains:true/false -- "
+            "a deterministic 'did the JS land' check (dom/text/both modes).",
+        ),
+        "timeout": _p("integer", "Timeout in seconds."),
+    },
+    required=["url"],
+)
+
+
 # (tool name, `_mcp` impl attribute, description, schema, paid). The impl is
 # stored by NAME and resolved via getattr(_mcp, ...) at builtin_tools() time, so a
 # single source of truth wins and tests can patch `_mcp.<impl>`.
@@ -608,6 +641,65 @@ def _tool_section(name: str) -> str:
     return name[len("venice_"):] if name.startswith("venice_") else name
 
 
+def _browser_args(arguments) -> dict:
+    """Model-supplied browser-tool args with policy/loop-controlled keys stripped: the
+    model must not set `allow`/`deny` (widen its URL policy) or the loop-controlled keys."""
+    return {k: v for k, v in _clean(arguments).items() if k not in ("allow", "deny")}
+
+
+def browser_tools(*, allow=(), deny=(), output_dir=None, config=None) -> List[Tool]:
+    """The `web_fetch` + `browser_capture` rails (issue #71).
+
+    The URL allow/deny policy is bound HERE (from the operator's config/flags), so the
+    model can't widen it via tool arguments -- same discipline as the `shell` rail. Safe
+    knobs still honor `defaults.browser.*` (#58), layered under the model's arguments.
+    Both tools are free (no spend gate) and never require confirmation; the URL policy is
+    the guard.
+    """
+    fetch_defaults = userconfig.config_defaults_for("browser", _mcp.web_fetch_tool, config)
+    cap_defaults = userconfig.config_defaults_for("browser", _mcp.browser_capture_tool, config)
+
+    def _web_fetch_invoke(arguments, *, confirm: bool = False):
+        return _mcp.web_fetch_tool(
+            allow=allow, deny=deny, **{**fetch_defaults, **_browser_args(arguments)})
+
+    def _browser_capture_invoke(arguments, *, confirm: bool = False):
+        return _mcp.browser_capture_tool(
+            allow=allow, deny=deny, output_dir=output_dir,
+            **{**cap_defaults, **_browser_args(arguments)})
+
+    return [
+        Tool(
+            name="web_fetch",
+            description=(
+                "Fetch an http(s) URL with stdlib urllib and return its text (mode=text, "
+                "default) or raw HTML (mode=html). Zero-dep; good for non-SPA pages. For "
+                "JS-rendered pages use browser_capture. Read-only; not spend-gated. "
+                "file://, the cloud metadata endpoint, and any host the operator denies "
+                "are refused."
+            ),
+            parameters=_WEB_FETCH_SCHEMA,
+            invoke=_web_fetch_invoke,
+            paid=False,
+        ),
+        Tool(
+            name="browser_capture",
+            description=(
+                "Headless-render an http(s) URL and return the post-JS DOM (mode=dom/text) "
+                "and/or a screenshot PNG path (mode=screenshot/both) -- use it to verify a "
+                "page's JS-injected content actually appeared. Pass assert_contains to "
+                "check the DOM contains a substring (deterministic). DOM modes need a "
+                "Chromium-family browser (Firefox is screenshot-only); reports 'no "
+                "headless browser available' when none is installed. Read-only; not "
+                "spend-gated."
+            ),
+            parameters=_BROWSER_CAPTURE_SCHEMA,
+            invoke=_browser_capture_invoke,
+            paid=False,
+        ),
+    ]
+
+
 def builtin_tools(
     client,
     *,
@@ -619,6 +711,10 @@ def builtin_tools(
     shell_root: Optional[str] = None,
     shell_allow=(),
     shell_deny=(),
+    browser: bool = False,
+    browser_allow=(),
+    browser_deny=(),
+    browser_output_dir: Optional[str] = None,
     exec_timeout: int = _exec.DEFAULT_EXEC_TIMEOUT,
 ) -> List[Tool]:
     """Build the in-process venice tools, bound to `client`.
@@ -640,6 +736,9 @@ def builtin_tools(
     `shell_allow`/`shell_deny` policy. It is added AFTER the `only` filter (it is a
     rail, not a venice API tool, so it isn't part of the selectable `_BUILTINS`
     set) and is never exposed via `mcp-serve`, which builds its own wrappers.
+
+    `browser` (issue #71) likewise appends the `web_fetch`/`browser_capture` rails,
+    scoped by the `browser_allow`/`browser_deny` URL policy (see `browser_tools`).
     """
 
     def _config_defaults(section, impl) -> dict:
@@ -716,6 +815,12 @@ def builtin_tools(
             parameters=_exec._RUN_SCHEMA,
             invoke=_shell_invoke,
             paid=True,
+        ))
+
+    if browser:
+        tools.extend(browser_tools(
+            allow=browser_allow, deny=browser_deny,
+            output_dir=browser_output_dir, config=config,
         ))
     return tools
 

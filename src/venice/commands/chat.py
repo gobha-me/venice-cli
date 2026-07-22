@@ -203,6 +203,25 @@ def register(subparsers) -> None:
         help="Acknowledge running --shell with an empty allowlist under --yes "
         "(auto-approved arbitrary shell). Required for that combination.",
     )
+    ag.add_argument(
+        "--browser", action="store_true", dest="browser", default=None,
+        help="Add web_fetch + browser_capture tools so the agent can fetch a URL and "
+        "headless-render a page (screenshot / post-JS DOM). Implies --tools. http/https "
+        "only; the cloud metadata endpoint is always blocked; scope hosts with "
+        "--browser-allow/--browser-deny or the config `browser` section (#71).",
+    )
+    ag.add_argument(
+        "--browser-allow", action="append", dest="browser_allow", default=None,
+        metavar="HOST",
+        help="Allow only these hosts for the browser tools (repeatable; globs ok, "
+        "matched on the URL host). Adds to the config browser.allow list.",
+    )
+    ag.add_argument(
+        "--browser-deny", action="append", dest="browser_deny", default=None,
+        metavar="PATTERN",
+        help="Refuse URLs whose host or full URL matches these globs (repeatable, "
+        "always enforced, wins over --browser-allow). Adds to config browser.deny.",
+    )
 
     # --- External MCP servers (#21) ---
     mc = p.add_argument_group("External MCP tools")
@@ -328,9 +347,10 @@ def _is_interactive(args, message) -> bool:
 
 def _run(args) -> int:
     userconfig.apply_defaults(args, "chat")
-    # --shell (#33) is a tool, so it implies the agent loop -- flip --tools on so
-    # both the one-shot trigger below and the REPL's tools gate pick it up.
-    if getattr(args, "shell", None) and not getattr(args, "tools", None):
+    # --shell (#33) and --browser (#71) are tools, so they imply the agent loop -- flip
+    # --tools on so both the one-shot trigger below and the REPL's tools gate pick them up.
+    if (getattr(args, "shell", None) or getattr(args, "browser", None)) \
+            and not getattr(args, "tools", None):
         args.tools = True
     # A startup persona (--persona or defaults.chat.persona) seeds the same lever
     # both one-shot and REPL modes read -- args.system -- so it flows through
@@ -427,6 +447,12 @@ def _tools_for(args, client, models, model):
                 file=sys.stderr,
             )
             return None, 2
+    browser_on = bool(getattr(args, "browser", None))
+    browser_allow, browser_deny = (), ()
+    if browser_on:
+        bpol = userconfig.browser_policy(doc)  # #71 URL allow/deny policy
+        browser_allow = list(bpol["allow"]) + list(getattr(args, "browser_allow", None) or [])
+        browser_deny = list(bpol["deny"]) + list(getattr(args, "browser_deny", None) or [])
     try:
         tools = _agent.builtin_tools(
             client,
@@ -438,6 +464,10 @@ def _tools_for(args, client, models, model):
             shell_root=os.getcwd(),
             shell_allow=shell_allow,
             shell_deny=shell_deny,
+            browser=browser_on,
+            browser_allow=browser_allow,
+            browser_deny=browser_deny,
+            browser_output_dir=str(args.output) if args.output else None,
         )
     except ValueError as e:
         print(f"chat: {e}", file=sys.stderr)

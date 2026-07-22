@@ -717,6 +717,9 @@ Details and safety:
 | `--shell-allow CMD` | allow only these commands for `--shell` (repeatable; adds to config `shell.allow`) |
 | `--shell-deny PATTERN` | refuse commands matching these globs (repeatable; adds to config `shell.deny`) |
 | `--shell-unrestricted` | acknowledge an empty allowlist under `--yes` (required for that combination) |
+| `--browser` | add `web_fetch` + `browser_capture` tools (fetch a URL / headless-render a page); implies `--tools` |
+| `--browser-allow HOST` | allow only these hosts for the browser tools (repeatable; adds to config `browser.allow`) |
+| `--browser-deny PATTERN` | refuse URLs whose host/URL matches these globs (repeatable; adds to config `browser.deny`) |
 | `--mcp NAME` | attach a registered external MCP server's tools (repeatable) |
 | `--no-mcp` | attach no MCP servers (overrides a configured default) |
 
@@ -753,6 +756,51 @@ venice config set shell.allow '["git", "gh", "ls", "cat"]'
   `--shell-unrestricted` to acknowledge it.
 - **Not exposed over `venice mcp-serve`** — a shared/remote server running arbitrary
   shell is a much larger blast radius and is deliberately out of scope.
+
+#### Web & browser tools (`--browser`)
+
+`--browser` adds two tools so the agent can look at the web — useful for verifying a page
+it (or you) just built. Implies `--tools`. Both are read-only and **not** spend-gated;
+the URL policy below is the guard.
+
+- **`web_fetch`** — a stdlib `urllib` GET that returns the page as text (tags stripped) or
+  raw HTML (`mode=html`). Zero extra dependencies; good for non-JS "read this page."
+- **`browser_capture`** — headless-renders the page with a **Chromium-family browser**
+  (`chromium`/`chrome`/`brave`) and returns the **post-JS DOM** (`mode=dom`/`text`) and/or
+  a **screenshot PNG** (`mode=screenshot`/`both`, written to `--output` and returned as a
+  path, never inline). Pass `assert_contains="…"` to deterministically check the rendered
+  DOM contains a string — the robust "did the JS actually appear" check (beats eyeballing a
+  screenshot). If only **Firefox** is installed it degrades to screenshot-only (its
+  headless CLI can't dump the DOM); with no browser at all it reports "no headless browser
+  available," like the `git` rail.
+
+```sh
+venice chat --browser "Fetch https://example.com and summarize it."
+venice chat --browser --browser-allow 'localhost' \
+  "Open http://localhost:8123/ and confirm the game cards rendered (assert_contains)."
+```
+
+**URL safety.** The scheme must be `http`/`https` and the cloud-metadata endpoint
+(`169.254.169.254`) is **always** blocked — these hard stops are not configurable. `file://`
+and everything non-http is refused. On top of that, an operator **allow/deny** policy (CLI
+flags add to a shared top-level `browser` section in [config](#config)) scopes which hosts
+are reachable:
+
+```sh
+venice config set browser.deny  '["*.internal", "10.*"]'
+venice config set browser.allow '["localhost", "*.example.com"]'
+```
+
+- **Deny** globs match the URL host and the full URL, are always enforced, and win over
+  allow. A non-empty **allow** list restricts to matching hosts; empty = any host (still
+  subject to the hard stops + deny). `localhost` is reachable by default (the common case is
+  verifying a locally-served page).
+- The headless browser runs untrusted page JS under an **allowlisted environment** (the
+  Venice API key and other ambient tokens are dropped) and a throwaway profile dir.
+- DOM/text output and downloads are size-capped; tune with `defaults.browser.*`
+  (`wait_ms`, `timeout`, `max_bytes`).
+- **Not exposed over `venice mcp-serve`** in this release (chat/code only), like
+  `project_search`/`reindex`.
 
 #### External MCP tools (`--mcp`)
 
@@ -1002,6 +1050,7 @@ complete — a loud stderr warning is printed).
 | `apply_patch` | apply a batch of edits grouped per file, atomically per file (use `occurrence=N` for non-unique strings) | yes |
 | `run` | run a shell command (`/bin/sh -c`) at the root | yes |
 | `venice_image` / `venice_image_edit` / `venice_sfx` / `venice_music` / `venice_tts` / `venice_upscale` / `venice_bg_remove` / `venice_video` | generate/edit images, audio & video into the project — **opt-in with `--assets`** | yes |
+| `web_fetch` / `browser_capture` | fetch a URL (text/HTML) or headless-render a page (post-JS DOM + screenshot) to verify its own work — **opt-in with `--browser`** (see [Web & browser tools](#web--browser-tools---browser)) | no |
 
 **Safety.** Every filesystem path is resolved and confined to the project root
 (default: cwd, or `--root` / `$VENICE_CODE_ROOT`); a path that escapes the root, names
@@ -1028,6 +1077,7 @@ it unrestricted (unchanged behavior).
 | `--max-tool-calls N` | cap tool invocations before forcing a final answer (default 25) |
 | `--exec-timeout SECS` | timeout for `run`/`git` (default 120) |
 | `--shell-allow CMD` / `--shell-deny PATTERN` | scope the `run` tool with the shared allow/deny policy (repeatable; adds to config `shell.*`) |
+| `--browser` / `--browser-allow HOST` / `--browser-deny PATTERN` | expose `web_fetch` + `browser_capture` so the agent can verify a rendered page; scope hosts with the `browser.*` allow/deny policy (see [Web & browser tools](#web--browser-tools---browser)) |
 | `--assets` | also expose the in-process asset-generation tools (image / image-edit / sfx / music / tts / upscale / bg-remove / video) so the agent can create images, audio & video in the project; paid — each confirms per call unless `--auto` |
 | `--auto-compact` | summarize older history once the prompt crosses `--compact-threshold` tokens (default 100 000), keeping the last `--compact-keep-turns` turns (default 10); long runs stay in-context |
 | `-i`, `--json`, `--model`, `--system` | interactive REPL · JSON envelope · model · extra system instructions |
