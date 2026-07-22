@@ -449,6 +449,22 @@ class TestAsyncJobSchemas(unittest.TestCase):
         self.assertFalse(by["venice_job_result"].paid)
 
 
+class TestReindexBuiltin(unittest.TestCase):
+    """#44: reindex is a paid, no-arg builtin advertised by chat's default set."""
+
+    def test_in_default_set_and_paid(self):
+        by = {t.name: t for t in _agent.builtin_tools(object())}
+        self.assertIn("reindex", by)                 # advertised by default
+        self.assertTrue(by["reindex"].paid)          # routes through the confirm gate
+
+    def test_schema_takes_no_arguments(self):
+        by = {t.name: t for t in _agent.builtin_tools(object(), only={"reindex"})}
+        props = by["reindex"].parameters["properties"]
+        self.assertEqual(props, {})
+        for banned in ("confirm", "max_spend", "output_dir"):
+            self.assertNotIn(banned, props)
+
+
 class TestShellTool(unittest.TestCase):
     """#33: the opt-in gated `shell` exec tool appended by builtin_tools."""
 

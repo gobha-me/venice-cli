@@ -1054,6 +1054,51 @@ def search_tool(client, query, *, k: int = 8) -> dict:
     return {"status": "ok", "results": results, "count": len(results)}
 
 
+def reindex_tool(
+    client, *, confirm: bool = False, max_spend: Optional[float] = None,
+    output_dir: Optional[str] = None,
+) -> dict:
+    """Rebuild the project's `.venice` index so `project_search` reflects edits (#44).
+
+    `project_search` is a *snapshot* of the last `venice index`; `grep` is live.
+    After the agent edits files this session, project_search recall is stale until
+    the index is rebuilt -- this tool reruns the incremental builder (only files
+    whose contents changed are re-embedded), recovering the embedding backend from
+    the existing store's meta so the vector space stays consistent (never
+    re-resolved against a possibly-changed catalog). Paid (embeds the changed
+    files), so it routes through the spend/confirm gate; the cost is unknown up
+    front (depends on how much changed), so it always needs `confirm=true`. Never
+    creates an index from nothing -- if none exists it says to run `venice index`
+    first. Requires the `[openai]` extra. `output_dir` is unused (accepted for the
+    paid-tool wrapper's uniform signature).
+    """
+    store_dir = _index.discover_store(None)
+    if store_dir is None:
+        return _err("reindex: no .venice index found; run `venice index` first")
+    store = _index.load_store(_index.store_file(store_dir), strict=False)
+    if store is None:
+        return _err("reindex: index store missing or unreadable; run `venice index`")
+    meta = store["meta"]
+    root = _index._root_of(store_dir)
+
+    gate = check_spend(None, confirm=confirm, max_spend=max_spend, label="reindex")
+    if gate is not None:
+        return gate
+
+    kwargs = {"dimensions": meta.get("requested_dimensions")}
+    if meta.get("backend") == "local":
+        kwargs["embed_base_url"] = meta.get("base_url")
+        kwargs["embed_model"] = meta.get("model")
+    else:
+        kwargs["model"] = meta.get("model")
+
+    try:
+        summary = _index.build_index(str(root), **kwargs)
+    except _index.IndexingError as e:
+        return _err(str(e) or f"reindex: failed (exit {e.exit_code})")
+    return {"status": "ok", **summary}
+
+
 def models_tool(client, *, type: str) -> dict:
     """List available Venice model ids for a catalog `type` (or "all").
 

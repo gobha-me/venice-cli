@@ -968,5 +968,99 @@ class TestModelDetailsTool(_ToolTest):
         self.assertIn("no model", out["message"])
 
 
+class TestReindexTool(_ToolTest):
+    """#44: reindex rebuilds the discovered .venice index; paid, confirm-gated.
+
+    Exercises the real discover/load/meta-recovery plumbing against an on-disk
+    store (pointed at via $VENICE_INDEX_DIR) and mocks only the paid `build_index`.
+    """
+
+    def setUp(self):
+        super().setUp()
+        env = mock.patch.dict(os.environ)  # snapshot/restore $VENICE_INDEX_DIR
+        env.start()
+        self.addCleanup(env.stop)
+
+    def _make_index(self, meta):
+        root = Path(self.td)
+        store_dir = root / ".venice" / "index"
+        store_dir.mkdir(parents=True)
+        (store_dir / "index.json").write_text(
+            json.dumps({"meta": meta, "files": {}}), encoding="utf-8")
+        os.environ["VENICE_INDEX_DIR"] = str(store_dir)
+        return root
+
+    def test_no_index_errors(self):
+        with mock.patch.object(_mcp._index, "discover_store", return_value=None), \
+                self.stdout_guard():
+            r = _mcp.reindex_tool(_client(), confirm=True)
+        self.assertEqual(r["status"], "error")
+        self.assertIn("venice index", r["message"])
+
+    def test_unconfirmed_gates_without_building(self):
+        self._make_index({"backend": "venice", "model": "m1"})
+        calls = []
+        with mock.patch.object(_mcp._index, "build_index",
+                               lambda *a, **k: calls.append(k)), \
+                self.stdout_guard():
+            r = _mcp.reindex_tool(_client(), confirm=False)
+        self.assertEqual(r["status"], "confirmation_required")
+        self.assertEqual(calls, [])  # no side effect before confirmation
+
+    def test_confirm_venice_backend_recovers_meta(self):
+        root = self._make_index(
+            {"backend": "venice", "model": "text-embed-x", "requested_dimensions": 256})
+        captured = {}
+
+        def fake_build(r, **k):
+            captured["root"] = r
+            captured["kw"] = k
+            return {"indexed": 2, "reused": 3, "removed": 0, "files": 5,
+                    "chunks": 10, "backend": "venice", "model": k.get("model"),
+                    "dimensions": 256, "store": "x"}
+
+        with mock.patch.object(_mcp._index, "build_index", fake_build), \
+                self.stdout_guard():
+            r = _mcp.reindex_tool(_client(), confirm=True)
+        self.assertEqual(r["status"], "ok")
+        self.assertEqual(r["indexed"], 2)
+        self.assertEqual(r["reused"], 3)
+        self.assertEqual(captured["kw"]["model"], "text-embed-x")
+        self.assertEqual(captured["kw"]["dimensions"], 256)
+        self.assertNotIn("embed_base_url", captured["kw"])  # venice, not local
+        self.assertEqual(Path(captured["root"]).resolve(), root.resolve())
+
+    def test_confirm_local_backend_recovers_base_url(self):
+        self._make_index(
+            {"backend": "local", "model": "bge-small", "base_url": "http://h:8080/v1"})
+        captured = {}
+
+        def fake_build(r, **k):
+            captured.update(k)
+            return {"indexed": 0, "reused": 0, "removed": 0, "files": 0,
+                    "chunks": 0, "backend": "local", "model": "bge-small",
+                    "dimensions": None, "store": "x"}
+
+        with mock.patch.object(_mcp._index, "build_index", fake_build), \
+                self.stdout_guard():
+            r = _mcp.reindex_tool(_client(), confirm=True)
+        self.assertEqual(r["status"], "ok")
+        self.assertEqual(captured["embed_base_url"], "http://h:8080/v1")
+        self.assertEqual(captured["embed_model"], "bge-small")
+        self.assertNotIn("model", captured)  # local path uses embed_model, not model
+
+    def test_build_error_becomes_error_dict(self):
+        self._make_index({"backend": "venice", "model": "m"})
+
+        def boom(*a, **k):
+            raise _mcp._index.IndexingError("embeddings backend unreachable", 5)
+
+        with mock.patch.object(_mcp._index, "build_index", boom), \
+                self.stdout_guard():
+            r = _mcp.reindex_tool(_client(), confirm=True)
+        self.assertEqual(r["status"], "error")
+        self.assertIn("unreachable", r["message"])
+
+
 if __name__ == "__main__":
     unittest.main()
