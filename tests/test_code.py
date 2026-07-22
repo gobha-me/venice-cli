@@ -355,6 +355,18 @@ class TestCodeTools(unittest.TestCase):
         self.assertEqual(r["status"], "ok")
         self.assertEqual(r["exit_code"], 3)
 
+    def test_run_honors_shell_deny_policy(self):
+        # #33 parity: code's `run` enforces the same allow/deny policy.
+        tools = _tools(self.root, exec_timeout=5, shell_deny=["sudo"])
+        r = tools["run"].invoke({"command": "sudo reboot"})
+        self.assertEqual(r["status"], "error")
+        self.assertIn("deny", r["message"])
+
+    def test_run_unrestricted_by_default(self):
+        # No policy configured -> behavior unchanged (only the confirm gate).
+        gate = self.tools["run"].invoke({"command": "echo hi; echo bye"})
+        self.assertEqual(gate["status"], "confirmation_required")
+
     # --- git ---
     def test_git_readonly_ok_mutation_refused(self):
         r = self.tools["git"].invoke({"subcommand": "status"})

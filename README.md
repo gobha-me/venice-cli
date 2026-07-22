@@ -691,8 +691,46 @@ Details and safety:
 | `--session-max-spend USD` | cap total chat-completion spend for the session |
 | `--yes` / `-y` | auto-approve every paid tool call and side-effecting MCP tool |
 | `--output DIR` / `-o` | directory for generated files |
+| `--shell` / `--exec` | add a gated `shell` tool (`/bin/sh -c` in the cwd); implies `--tools` |
+| `--shell-allow CMD` | allow only these commands for `--shell` (repeatable; adds to config `shell.allow`) |
+| `--shell-deny PATTERN` | refuse commands matching these globs (repeatable; adds to config `shell.deny`) |
+| `--shell-unrestricted` | acknowledge an empty allowlist under `--yes` (required for that combination) |
 | `--mcp NAME` | attach a registered external MCP server's tools (repeatable) |
 | `--no-mcp` | attach no MCP servers (overrides a configured default) |
+
+#### Shell exec tool (`--shell`)
+
+`--shell` (alias `--exec`) adds a gated **`shell`** tool so the agent can run any CLI
+(`gh`, `git`, `curl`, build/test commands) — the same `/bin/sh -c` rail
+[`venice code`](#coding-agent-venice-code) uses, with cwd set to the current directory,
+a timeout, size-capped output, and the Venice API keys **scrubbed from the child
+environment**. Every command is shown and **confirmed** before it runs (`[y/N]`), unless
+`--yes` auto-approves. `--shell` implies `--tools`.
+
+```sh
+venice chat --shell --shell-allow gh --shell-allow git "Open my oldest assigned issue."
+```
+
+Scope it with an **allow/deny policy** — CLI flags add to a shared top-level `shell`
+section in [config](#config) (`shell.allow` / `shell.deny`), the single source of truth
+for both `venice chat --shell` and `venice code`'s `run` tool:
+
+```sh
+venice config set shell.deny  '["rm *", "sudo *", "* --force*"]'
+venice config set shell.allow '["git", "gh", "ls", "cat"]'
+```
+
+- **Deny** globs are matched on the whole command line and on each token, are **always**
+  enforced, and win over allow. Use `sudo` to block by name, `*rm -rf*` for a substring.
+- A non-empty **allowlist** additionally requires a *single simple command* — no shell
+  operators, pipes, redirects, substitutions, or variables (`; | & < > ( ) \` $`) — and
+  the leading command's basename must be allowlisted (globs like `git*` are fine). This
+  stops an allowlisted `gh && rm -rf ~` from slipping through.
+- An **empty allowlist is unrestricted** (only the confirm gate + deny apply). Combining
+  that with `--yes` (auto-approved arbitrary shell) is refused unless you pass
+  `--shell-unrestricted` to acknowledge it.
+- **Not exposed over `venice mcp-serve`** — a shared/remote server running arbitrary
+  shell is a much larger blast radius and is deliberately out of scope.
 
 #### External MCP tools (`--mcp`)
 
@@ -937,7 +975,10 @@ size-capped output, and the Venice API keys scrubbed from the child environment.
 that a *shell command* can still touch paths outside the root (`cat ../x`); `run`'s
 boundary is the **confirm gate** (the exact command is shown before it runs) plus the
 forced cwd, timeout, and env-scrub — which is why it always confirms. git mutations
-(`add`/`commit`) go through the gated `run` tool.
+(`add`/`commit`) go through the gated `run` tool. `run` also honors the shared
+[`shell` allow/deny policy](#shell-exec-tool---shell) (config `shell.*` or
+`--shell-allow`/`--shell-deny`) — a denied command is refused; an empty policy leaves
+it unrestricted (unchanged behavior).
 
 | flag | effect |
 | --- | --- |
@@ -949,6 +990,7 @@ forced cwd, timeout, and env-scrub — which is why it always confirms. git muta
 | `--root DIR` | project directory to sandbox to (default: cwd) |
 | `--max-tool-calls N` | cap tool invocations before forcing a final answer (default 25) |
 | `--exec-timeout SECS` | timeout for `run`/`git` (default 120) |
+| `--shell-allow CMD` / `--shell-deny PATTERN` | scope the `run` tool with the shared allow/deny policy (repeatable; adds to config `shell.*`) |
 | `--assets` | also expose the in-process asset-generation tools (image / image-edit / sfx / music / tts / upscale / bg-remove / video) so the agent can create images, audio & video in the project; paid — each confirms per call unless `--auto` |
 | `--auto-compact` | summarize older history once the prompt crosses `--compact-threshold` tokens (default 100 000), keeping the last `--compact-keep-turns` turns (default 10); long runs stay in-context |
 | `-i`, `--json`, `--model`, `--system` | interactive REPL · JSON envelope · model · extra system instructions |

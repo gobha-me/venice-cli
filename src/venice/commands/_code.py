@@ -27,32 +27,45 @@ Safety model:
 - **exec honesty.** ``run`` executes ``/bin/sh -c`` with cwd forced to `root`, a
   timeout, size-capped captured output, and the Venice API keys scrubbed from the
   child env. A shell command can still read/write **outside** the root (``cat ../x``);
-  exec's boundary is the confirm gate + cwd + timeout + env-scrub, **not** path
-  containment -- which is why it is always gated. ``git`` exposes only read-only
-  subcommands freely; mutations go through the (gated) ``run`` tool.
+  exec's boundary is the confirm gate + cwd + timeout + env-scrub + the optional
+  allow/deny **shell policy**, **not** path containment -- which is why it is always
+  gated. ``git`` exposes only read-only subcommands freely; mutations go through the
+  (gated) ``run`` tool. The exec rails (``run_cmd``/``git_cmd``/``_scrubbed_env``/the
+  policy) live in :mod:`commands._exec` so `venice chat --shell` (#33) shares the
+  exact same gate.
 """
 from __future__ import annotations
 
 import fnmatch
 import os
 import re
-import subprocess
 from pathlib import Path
 from typing import List
 
-from . import _agent, _index, _mcp
+from . import _agent, _exec, _index, _mcp
+from ._exec import (  # shared exec rails (#33): one gate for `code` and chat --shell
+    DEFAULT_EXEC_TIMEOUT,
+    MAX_OUTPUT_CHARS,
+    _confirm,
+    _err,
+    _GIT_SCHEMA,
+    _obj,
+    _ok,
+    _p,
+    _RUN_SCHEMA,
+    _scrubbed_env,
+    _SECRET_ENV,
+    git_cmd,
+    run_cmd,
+)
 
 # --------------------------------------------------------------------------- #
-# Limits + constants
+# Limits + constants  (exec limits `MAX_OUTPUT_CHARS`/`DEFAULT_EXEC_TIMEOUT`,
+# `_SECRET_ENV`, and the `_ok`/`_err`/`_confirm` helpers come from `_exec`)
 # --------------------------------------------------------------------------- #
 MAX_READ_BYTES = _index.MAX_FILE_BYTES        # reuse the indexer's oversize cap
-MAX_OUTPUT_CHARS = 20_000                      # cap per stdout/stderr stream
 MAX_GREP_MATCHES = 200
 MAX_GREP_FILES = 5_000
-DEFAULT_EXEC_TIMEOUT = 120                     # seconds
-
-# Secrets never inherited into an exec'd child (CLAUDE.md credential hygiene).
-_SECRET_ENV = ("VENICE_API_KEY", "VENICE_EMBED_API_KEY")
 
 # Loop-controlled kwargs the model must never supply (mirrors _agent._CONTROLLED).
 _CONTROLLED = ("confirm", "max_spend", "output_dir")
@@ -62,18 +75,6 @@ def _clean(arguments) -> dict:
     if not isinstance(arguments, dict):
         return {}
     return {k: v for k, v in arguments.items() if k not in _CONTROLLED}
-
-
-def _err(message: str) -> dict:
-    return {"status": "error", "message": message}
-
-
-def _ok(**kw) -> dict:
-    return {"status": "ok", **kw}
-
-
-def _confirm(message: str) -> dict:
-    return {"status": "confirmation_required", "message": message}
 
 
 class _PathError(Exception):
@@ -422,98 +423,14 @@ def apply_patch(root: str, patches, *, confirm: bool = False,
                total_edits=sum(r["edits"] for r in results))
 
 
-def _scrubbed_env() -> dict:
-    return {k: v for k, v in os.environ.items() if k not in _SECRET_ENV}
-
-
-def run_cmd(root: str, command, *, timeout=None, exec_timeout: int = DEFAULT_EXEC_TIMEOUT,
-            confirm: bool = False) -> dict:
-    if not command or not str(command).strip():
-        return _err("command is required")
-    if not confirm:
-        return _confirm(f"run will execute in {root}:\n    {command}")
-    try:
-        t = int(timeout) if timeout else int(exec_timeout)
-    except (TypeError, ValueError):
-        t = int(exec_timeout)
-    try:
-        proc = subprocess.run(
-            ["/bin/sh", "-c", str(command)], cwd=root, capture_output=True,
-            text=True, timeout=t, env=_scrubbed_env(),
-        )
-    except subprocess.TimeoutExpired:
-        return _err(f"command timed out after {t}s")
-    except OSError as e:
-        return _err(f"could not run command: {e}")
-    out, errout = proc.stdout or "", proc.stderr or ""
-    return _ok(
-        exit_code=proc.returncode,
-        stdout=out[:MAX_OUTPUT_CHARS],
-        stderr=errout[:MAX_OUTPUT_CHARS],
-        truncated=(len(out) > MAX_OUTPUT_CHARS or len(errout) > MAX_OUTPUT_CHARS),
-    )
-
-
-_GIT_READONLY = frozenset({
-    "status", "diff", "log", "show", "branch", "ls-files", "blame", "remote",
-    "rev-parse", "describe", "shortlog",
-})
-
-
-def git_cmd(root: str, subcommand, *, args=None,
-            exec_timeout: int = DEFAULT_EXEC_TIMEOUT) -> dict:
-    sub = str(subcommand or "").strip()
-    if sub not in _GIT_READONLY:
-        return _err(
-            "git: only read-only subcommands are allowed here "
-            f"({', '.join(sorted(_GIT_READONLY))}); use the run tool "
-            "(which confirms) for mutations like add/commit"
-        )
-    argv = ["git", sub]
-    if args:
-        if not isinstance(args, list):
-            return _err("args must be a list of strings")
-        for a in args:
-            if not isinstance(a, (str, int, float)):
-                return _err("each arg must be a string")
-            argv.append(str(a))
-    try:
-        proc = subprocess.run(
-            argv, cwd=root, capture_output=True, text=True,
-            timeout=int(exec_timeout), env=_scrubbed_env(),
-        )
-    except FileNotFoundError:
-        return _err("git is not installed")
-    except subprocess.TimeoutExpired:
-        return _err("git command timed out")
-    except OSError as e:
-        return _err(f"git failed: {e}")
-    out, errout = proc.stdout or "", proc.stderr or ""
-    return _ok(
-        exit_code=proc.returncode,
-        stdout=out[:MAX_OUTPUT_CHARS],
-        stderr=errout[:MAX_OUTPUT_CHARS],
-        truncated=(len(out) > MAX_OUTPUT_CHARS),
-    )
+# `_scrubbed_env`, `run_cmd`, `git_cmd`, and `_GIT_READONLY` now live in `_exec`
+# (imported above) so the chat `--shell` tool shares the identical gate (#33).
 
 
 # --------------------------------------------------------------------------- #
-# JSON schemas (literals; confirm/max_spend/output_dir deliberately absent)
+# JSON schemas (literals; confirm/max_spend/output_dir deliberately absent).
+# `_p`/`_obj` and the exec schemas `_RUN_SCHEMA`/`_GIT_SCHEMA` come from `_exec`.
 # --------------------------------------------------------------------------- #
-def _p(typ, desc=None):
-    d = {"type": typ}
-    if desc:
-        d["description"] = desc
-    return d
-
-
-def _obj(props, required=None):
-    s = {"type": "object", "properties": props}
-    if required:
-        s["required"] = required
-    return s
-
-
 _READ_SCHEMA = _obj(
     {
         "path": _p("string", "File path, relative to the project root."),
@@ -588,21 +505,7 @@ _PATCH_SCHEMA = _obj(
     },
     ["patches"],
 )
-_RUN_SCHEMA = _obj(
-    {
-        "command": _p("string", "Shell command to run (via /bin/sh -c) in the root."),
-        "timeout": _p("integer", "Timeout in seconds for this command."),
-    },
-    ["command"],
-)
-_GIT_SCHEMA = _obj(
-    {
-        "subcommand": _p("string", "Read-only git subcommand (status/diff/log/show/...)."),
-        "args": {"type": "array", "items": {"type": "string"},
-                 "description": "Extra arguments for the subcommand."},
-    },
-    ["subcommand"],
-)
+# `_RUN_SCHEMA` / `_GIT_SCHEMA` are imported from `_exec` (shared with chat --shell).
 _SEARCH_SCHEMA = _obj(
     {
         "query": _p("string", "Natural-language description of the code to find."),
@@ -624,6 +527,8 @@ def code_tools(
     assets: bool = False,
     max_spend=None,
     config=None,
+    shell_allow=(),
+    shell_deny=(),
 ) -> List[_agent.Tool]:
     """Build the coding tools bound to a realpath-resolved project `root`.
 
@@ -631,6 +536,11 @@ def code_tools(
     (`write_file`/`edit_file`/`run`) are ``paid=True`` and route through the confirm
     gate. `project_search` (reusing the free `_mcp.search_tool`) is added only when
     `include_search` and a `client` are supplied and a `.venice` index exists.
+
+    `shell_allow`/`shell_deny` (#33) apply the shared allow/deny policy to the `run`
+    tool -- the same policy `venice chat --shell` enforces (see `_exec.check_policy`).
+    Empty lists leave `run` unrestricted (only the confirm gate), preserving the prior
+    behavior of autonomous `venice code` runs.
 
     When `assets` and a `client` are supplied, the in-process asset-generation tools
     (`venice_image`/`venice_image_edit`/`venice_sfx`/`venice_music`/`venice_tts`/
@@ -653,7 +563,7 @@ def code_tools(
 
     def run_invoke(arguments, *, confirm: bool = False):
         return run_cmd(root, confirm=confirm, exec_timeout=exec_timeout,
-                       **_clean(arguments))
+                       allow=shell_allow, deny=shell_deny, **_clean(arguments))
 
     def git_invoke(arguments, *, confirm: bool = False):
         return git_cmd(root, exec_timeout=exec_timeout, **_clean(arguments))

@@ -179,6 +179,20 @@ def register(subparsers) -> None:
         help=f"Timeout for run/git commands (default: {_code.DEFAULT_EXEC_TIMEOUT}).",
     )
     grp.add_argument(
+        "--shell-allow", action="append", dest="shell_allow", default=None,
+        metavar="CMD",
+        help="Restrict the `run` tool to these commands (repeatable; globs ok on the "
+        "leading token; a non-empty allowlist also requires a single simple command). "
+        "Adds to the config `shell.allow` list, shared with `venice chat --shell` (#33).",
+    )
+    grp.add_argument(
+        "--shell-deny", action="append", dest="shell_deny", default=None,
+        metavar="PATTERN",
+        help="Refuse `run` commands matching these globs (repeatable; matched on the "
+        "whole line and each token; always enforced, wins over allow). Adds to config "
+        "`shell.deny`.",
+    )
+    grp.add_argument(
         "--assets", action="store_true", dest="assets", default=None,
         help="Also expose the in-process asset-generation tools (venice_image, "
         "image_edit, sfx, music, tts, upscale, bg_remove, video) so the agent can "
@@ -387,12 +401,18 @@ def _run(args) -> int:
         )
 
     oai = _openai.build_openai(openai, client)
+    doc = userconfig.load_config()  # #58 tool defaults + #33 shell policy
+    pol = userconfig.shell_policy(doc)
+    shell_allow = list(pol["allow"]) + list(getattr(args, "shell_allow", None) or [])
+    shell_deny = list(pol["deny"]) + list(getattr(args, "shell_deny", None) or [])
     tools = _code.code_tools(
         root, client,
         exec_timeout=args.exec_timeout or _code.DEFAULT_EXEC_TIMEOUT,
         include_search=True,
         assets=bool(args.assets),
-        config=userconfig.load_config(),  # #58: honor defaults.<cmd>.* in tools
+        config=doc,  # #58: honor defaults.<cmd>.* in tools
+        shell_allow=shell_allow,  # #33: `run` honors the shared allow/deny policy
+        shell_deny=shell_deny,
     )
     system = _system_prompt(args, root, tools)
     gen_kwargs = _gen_kwargs(args)

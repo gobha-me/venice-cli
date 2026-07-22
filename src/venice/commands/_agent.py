@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional
 
 from .. import userconfig
+from . import _exec
 from . import _mcp
 from . import _models
 from . import _compact
@@ -601,6 +602,11 @@ def builtin_tools(
     output_dir: Optional[str] = None,
     only: Optional[set] = None,
     config: Optional[dict] = None,
+    shell: bool = False,
+    shell_root: Optional[str] = None,
+    shell_allow=(),
+    shell_deny=(),
+    exec_timeout: int = _exec.DEFAULT_EXEC_TIMEOUT,
 ) -> List[Tool]:
     """Build the in-process venice tools, bound to `client`.
 
@@ -615,6 +621,12 @@ def builtin_tools(
     (precedence: model arg > config default > tool hardcoded default). Only keys
     in `userconfig._COMMAND_MAP[section]` (the #57 allow-list) that the tool
     function actually accepts are injected.
+
+    `shell` (issue #33) appends a gated `shell` exec tool bound to `shell_root`
+    (the same `_exec.run_cmd` rail `venice code`'s `run` uses), scoped by the
+    `shell_allow`/`shell_deny` policy. It is added AFTER the `only` filter (it is a
+    rail, not a venice API tool, so it isn't part of the selectable `_BUILTINS`
+    set) and is never exposed via `mcp-serve`, which builds its own wrappers.
     """
 
     def _config_defaults(section, impl) -> dict:
@@ -689,6 +701,28 @@ def builtin_tools(
                 + ", ".join(sorted(known))
             )
         tools = [t for t in tools if t.name in only]
+
+    if shell:
+        root = shell_root or "."
+
+        def _shell_invoke(arguments, *, confirm: bool = False):
+            return _exec.run_cmd(
+                root, confirm=confirm, exec_timeout=exec_timeout,
+                allow=shell_allow, deny=shell_deny, **_clean(arguments),
+            )
+
+        tools.append(Tool(
+            name="shell",
+            description=(
+                "Run a shell command (/bin/sh -c) with the working directory set to "
+                f"{root}; returns exit code + captured output. Use for gh/git/curl/"
+                "build/test automation. Requires confirmation. A command blocked by "
+                "the operator's allow/deny policy is refused (see the error message)."
+            ),
+            parameters=_exec._RUN_SCHEMA,
+            invoke=_shell_invoke,
+            paid=True,
+        ))
     return tools
 
 

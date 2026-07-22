@@ -5,7 +5,9 @@ progress feedback (#54), and the `all`/auto-accept confirm gate (#55). Reuses
 `test_chat`'s fake completions so the fakes stay in lock-step. No network/key.
 """
 import io
+import os
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -445,6 +447,61 @@ class TestAsyncJobSchemas(unittest.TestCase):
             object(), only={"venice_job_status", "venice_job_result"})}
         self.assertFalse(by["venice_job_status"].paid)
         self.assertFalse(by["venice_job_result"].paid)
+
+
+class TestShellTool(unittest.TestCase):
+    """#33: the opt-in gated `shell` exec tool appended by builtin_tools."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.root = os.path.realpath(self.tmp)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _shell(self, **kw):
+        tools = _agent.builtin_tools(object(), shell=True, shell_root=self.root, **kw)
+        return {t.name: t for t in tools}["shell"]
+
+    def test_absent_by_default(self):
+        names = {t.name for t in _agent.builtin_tools(object())}
+        self.assertNotIn("shell", names)
+
+    def test_present_paid_and_hides_controls(self):
+        tool = self._shell()
+        self.assertTrue(tool.paid)  # routes through the confirm gate
+        for banned in ("confirm", "max_spend", "output_dir"):
+            self.assertNotIn(banned, tool.parameters["properties"])
+        self.assertEqual(tool.parameters["required"], ["command"])
+
+    def test_survives_only_filter(self):
+        # shell is a rail, not a selectable builtin: `only` narrows the venice tools
+        # but the shell tool is still appended.
+        tools = _agent.builtin_tools(
+            object(), only={"venice_chat"}, shell=True, shell_root=self.root)
+        names = {t.name for t in tools}
+        self.assertEqual(names, {"venice_chat", "shell"})
+
+    def test_gate_then_run_with_allow(self):
+        tool = self._shell(shell_allow=["echo"])
+        gate = tool.invoke({"command": "echo hi"})
+        self.assertEqual(gate["status"], "confirmation_required")
+        r = tool.invoke({"command": "echo hi"}, confirm=True)
+        self.assertEqual(r["status"], "ok")
+        self.assertIn("hi", r["stdout"])
+
+    def test_deny_refused_before_confirm(self):
+        tool = self._shell(shell_deny=["sudo"])
+        r = tool.invoke({"command": "sudo reboot"})
+        self.assertEqual(r["status"], "error")
+        self.assertIn("deny", r["message"])
+
+    def test_model_cannot_self_approve_via_confirm_arg(self):
+        # A model smuggling confirm=True in its arguments must not bypass the gate.
+        tool = self._shell(shell_allow=["echo"])
+        r = tool.invoke({"command": "echo hi", "confirm": True})
+        self.assertEqual(r["status"], "confirmation_required")
 
 
 class TestConfigDefaults(unittest.TestCase):
