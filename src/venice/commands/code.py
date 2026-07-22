@@ -41,7 +41,7 @@ from typing import List, Optional
 
 from .. import auth, config, userconfig
 from ..client import build_client_from_auth
-from . import _agent, _code, _compact, _models, _openai, _repl
+from . import _agent, _code, _compact, _models, _openai, _repl, _session
 
 _DEFAULT_MAX_TOOL_CALLS = 25
 
@@ -250,8 +250,18 @@ def register(subparsers) -> None:
         "Tools are on; changes confirm per step unless --auto.",
     )
     it.add_argument(
-        "--resume", default=None, metavar="FILE",
-        help="Resume a saved transcript JSON interactively (pairs with /save).",
+        "--resume", default=None, metavar="ID|FILE",
+        help="Resume a saved session by id (see `venice sessions ls`) or a "
+        "transcript JSON file, interactively (#47).",
+    )
+    it.add_argument(
+        "--continue", "-c", action="store_true", default=None, dest="cont",
+        help="Resume the most recent code session (#47).",
+    )
+    it.add_argument(
+        "--ephemeral", "--no-save", action="store_true", default=None,
+        dest="ephemeral",
+        help="Do not auto-save this session to ~/.config/venice/sessions/ (#47).",
     )
     p.set_defaults(handler=_run)
 
@@ -371,17 +381,29 @@ def _show_plan(plan_text) -> None:
 # Entry point
 # --------------------------------------------------------------------------- #
 def _run(args) -> int:
+    # Resolve a resumed session (#47) BEFORE apply_defaults so restored settings
+    # outrank config defaults (both fill None dests; the session runs first).
+    try:
+        session = _session.resolve_from_args(args, "code")
+    except _session.SessionError as e:
+        print(f"code: {e}", file=sys.stderr)
+        return 2
+    _session.apply_to_args(args, session, "code")
     userconfig.apply_defaults(args, "code")
 
+    # Faithful root restore: an explicit --root/$VENICE_CODE_ROOT still wins, else a
+    # resumed session re-sandboxes to where it left off (tools + system prompt rebind
+    # to this root below), else the cwd.
     root = os.path.realpath(
-        args.root or os.environ.get(config.ENV_CODE_ROOT) or os.getcwd()
+        args.root or os.environ.get(config.ENV_CODE_ROOT)
+        or (session.root if session else None) or os.getcwd()
     )
     if not os.path.isdir(root):
         print(f"code: not a directory: {root}", file=sys.stderr)
         return 2
 
     task = _resolve_task(args)
-    interactive = bool(args.interactive or args.resume) or (
+    interactive = bool(args.interactive or args.resume or getattr(args, "cont", None)) or (
         task is None and sys.stdin.isatty()
     )
     if not interactive and not task:
@@ -453,6 +475,8 @@ def _run(args) -> int:
             args, oai, openai, client, models, model, initial=task,
             tools_session=_code_session(tools), gen_kwargs=gen_kwargs,
             label="venice code", max_tool_calls=_DEFAULT_MAX_TOOL_CALLS,
+            session=session, ephemeral=bool(getattr(args, "ephemeral", None)),
+            root=root, system_reseed=True,
         )
 
     return _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task,

@@ -31,18 +31,44 @@ from venice.commands import _repl  # noqa: E402
 
 _EMPTY_CFG = {"version": 1, "mcpServers": {}, "defaults": {}}
 
+# Auto-save is on by default (#47). Point the whole module's session store at a
+# throwaway dir so any test that drives the REPL (even via an inline harness that
+# doesn't set VENICE_SESSIONS_DIR itself) never writes to ~/.config/venice/sessions.
+_SESSIONS_TMP = None
+
+
+def setUpModule():
+    global _SESSIONS_TMP
+    _SESSIONS_TMP = tempfile.mkdtemp()
+    os.environ["VENICE_SESSIONS_DIR"] = _SESSIONS_TMP
+
+
+def tearDownModule():
+    os.environ.pop("VENICE_SESSIONS_DIR", None)
+    if _SESSIONS_TMP:
+        __import__("shutil").rmtree(_SESSIONS_TMP, ignore_errors=True)
+
 
 def _run_repl(args, results, inputs, *, stdout=None, stderr=None,
-              urlopen=None, stdin=None, cfg=None, attach=None, mcp_probe=_MCP_PRESENT):
+              urlopen=None, stdin=None, cfg=None, attach=None, mcp_probe=_MCP_PRESENT,
+              sessions_dir=None):
     """Run the REPL: `results` are returned by successive create() calls,
     `inputs` are fed to input(). Returns (rc, fake_client, recorded_calls).
 
     `cfg` overrides the (empty) config doc; `attach` patches the MCP client seam;
-    `mcp_probe` is what `import_mcp` returns (SDK-independent, like test_chat)."""
+    `mcp_probe` is what `import_mcp` returns (SDK-independent, like test_chat).
+    `sessions_dir` pins the session store (#47) -- pass the same dir across two
+    calls to test resume-by-id; omit for a throwaway per-call store."""
     from venice.commands import chat
     fake, calls = _fake_openai_seq(results)
     with contextlib.ExitStack() as st:
-        st.enter_context(mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}))
+        # Auto-save is on by default (#47) -- keep it hermetic: point the session
+        # store at a throwaway dir so tests never touch ~/.config/venice/sessions.
+        _sess_dir = sessions_dir or st.enter_context(tempfile.TemporaryDirectory())
+        st.enter_context(mock.patch.dict(
+            os.environ,
+            {"VENICE_API_KEY": "fake", "VENICE_SESSIONS_DIR": _sess_dir},
+        ))
         st.enter_context(mock.patch("venice.userconfig.load_config",
                                     lambda *a, **k: cfg or _EMPTY_CFG))
         st.enter_context(mock.patch("venice.client.urllib.request.urlopen",
@@ -188,6 +214,126 @@ class TestRepl(unittest.TestCase):
             roles = [m["role"] for m in calls2[0]["messages"]]
             self.assertEqual(roles, ["user", "assistant", "user"])
             self.assertEqual(calls2[0]["messages"][0]["content"], "remember X")
+
+    def test_autosave_and_resume_by_id(self):
+        # A session auto-saves every turn (no /save); --resume <id> restores it (#47).
+        with tempfile.TemporaryDirectory() as d:
+            rc, fake, calls = _run_repl(
+                _args(interactive=True),
+                [[FakeChunk("noted")]], ["remember X", "/exit"],
+                sessions_dir=d,
+            )
+            self.assertEqual(rc, 0)
+            files = list(Path(d).glob("*.json"))
+            self.assertEqual(len(files), 1)              # one session auto-saved
+            env = json.loads(files[0].read_text())
+            sid = env["id"]
+            self.assertEqual(env["command"], "chat")
+            self.assertEqual(env["messages"][0]["content"], "remember X")
+            self.assertEqual(env["messages"][1]["content"], "noted")
+
+            rc2, fake2, calls2 = _run_repl(
+                _args(interactive=True, resume=sid),
+                [[FakeChunk("you said X")]], ["what did I say", "/exit"],
+                sessions_dir=d,
+            )
+            self.assertEqual(rc2, 0)
+            roles = [m["role"] for m in calls2[0]["messages"]]
+            self.assertEqual(roles, ["user", "assistant", "user"])
+            self.assertEqual(calls2[0]["messages"][0]["content"], "remember X")
+            # resume updates the SAME file in place (id kept); now 4 messages.
+            self.assertEqual(len(list(Path(d).glob("*.json"))), 1)
+            env2 = json.loads((Path(d) / (sid + ".json")).read_text())
+            self.assertEqual(len(env2["messages"]), 4)
+
+    def test_ephemeral_writes_no_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            rc, fake, calls = _run_repl(
+                _args(interactive=True, ephemeral=True),
+                [[FakeChunk("hi")]], ["yo", "/exit"],
+                sessions_dir=d,
+            )
+            self.assertEqual(rc, 0)
+            self.assertEqual(list(Path(d).glob("*.json")), [])
+
+    def test_ephemeral_on_resume_loads_but_does_not_write_back(self):
+        # --ephemeral must suppress auto-save even when resuming (read-only resume).
+        with tempfile.TemporaryDirectory() as d:
+            rc, _f, _c = _run_repl(
+                _args(interactive=True),
+                [[FakeChunk("noted")]], ["remember X", "/exit"], sessions_dir=d,
+            )
+            self.assertEqual(rc, 0)
+            path = list(Path(d).glob("*.json"))[0]
+            sid = json.loads(path.read_text())["id"]
+            before = path.read_bytes()
+
+            rc2, _f2, calls2 = _run_repl(
+                _args(interactive=True, resume=sid, ephemeral=True),
+                [[FakeChunk("you said X")]], ["what did I say", "/exit"],
+                sessions_dir=d,
+            )
+            self.assertEqual(rc2, 0)
+            # context WAS restored (resume still loads) ...
+            self.assertEqual(calls2[0]["messages"][0]["content"], "remember X")
+            # ... but nothing was written back: same file, unchanged, no new session.
+            self.assertEqual(len(list(Path(d).glob("*.json"))), 1)
+            self.assertEqual(path.read_bytes(), before)
+
+    def test_resume_restores_model_unless_overridden(self):
+        with tempfile.TemporaryDirectory() as d:
+            rc, fake, calls = _run_repl(
+                _args(interactive=True, model="venice-uncensored"),
+                [[FakeChunk("ok")]], ["hi", "/exit"],
+                sessions_dir=d,
+            )
+            self.assertEqual(rc, 0)
+            self.assertEqual(calls[0]["model"], "venice-uncensored")   # non-default
+            sid = json.loads(list(Path(d).glob("*.json"))[0].read_text())["id"]
+
+            # resume WITHOUT --model -> the saved model drives the turn
+            rc2, fake2, calls2 = _run_repl(
+                _args(interactive=True, resume=sid),
+                [[FakeChunk("ok2")]], ["again", "/exit"],
+                sessions_dir=d,
+            )
+            self.assertEqual(calls2[0]["model"], "venice-uncensored")
+
+            # explicit --model on resume overrides the saved one (precedence).
+            rc3, fake3, calls3 = _run_repl(
+                _args(interactive=True, resume=sid, model="llama-3.3-70b"),
+                [[FakeChunk("ok3")]], ["again2", "/exit"],
+                sessions_dir=d,
+            )
+            self.assertEqual(calls3[0]["model"], "llama-3.3-70b")
+
+    def test_usage_carries_across_resume(self):
+        with tempfile.TemporaryDirectory() as d:
+            rc, fake, calls = _run_repl(
+                _args(interactive=True),
+                [[FakeChunk("a"),
+                  FakeChunk(usage={"prompt_tokens": 100, "completion_tokens": 10,
+                                   "total_tokens": 110})]],
+                ["hi", "/exit"],
+                sessions_dir=d,
+            )
+            self.assertEqual(rc, 0)
+            env = json.loads(list(Path(d).glob("*.json"))[0].read_text())
+            self.assertEqual(env["usage"]["prompt_tokens"], 100)
+            sid = env["id"]
+
+            err = io.StringIO()
+            rc2, fake2, calls2 = _run_repl(
+                _args(interactive=True, resume=sid),
+                [[FakeChunk("b"),
+                  FakeChunk(usage={"prompt_tokens": 50, "completion_tokens": 5,
+                                   "total_tokens": 55})]],
+                ["more", "/usage", "/exit"], stderr=err,
+                sessions_dir=d,
+            )
+            self.assertEqual(rc2, 0)
+            # cumulative prompt tokens = 100 (restored) + 50 (this turn) = 150
+            self.assertIn("150", err.getvalue())
 
     def test_bad_resume_exit_2(self):
         err = io.StringIO()

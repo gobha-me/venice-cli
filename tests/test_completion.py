@@ -39,7 +39,8 @@ class TestBashCompletion(unittest.TestCase):
         self.assertIn("complete -F _venice venice", self.out)
 
     def test_mentions_representative_commands(self):
-        for name in ("chat", "mcp-serve", "bg-remove", "config", "secret", "completion"):
+        for name in ("chat", "mcp-serve", "bg-remove", "config", "secret",
+                     "sessions", "completion"):
             self.assertIn(name, self.out)
 
     def test_nested_actions_and_aliases(self):
@@ -48,6 +49,8 @@ class TestBashCompletion(unittest.TestCase):
         # secret canonical + aliases both present
         for tok in ("set ls list rm remove",):
             self.assertIn(tok, self.out)
+        # sessions actions + aliases (#47)
+        self.assertIn("ls list show cat rm remove", self.out)
 
     def test_drift_guard_every_command_present(self):
         """The generator must emit every registered top-level command."""

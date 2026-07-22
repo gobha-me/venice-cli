@@ -24,6 +24,7 @@ content; it never echoes the API key. A saved transcript holds only the
 from __future__ import annotations
 
 import contextlib
+import copy
 import json
 import os
 import shlex
@@ -34,7 +35,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from .. import config
-from . import _agent, _compact, _models, _persona
+from . import _agent, _compact, _models, _persona, _session
 
 
 _PROMPT = "you> "
@@ -368,6 +369,36 @@ def _do_turn(oai, openai, chat, text, messages, gen_kwargs, state, args) -> None
     except openai.OpenAIError as e:
         del messages[mark:]
         chat._openai.status_to_exit(openai, e, "chat")  # prints; session survives
+    else:
+        # Committed turn only (the except clauses roll back): persist the session (#47).
+        _autosave(state, messages, gen_kwargs)
+
+
+def _autosave(state, messages, gen_kwargs) -> None:
+    """Persist the active session after a committed turn / on clean exit (#47).
+
+    No-op when there is no active session (``--ephemeral`` or a code-path that
+    never set one). Refreshes the mutable fields from live REPL state -- the model
+    (`/model` can switch it), the leading system prompt (`/system`), gen_kwargs,
+    the usage ledger snapshot, and the transcript -- then atomically rewrites the
+    envelope. A disk error is warned once and swallowed: a persistence hiccup must
+    never crash a live conversation.
+    """
+    sess = state.get("session")
+    if sess is None:
+        return
+    sess.model = state.get("model", sess.model)
+    sess.system = _current_system(messages)
+    sess.gen_kwargs = gen_kwargs
+    sess.max_tool_calls = state.get("max_tool_calls", sess.max_tool_calls)
+    ledger = state.get("ledger")
+    if ledger is not None:
+        sess.usage = ledger.to_dict()
+    sess.messages = messages
+    try:
+        _session.save(sess)
+    except OSError as e:
+        print(f"(session auto-save failed: {e})", file=sys.stderr)
 
 
 # --------------------------------------------------------------------------- #
@@ -502,7 +533,8 @@ def _dispatch_slash(line, messages, state, args, models, oai=None, gen_kwargs=No
 # --------------------------------------------------------------------------- #
 def run(args, oai, openai, client, models, model, initial=None, *,
         tools_session=None, gen_kwargs=None, label="venice chat",
-        max_tool_calls=8) -> int:
+        max_tool_calls=8, session=None, ephemeral=False, root=None,
+        system_reseed=False) -> int:
     """Drive the interactive REPL until `/exit`, `/quit`, or EOF (Ctrl-D).
 
     `initial` is an already-resolved first message (e.g. `venice chat -i "hi"`);
@@ -516,6 +548,15 @@ def run(args, oai, openai, client, models, model, initial=None, *,
     `max_tool_calls` is the per-turn budget when no `--max-tool-calls` is given
     (chat=8, `venice code` passes its higher default); `--max-tool-calls 0`/`<=0`
     means unlimited. `/auto` and `/manual` flip per-turn auto-accept live (#55).
+
+    Session store (#47): `session` is a resumed :class:`_session.Session` (its
+    messages seed the history and its usage seeds the ledger); when None and not
+    `ephemeral`, a fresh session is minted. Either way the active session is
+    auto-saved (atomic 0600) after every committed turn and on clean exit, so
+    `--resume <id>`/`--continue` restore settings + usage, not just messages.
+    `root` (code) is recorded on the session; `system_reseed` overwrites a stale
+    leading system message with `args.system` (code rebuilds it against the live
+    root each launch).
     """
     from . import chat  # lazy: chat imports this module at top (avoid a cycle)
 
@@ -524,14 +565,25 @@ def run(args, oai, openai, client, models, model, initial=None, *,
     except Exception:  # pragma: no cover - platform without readline
         _rl = None
 
-    try:
-        messages = _seed_messages(args)
-    except _TranscriptError as e:
-        print(f"chat: {e}", file=sys.stderr)
-        return 2
+    if session is not None:
+        messages = copy.deepcopy(session.messages)
+    else:
+        try:
+            messages = _seed_messages(args)
+        except _TranscriptError as e:
+            print(f"chat: {e}", file=sys.stderr)
+            return 2
 
     if gen_kwargs is None:
         gen_kwargs = chat._gen_kwargs(args)
+    if session is not None:
+        # Restore the saved session's venice_parameters etc. (scalar params already
+        # flowed back through `args`); a re-specified flag on resume still wins.
+        gen_kwargs = _session.merge_gen_kwargs(session.gen_kwargs, gen_kwargs)
+    # `venice code` rebuilds its system prompt against the live root each launch, so
+    # on resume replace the persisted (stale) leading system message with the fresh one.
+    if system_reseed and getattr(args, "system", None):
+        _set_system(messages, args.system)
 
     # `--tools`/`--mcp` (or an injected `tools_session`) turns the REPL into an
     # agent session. Any MCP servers stay attached for the whole session via the
@@ -555,6 +607,8 @@ def run(args, oai, openai, client, models, model, initial=None, *,
                     return rc      # invalid --tool subset / MCP attach error
                 tools_on = False   # model lacks function calling -> plain chat
         cap = getattr(args, "max_tool_calls", None)
+        if cap is None and session is not None and session.max_tool_calls is not None:
+            cap = session.max_tool_calls
         state = {
             "model": model,
             "tools": tools,
@@ -568,12 +622,33 @@ def run(args, oai, openai, client, models, model, initial=None, *,
         # Usage + spend ledger: always-on in the REPL so `/usage` and `/cost`
         # work in any session (#75); `--session-max-spend` (#66) only adds a cap.
         state["ledger"] = _agent.usage_ledger(args, models, model)
+        # Carry usage across resume (#47/#75): seed the fresh, currently-priced
+        # ledger with the saved totals so `/usage` and `/cost` are cumulative.
+        if session is not None and session.usage:
+            state["ledger"].restore(session.usage)
+
+        # The active session (#47): the resumed one, or a freshly minted one.
+        # --ephemeral means persist nothing -- so no active session at all, even on
+        # resume (the resumed context is still loaded above; it just isn't saved back).
+        if ephemeral:
+            active = None
+        else:
+            active = session or _session.new_session(
+                _session.command_from_label(label), label=label,
+                model=state["model"], system=_current_system(messages),
+                gen_kwargs=gen_kwargs, root=root,
+                max_tool_calls=state["max_tool_calls"], messages=messages,
+            )
+            if root is not None:
+                active.root = root
+        state["session"] = active
 
         if _rl is not None:
             _install_completer(_rl, models, stack)
 
         _banner(model, tools_on, getattr(args, "resume", None), messages,
-                label=label, auto=state["yes"])
+                label=label, auto=state["yes"], session=active,
+                ephemeral=ephemeral)
 
         # An explicit message (`venice chat -i "hello"`) becomes the first turn.
         if initial:
@@ -584,6 +659,7 @@ def run(args, oai, openai, client, models, model, initial=None, *,
                 line = input(_PROMPT)
             except EOFError:
                 print(file=sys.stderr)  # newline after ^D
+                _autosave(state, messages, gen_kwargs)  # flush /model,/system-only edits
                 return 0
             except KeyboardInterrupt:
                 print(file=sys.stderr)  # ^C at the prompt: discard the line, re-prompt
@@ -606,19 +682,24 @@ def run(args, oai, openai, client, models, model, initial=None, *,
                 if _dispatch_slash(
                     line, messages, state, args, models, oai=oai, gen_kwargs=gen_kwargs
                 ) == "exit":
+                    _autosave(state, messages, gen_kwargs)
                     return 0
                 continue
             _do_turn(oai, openai, chat, line, messages, gen_kwargs, state, args)
 
 
 def _banner(model, tools_on, resume, messages, *, label="venice chat",
-            auto=False) -> None:
+            auto=False, session=None, ephemeral=False) -> None:
     bits = [f"model {model}"]
     if tools_on:
         bits.append("tools on")
         bits.append("auto-accept on" if auto else "auto-accept off (/auto to enable)")
     if resume:
         bits.append(f"resumed {len(messages)} msg(s) from {resume}")
+    if ephemeral:
+        bits.append("ephemeral (not saved)")
+    elif session is not None:
+        bits.append(f"session {session.id} (auto-saving)")
     print(
         f"{label} -- interactive ({', '.join(bits)}). "
         "/help for commands; /exit or Ctrl-D to quit.",
