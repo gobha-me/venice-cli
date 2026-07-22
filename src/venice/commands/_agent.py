@@ -24,7 +24,6 @@ and passes the combined list to :func:`run_loop`. Nothing in the loop changes.
 """
 from __future__ import annotations
 
-import inspect
 import itertools
 import json
 import sys
@@ -630,27 +629,8 @@ def builtin_tools(
     """
 
     def _config_defaults(section, impl) -> dict:
-        if config is None:
-            return {}
-        section_map = userconfig._COMMAND_MAP.get(section)
-        if not section_map:
-            return {}
-        try:
-            params = set(inspect.signature(impl).parameters)
-        except (TypeError, ValueError):
-            return {}
-        out: dict = {}
-        for key, (dest, coerce) in section_map.items():
-            if dest not in params:
-                continue  # tool doesn't take this preference
-            raw = userconfig.resolve_default(section, key, config)
-            if raw is None:
-                continue
-            try:
-                out[dest] = coerce(raw)
-            except (TypeError, ValueError):
-                pass  # a bad config value shouldn't break tool building
-        return out
+        # #58: shared with mcp-serve -- layer defaults.<section>.* under tool args.
+        return userconfig.config_defaults_for(section, impl, config)
 
     def _make_paid(impl, section):
         defaults = _config_defaults(section, impl)

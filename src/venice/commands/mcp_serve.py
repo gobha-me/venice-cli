@@ -15,6 +15,7 @@ from __future__ import annotations
 import sys
 
 from .. import auth
+from .. import userconfig
 from ..client import build_client_from_auth
 from . import _mcp
 
@@ -49,10 +50,12 @@ def _run(args) -> int:
 
     from ..mcp_server import serve  # lazy: only import FastMCP after the probe passes
 
+    doc = userconfig.load_config()  # #58: honor defaults.<section>.* in exposed tools
+
     print("venice mcp-serve: starting stdio MCP server (Ctrl-C to stop)",
           file=sys.stderr)
     try:
-        serve(client)
+        serve(client, doc=doc)
     except KeyboardInterrupt:
         return 130
     return 0

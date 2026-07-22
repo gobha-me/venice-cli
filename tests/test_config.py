@@ -475,5 +475,42 @@ class TestShellPolicy(_Base):
         self.assertEqual(uc.shell_policy(doc), {"allow": [], "deny": ["rm *"]})
 
 
+class TestConfigDefaultsFor(unittest.TestCase):
+    """#58: the shared tool-path resolver -- allow-listed, coerced, signature-gated.
+
+    Uses `commands._mcp` (the pure impl module, import-safe without the [mcp] extra)
+    as the introspection target, exactly as mcp-serve/chat/code do at runtime."""
+
+    def test_introspects_coerces_and_allowlists(self):
+        from venice.commands import _mcp
+        doc = {"defaults": {"image": {
+            "hide_watermark": "true", "safe_mode": False, "steps": "12", "preset": "x",
+        }}}
+        out = uc.config_defaults_for("image", _mcp.image_tool, doc)
+        self.assertIs(out["hide_watermark"], True)   # _as_bool("true")
+        self.assertIs(out["safe_mode"], False)
+        self.assertEqual(out["steps"], 12)           # int("12")
+        self.assertNotIn("preset", out)              # not an image_tool param
+
+    def test_none_doc_and_unknown_section_are_empty(self):
+        from venice.commands import _mcp
+        self.assertEqual(
+            uc.config_defaults_for("image", _mcp.image_tool, None), {}
+        )
+        self.assertEqual(
+            uc.config_defaults_for(
+                "bg_remove", _mcp.bg_remove_tool, {"defaults": {"bg_remove": {"x": 1}}}
+            ),
+            {},
+        )
+
+    def test_bad_value_is_skipped_not_raised(self):
+        from venice.commands import _mcp
+        doc = {"defaults": {"image": {"steps": "not-an-int", "safe_mode": False}}}
+        out = uc.config_defaults_for("image", _mcp.image_tool, doc)
+        self.assertNotIn("steps", out)               # int("not-an-int") -> skipped
+        self.assertIs(out["safe_mode"], False)       # the good key still lands
+
+
 if __name__ == "__main__":
     unittest.main()
