@@ -432,7 +432,7 @@ def _resolve_backend(openai, *, embed_base_url, embed_model, model,
             )
         oai = _openai.build_openai(
             openai, base_url=embed_base_url,
-            api_key=os.environ.get(config.ENV_EMBED_API_KEY),
+            api_key=auth.load_secret("embed"),  # env > secrets.json > None (#43)
             verify=verify,
         )
         meta = {"backend": "local", "model": embed_model, "base_url": embed_base_url}
@@ -487,7 +487,7 @@ def _backend_from_meta(openai, meta: dict, *, ca_bundle=None, insecure=False):
             )
         oai = _openai.build_openai(
             openai, base_url=meta.get("base_url"),
-            api_key=os.environ.get(config.ENV_EMBED_API_KEY),
+            api_key=auth.load_secret("embed"),  # env > secrets.json > None (#43)
             verify=verify,
         )
         return oai, meta.get("model"), None

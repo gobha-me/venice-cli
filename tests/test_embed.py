@@ -308,6 +308,23 @@ class TestEmbed(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(built["api_key"], "local-test-key")
 
+    def test_embed_api_key_from_secret_store_reaches_sdk(self):
+        # #43: with the env var unset, the stored `embed` secret reaches the SDK.
+        from venice import auth, config as _cfg
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        sfile = os.path.join(tmp.name, "secrets.json")
+        with mock.patch.object(_cfg, "CONFIG_DIR", _cfg.Path(tmp.name)), \
+             mock.patch.object(_cfg, "SECRETS_FILE", _cfg.Path(sfile)):
+            auth.save_secret("embed", "stored-embed-key")
+            rc, built, captured, urlopen = self._run_alt(   # _run_alt strips env
+                _args(text="hi", embed_base_url="http://localhost:1234/v1",
+                      embed_model="local-embed"),
+                FakeEmbeddings([(0, [1.0])]),
+            )
+        self.assertEqual(rc, 0)
+        self.assertEqual(built["api_key"], "stored-embed-key")
+
     def test_cli_base_url_beats_env_and_config(self):
         doc = {"version": 1, "mcpServers": {},
                "defaults": {"embed": {"embed_base_url": "http://config-host/v1"}}}

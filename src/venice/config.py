@@ -7,6 +7,10 @@ CONFIG_DIR = HOME / ".config" / "venice"
 CREDS_FILE = CONFIG_DIR / "credentials"
 PRESETS_FILE = CONFIG_DIR / "image_presets.json"
 CONFIG_FILE = CONFIG_DIR / "config.json"
+# Structured 0600 store for NAMED secrets beyond the single Venice key in
+# `credentials` (#43): the embed-backend key, and later MCP/cluster tokens. Kept
+# separate from config.json (plaintext prefs) so secrets never land in the config.
+SECRETS_FILE = CONFIG_DIR / "secrets.json"
 # `venice chat` reads local, file-backed system prompts ("personas", #68) from a
 # dedicated subdir so listing them never has to enumerate the config root (where
 # `credentials` lives). Names resolve to <PERSONAS_DIR>/<name>.md|.txt only.

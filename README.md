@@ -804,8 +804,12 @@ venice embed --embed-base-url http://localhost:1234/v1 \
 ```
 
 The URL can also come from `$VENICE_EMBED_BASE_URL`, and a key (if the backend
-needs one) from `$VENICE_EMBED_API_KEY` — env only, never `config.json`. Both
-are config-backable per-flag via `defaults.embed.*` (see `venice config`).
+needs one) from `$VENICE_EMBED_API_KEY` or the **named-secret store** (see
+[`venice secret`](#secrets-venice-secret)) — never `config.json`. Persist it once
+with `venice login --embed` (or `venice secret set embed`) to retire the
+`export VENICE_EMBED_API_KEY=…` in your shell profile; the env var still wins when
+set. The base-url/CA-bundle flags are config-backable per-flag via `defaults.embed.*`
+(see `venice config`).
 
 **Self-signed backends.** A local embedder fronted by Traefik/Caddy often serves
 a private or self-signed TLS cert, which the OpenAI SDK rejects
@@ -1194,7 +1198,8 @@ The player list (`paplay` -> `aplay` -> `ffplay` -> `mpg123` -> `play`
 
 | command | does what |
 |---|---|
-| `venice login` | store API key (interactive, hidden input, mode 0600) |
+| `venice login [--embed]` | store the Venice API key (interactive, hidden, mode 0600); `--embed` stores the embed-backend key in the secret store instead |
+| `venice secret set/ls/rm NAME` | manage named secrets in `~/.config/venice/secrets.json` (0600); values never printed, `ls` shows lengths only |
 | `venice balance [--verbose\|--json\|--min N]` | current USD + DIEM balance |
 | `venice models [--type T] [--detail] [SLUG]` | browse the catalog |
 | `venice sfx PROMPT [--duration N] [--max-spend USD] [...]` | generate a sound effect |
@@ -1254,6 +1259,27 @@ protection, so anything that can read your home directory can read the
 key. The `venice config` file (`~/.config/venice/config.json`) is written
 mode 0600 for the same reason -- an MCP `env`/`headers` entry can carry a
 bearer token -- but the API key itself is never written there.
+
+### Secrets (`venice secret`)
+
+Named secrets *other than* the main Venice key -- currently the embed-backend key,
+later MCP/cluster tokens -- live in a structured **`~/.config/venice/secrets.json`**
+(mode 0600, same plaintext-file model as `credentials`), so they don't have to sit in
+your shell profile or plaintext `config.json`:
+
+```sh
+venice secret set embed     # hidden prompt; stores the 'embed' secret
+venice secret ls            # names + lengths only, never values
+venice secret rm embed
+venice login --embed        # convenience alias for `secret set embed`
+```
+
+A secret is only ever read from a hidden prompt (never on `argv`) and is **never
+printed back** -- there is deliberately no command that outputs a value; `ls` shows
+character counts. For a name with a canonical env var (`embed` →
+`$VENICE_EMBED_API_KEY`), the env var still overrides the stored value, so CI can keep
+injecting it from that system's secret store. The same plaintext caveat applies:
+file permissions are the only protection.
 
 - In CI or any shared environment, prefer `$VENICE_API_KEY` (it
   overrides the file) sourced from that system's secret store, and

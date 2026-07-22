@@ -1,5 +1,5 @@
 """Single import point. Adding a subcommand = one import + one tuple entry."""
-from . import balance, bg_remove, chat, code, config, contact_sheet, embed, image, image_edit, index, login, master, mcp_serve, models, music, search, sfx, tts, upscale, video
+from . import balance, bg_remove, chat, code, config, contact_sheet, embed, image, image_edit, index, login, master, mcp_serve, models, music, search, secret, sfx, tts, upscale, video
 
 
 def register_all(subparsers) -> None:
@@ -26,3 +26,4 @@ def register_all(subparsers) -> None:
     contact_sheet.register(subparsers)
     mcp_serve.register(subparsers)
     config.register(subparsers)
+    secret.register(subparsers)
