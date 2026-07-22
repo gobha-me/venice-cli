@@ -188,7 +188,7 @@ def _resolve_backend(openai, args) -> tuple:
         oai = _openai.build_openai(
             openai,
             base_url=args.embed_base_url,
-            api_key=os.environ.get(config.ENV_EMBED_API_KEY),
+            api_key=auth.load_secret("embed"),  # env > secrets.json > None (#43)
             verify=verify,
         )
         return oai, model, None
