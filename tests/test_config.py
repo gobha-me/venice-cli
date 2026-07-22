@@ -353,6 +353,18 @@ class TestConfigCommand(_Base):
         self.assertEqual(entry, {"type": "http", "url": "https://x/mcp",
                                  "headers": {"Authorization": "Bearer T"}})
 
+    def test_add_http_header_secret_ref_stored_verbatim(self):
+        # #70: a @secret:<name> token rides the existing --header flag and is
+        # stored literally (the second ':' stays with the value; nothing is
+        # resolved at write time -- resolution happens at attach).
+        rc, _, _ = _capture(cfgcmd._run_add, _add_args(
+            "remote", url="https://x/mcp",
+            header=["Authorization: Bearer @secret:cluster"]))
+        self.assertEqual(rc, 0)
+        entry = uc.mcp_get(uc.load_config(), "remote")
+        self.assertEqual(entry["headers"],
+                         {"Authorization": "Bearer @secret:cluster"})
+
     def test_add_requires_exactly_one_transport(self):
         rc, _, err = _capture(cfgcmd._run_add, _add_args("bad"))  # neither
         self.assertEqual(rc, 2)
