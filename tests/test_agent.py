@@ -219,6 +219,134 @@ class TestCostLedger(unittest.TestCase):
         self.assertEqual(L._in, 2.0 / 1e6)
         self.assertIsNone(L._out)  # no output price advertised
 
+    # -- cache-bucket accounting (#75) -------------------------------------- #
+
+    def test_cache_buckets_priced_distinctly(self):
+        # A cache-heavy turn: 9000 of 10000 input tokens are cache reads. Priced
+        # with a discounted cache-read rate, it costs far less than the flat
+        # input rate would imply -- the exact case the collapsed math got wrong.
+        L = _agent.CostLedger()
+        L.bind_pricing({
+            "input": {"usd": 3.0}, "cache_input": {"usd": 0.3},
+            "cache_write": {"usd": 3.75}, "output": {"usd": 15.0},
+        })
+        c = L.record({
+            "prompt_tokens": 10000, "completion_tokens": 500,
+            "prompt_tokens_details": {
+                "cached_tokens": 9000, "cache_creation_input_tokens": 0,
+            },
+        })
+        # 1000*3 + 9000*0.3 + 0 + 500*15, all /1e6 = 0.003 + 0.0027 + 0.0075
+        self.assertAlmostEqual(c, 0.0132)
+        self.assertEqual(L.cache_read_tokens, 9000)
+        self.assertEqual(L.cache_write_tokens, 0)
+        self.assertEqual(L.prompt_tokens, 10000)
+        # ... and strictly cheaper than the collapsed flat-input estimate.
+        flat = (10000 * 3.0 + 500 * 15.0) / 1e6
+        self.assertLess(L.total, flat)
+
+    def test_cache_write_priced_at_its_own_rate(self):
+        L = _agent.CostLedger()
+        L.bind_pricing({
+            "input": {"usd": 3.0}, "cache_write": {"usd": 3.75},
+            "output": {"usd": 15.0},
+        })
+        c = L.record({
+            "prompt_tokens": 1000, "completion_tokens": 0,
+            "prompt_tokens_details": {
+                "cached_tokens": 0, "cache_creation_input_tokens": 200,
+            },
+        })
+        # 800 uncached*3 + 200 write*3.75, /1e6
+        self.assertAlmostEqual(c, (800 * 3.0 + 200 * 3.75) / 1e6)
+        self.assertEqual(L.cache_write_tokens, 200)
+
+    def test_cache_rates_fall_back_to_input_when_absent(self):
+        # No cache_input/cache_write pricing -> cache tokens billed at input rate,
+        # so the total matches the flat estimate (fallback keeps math consistent).
+        L = _agent.CostLedger()
+        L.bind_pricing({"input": {"usd": 3.0}, "output": {"usd": 15.0}})
+        L.record({
+            "prompt_tokens": 10000, "completion_tokens": 500,
+            "prompt_tokens_details": {"cached_tokens": 9000},
+        })
+        self.assertAlmostEqual(L.total, (10000 * 3.0 + 500 * 15.0) / 1e6)
+        self.assertEqual(L.cache_read_tokens, 9000)
+
+    def test_no_cache_tokens_matches_legacy_formula(self):
+        # Backward-compat: without cache detail, cost is exactly pt*in + ct*out.
+        L = _agent.CostLedger()
+        L.bind_pricing({"input": {"usd": 1.5}, "output": {"usd": 4.0}})
+        c = L.record({"prompt_tokens": 1000, "completion_tokens": 500})
+        self.assertAlmostEqual(c, (1000 * 1.5 + 500 * 4.0) / 1e6)
+        self.assertEqual(L.cache_read_tokens, 0)
+        self.assertEqual(L.cache_write_tokens, 0)
+
+    def test_cache_buckets_clamped_to_prompt_tokens(self):
+        # A provider reporting the buckets additively can't drive uncached < 0.
+        L = _agent.CostLedger()
+        L.bind_pricing({"input": {"usd": 1.0}})
+        L.record({
+            "prompt_tokens": 100, "completion_tokens": 0,
+            "prompt_tokens_details": {
+                "cached_tokens": 9999, "cache_creation_input_tokens": 9999,
+            },
+        })
+        self.assertEqual(L.cache_read_tokens, 100)
+        self.assertEqual(L.cache_write_tokens, 0)
+        self.assertGreaterEqual(L.total, 0.0)
+
+    def test_reasoning_tokens_captured(self):
+        L = _agent.CostLedger()
+        L.record({
+            "prompt_tokens": 10, "completion_tokens": 200,
+            "completion_tokens_details": {"reasoning_tokens": 128},
+        })
+        self.assertEqual(L.reasoning_tokens, 128)
+
+    # -- usage_report + always-on ledger (#75) ------------------------------ #
+
+    def test_usage_report_shows_cache_split_and_cost(self):
+        L = _agent.CostLedger()
+        L.bind_pricing({
+            "input": {"usd": 3.0}, "cache_input": {"usd": 0.3},
+            "output": {"usd": 15.0},
+        })
+        L.record({
+            "prompt_tokens": 10000, "completion_tokens": 500,
+            "prompt_tokens_details": {"cached_tokens": 9000},
+        })
+        r = L.usage_report()
+        self.assertIn("uncached", r)
+        self.assertIn("cache-read", r)
+        self.assertIn("1,000 uncached", r)
+        self.assertIn("9,000 cache-read", r)
+        self.assertIn("cache hit rate: 90.0%", r)
+        self.assertIn("$0.0132", r)
+
+    def test_usage_report_empty_before_any_turn(self):
+        self.assertEqual(_agent.CostLedger().usage_report(), "(no usage recorded yet)")
+
+    def test_usage_report_unpriced(self):
+        L = _agent.CostLedger()
+        L.record({"prompt_tokens": 500, "completion_tokens": 20})
+        r = L.usage_report()
+        self.assertIn("model rate unknown", r)
+        self.assertIn("500", r)
+
+    def test_usage_ledger_always_on_and_priced(self):
+        args = type("A", (), {"session_max_spend": None})()
+        models = [{"id": "m", "model_spec": {"pricing": {"input": {"usd": 2.0}}}}]
+        L = _agent.usage_ledger(args, models, "m")
+        self.assertIsNotNone(L)             # unlike ledger_from_args
+        self.assertIsNone(L.max_spend)      # uncapped
+        self.assertEqual(L._in, 2.0 / 1e6)  # still priced
+
+    def test_usage_ledger_honors_cap(self):
+        args = type("A", (), {"session_max_spend": 0.25})()
+        L = _agent.usage_ledger(args, [], "m")
+        self.assertEqual(L.max_spend, 0.25)
+
 
 class TestRunLoopSpendGate(unittest.TestCase):
     """The loop stops starting paid turns once the session cap is hit (#66)."""

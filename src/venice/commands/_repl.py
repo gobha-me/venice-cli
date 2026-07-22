@@ -49,7 +49,8 @@ Commands:
   /auto            auto-accept paid/side-effecting tool calls for following turns
   /manual          confirm each paid/side-effecting tool call (undo /auto)
   /compact [N]     summarize older history to shrink the context (keeps last N turns)
-  /cost            show this session's estimated spend (needs --session-max-spend to cap)
+  /cost            show this session's estimated spend so far (--session-max-spend caps it)
+  /usage           token + cost breakdown for this session (cache-read/write split)
   /reset           clear the conversation (keeps the system prompt)
   /save [file]     write the transcript JSON (default: the --resume file)
   /paste           compose a multi-line message; end with /end (/cancel aborts)
@@ -63,7 +64,8 @@ Anything else is sent to the model as your next message."""
 # only meaningful inside a /paste block, so they stay out of top-level completion.)
 _COMMANDS = (
     "/system", "/persona", "/model", "/models", "/auto", "/manual", "/compact",
-    "/cost", "/reset", "/save", "/paste", "/edit", "/help", "/exit", "/quit",
+    "/cost", "/usage", "/reset", "/save", "/paste", "/edit", "/help", "/exit",
+    "/quit",
 )
 
 
@@ -463,14 +465,20 @@ def _dispatch_slash(line, messages, state, args, models, oai=None, gen_kwargs=No
         else:
             print("(nothing to compact)", file=sys.stderr)
     elif cmd == "cost":
-        # Session spend so far (#66). The ledger exists only when the session is
-        # spend-capped; otherwise there's nothing to report.
+        # Session spend so far (#66). The REPL ledger is always-on (#75), so this
+        # reports the running total; `--session-max-spend` only adds the cap line.
         led = state.get("ledger")
         if led is None:
-            print("(no session cost tracking; start with --session-max-spend)",
-                  file=sys.stderr)
+            print("(no session cost tracking)", file=sys.stderr)
         else:
             print(led.summary(), file=sys.stderr)
+    elif cmd == "usage":
+        # Token + cost breakdown with the cache buckets kept distinct (#75).
+        led = state.get("ledger")
+        if led is None:
+            print("(no session usage tracking)", file=sys.stderr)
+        else:
+            print(led.usage_report(), file=sys.stderr)
     elif cmd == "save":
         target = rest or getattr(args, "resume", None)
         if not target:
@@ -557,9 +565,9 @@ def run(args, oai, openai, client, models, model, initial=None, *,
         # Auto-compaction (#48) is opt-in: `--auto-compact` or
         # `defaults.<cmd>.auto_compact` (it costs a summarization call).
         state["budget"] = _compact.budget_from_args(args)
-        # Spend cap (#66): `--max-spend` / `defaults.*.max_spend` meters the
-        # session's model calls (asset tools are gated separately).
-        state["ledger"] = _agent.ledger_from_args(args, models, model)
+        # Usage + spend ledger: always-on in the REPL so `/usage` and `/cost`
+        # work in any session (#75); `--session-max-spend` (#66) only adds a cap.
+        state["ledger"] = _agent.usage_ledger(args, models, model)
 
         if _rl is not None:
             _install_completer(_rl, models, stack)

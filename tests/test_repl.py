@@ -235,14 +235,19 @@ class TestRepl(unittest.TestCase):
         self.assertEqual(len(calls), 0)
         self.assertIn("nothing to compact", err.getvalue())
 
-    def test_slash_cost_without_cap_reports_no_tracking(self):
+    def test_slash_cost_without_cap_reports_running_total(self):
+        # The REPL ledger is always-on now (#75): /cost reports a total even
+        # without --session-max-spend -- just no cap line.
         err = io.StringIO()
         rc, fake, calls = _run_repl(
             _args(interactive=True),
             [], ["/cost", "/exit"], stderr=err,
         )
         self.assertEqual(rc, 0)
-        self.assertIn("no session cost tracking", err.getvalue())
+        out = err.getvalue()
+        self.assertNotIn("no session cost tracking", out)
+        self.assertIn("cost:", out)
+        self.assertNotIn("cap", out)  # no cap set -> no cap line
 
     def test_slash_cost_with_cap_reports_running_total(self):
         # Turn 1 streams a reply with usage; /cost then reports it. The test
@@ -260,6 +265,37 @@ class TestRepl(unittest.TestCase):
         self.assertIn("unpriced", err.getvalue())
         self.assertIn("prompt=1000", err.getvalue())
         self.assertIn("completion=500", err.getvalue())
+
+    def test_slash_usage_reports_cache_split(self):
+        # A cache-heavy streamed turn, then /usage: the breakdown keeps the
+        # cached vs uncached input split distinct (#75).
+        err = io.StringIO()
+        results = [[FakeChunk("hi"),
+                    FakeChunk(usage={
+                        "prompt_tokens": 10000, "completion_tokens": 500,
+                        "total_tokens": 10500,
+                        "prompt_tokens_details": {"cached_tokens": 9000},
+                    })]]
+        rc, fake, calls = _run_repl(
+            _args(interactive=True),
+            results, ["hey", "/usage", "/exit"], stderr=err,
+            urlopen=_urlopen_ok(),
+        )
+        self.assertEqual(rc, 0)
+        out = err.getvalue()
+        self.assertIn("session usage:", out)
+        self.assertIn("9,000 cache-read", out)
+        self.assertIn("1,000 uncached", out)
+        self.assertIn("cache hit rate: 90.0%", out)
+
+    def test_slash_usage_before_any_turn(self):
+        err = io.StringIO()
+        rc, fake, calls = _run_repl(
+            _args(interactive=True),
+            [], ["/usage", "/exit"], stderr=err,
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("no usage recorded yet", err.getvalue())
 
     def test_slash_compact_then_turn_sees_summary(self):
         with tempfile.TemporaryDirectory() as d:
@@ -588,6 +624,12 @@ class TestReplCompletion(unittest.TestCase):
     def test_commands_include_auto_manual(self):
         self.assertIn("/auto", _repl._COMMANDS)
         self.assertIn("/manual", _repl._COMMANDS)
+
+    def test_commands_include_cost_usage(self):
+        # #75 drift guard: /usage and /cost stay in the completion tuple and help.
+        self.assertIn("/usage", _repl._COMMANDS)
+        self.assertIn("/cost", _repl._COMMANDS)
+        self.assertIn("/usage", _repl._HELP)
 
     def test_commands_include_paste_edit(self):
         self.assertIn("/paste", _repl._COMMANDS)
