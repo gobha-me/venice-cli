@@ -1722,43 +1722,38 @@ def _capture_stdout():
         sys.stdout = old
 
 
-def run_scout(
+def _run_disposable(
     oai,
     model: str,
     task: str,
     tools: List[Tool],
     base_kwargs: dict,
     *,
+    system: str,
     max_tool_calls: int,
     budget: Optional[_compact.Budget] = None,
     ledger: Optional[CostLedger] = None,
     focus: Optional[str] = None,
-    system: str = SCOUT_SYSTEM,
 ) -> dict:
-    """Run one disposable, read-only subagent turn-loop and return its report.
+    """Run one disposable subagent turn-loop on a FRESH context and return its report.
 
-    Seeds a FRESH ``messages`` list (only ``system`` + ``task`` -- nothing from the
-    caller's context leaks in), drives :func:`run_loop` with read-only ``tools``, and
-    returns ``{"status","report","tool_calls","truncated"}``. The loop's printed final
-    answer is captured and discarded (the firewall); the report text is recovered from
-    the message tail, which is the final assistant turn in both the natural-stop and
-    cap-forced paths.
+    The shared core behind :func:`run_scout` (read-only) and :func:`run_spawn`
+    (write/paid-capable): seeds a fresh ``messages`` list (only ``system`` + ``task`` --
+    nothing from the caller's context leaks in), drives :func:`run_loop` with the given
+    ``tools`` under a stdout firewall (the printed final answer is captured and
+    discarded), and returns ``{"status","report","tool_calls","truncated"}``. The report
+    is recovered from the message tail -- the final assistant turn in both the natural-
+    stop and cap-forced paths. ``openai.OpenAIError`` from the loop propagates to the
+    caller (the Tool wrapper turns it into an error envelope).
 
-    Invariant (fail loud): every tool must be ``paid=False`` and none may be the scout
-    itself -- a scout can never spend, mutate, or spawn another scout. Raising here is
-    defense-in-depth behind the structural guarantee that ``_code.read_only_tools``
-    never builds such a tool. ``openai.OpenAIError`` from the loop propagates to the
-    caller (the ``venice_scout`` Tool wrapper turns it into an error envelope).
+    Capability-agnostic: the read-only-vs-write distinction and any self-spawn guard live
+    in the two thin wrappers, not here. Runs with ``yes=True`` -- for the worker that is
+    required (mutating tools are ``paid=True`` and would otherwise be blocked in a non-
+    interactive parent); for the scout it is a no-op (all its tools are free).
     """
-    bad = [t.name for t in tools if t.paid or t.name == SCOUT_TOOL_NAME]
-    if bad:
-        raise ValueError(
-            "scout subagent tools must be read-only (paid=False) and must not "
-            f"include the scout itself; got: {bad}"
-        )
     task = (task or "").strip()
     if not task:
-        return {"status": "error", "message": "scout requires a non-empty task"}
+        return {"status": "error", "message": "subagent requires a non-empty task"}
 
     sys_prompt = system
     if focus:
@@ -1792,3 +1787,112 @@ def run_scout(
         "tool_calls": len(executed),
         "truncated": truncated,
     }
+
+
+def run_scout(
+    oai,
+    model: str,
+    task: str,
+    tools: List[Tool],
+    base_kwargs: dict,
+    *,
+    max_tool_calls: int,
+    budget: Optional[_compact.Budget] = None,
+    ledger: Optional[CostLedger] = None,
+    focus: Optional[str] = None,
+    system: str = SCOUT_SYSTEM,
+) -> dict:
+    """Run one disposable, read-only subagent turn-loop and return its report.
+
+    A thin read-only wrapper over :func:`_run_disposable`. Invariant (fail loud): every
+    tool must be ``paid=False`` and none may be the scout itself -- a scout can never
+    spend, mutate, or spawn another scout. Raising here is defense-in-depth behind the
+    structural guarantee that ``_code.read_only_tools`` never builds such a tool.
+    """
+    bad = [t.name for t in tools if t.paid or t.name == SCOUT_TOOL_NAME]
+    if bad:
+        raise ValueError(
+            "scout subagent tools must be read-only (paid=False) and must not "
+            f"include the scout itself; got: {bad}"
+        )
+    return _run_disposable(
+        oai, model, task, tools, base_kwargs, system=system,
+        max_tool_calls=max_tool_calls, budget=budget, ledger=ledger, focus=focus,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Worker subagent (#52 slice 2): a disposable, WRITE/paid-capable role worker.
+#
+# Where the scout (slice 1) is a read-only context firewall, the worker is the same
+# firewall for *doers*: the planner delegates a bounded implementation task ("implement
+# X in file Y, report back"), the edit churn stays quarantined in the worker's fresh
+# context, and the planner gets back a structured provenance report it can merge. The
+# worker draws a category-scoped subset of the PARENT's already-built tools, so its
+# writes inherit the #76 Roots protection (allow-minus-deny, fail loud outside it) and
+# the shell allow/deny policy -- capability can never exceed what the operator granted
+# the parent session. Containment is structural: Roots (writes) + shell policy (run) +
+# category/tag filtering (blast radius) + max_tool_calls (turn bound). The one axis NOT
+# yet bounded is paid *media* spend -- see the TODO in ``_code.spawn_tool``.
+#
+# The role->category presets + the ``venice_spawn`` Tool wrapper live in ``_code``; this
+# module owns only the profile-agnostic core so it stays import-clean.
+# --------------------------------------------------------------------------- #
+SPAWN_TOOL_NAME = "venice_spawn"
+
+SPAWN_SYSTEM = (
+    "You are a WORKER subagent: a disposable, role-scoped agent spun up to carry out "
+    "ONE task for a coding agent (the planner), then discarded. You start from a fresh "
+    "context and hold a scoped subset of the project's tools -- you CAN edit files and "
+    "run commands within your grant. Writes are confined to the project's writable "
+    "roots and fail loudly outside them; stay inside your task.\n\n"
+    "Do exactly the task, nothing more -- don't wander into unrelated changes. Verify "
+    "your work where you can (re-read a file you wrote, run the relevant test). Your "
+    "caller only sees your final report -- not your tool calls -- so it must stand on "
+    "its own and give the planner enough to merge your work with confidence.\n\n"
+    "End with a report using EXACTLY these sections:\n"
+    "OUTCOME: done | partial | blocked, plus one line on what you accomplished.\n"
+    "CHANGES: files you wrote/edited (paths) and commands you ran -- concrete, so the "
+    "planner can review them; 'none' if none.\n"
+    "VERIFIED: what you confirmed live (re-read / ran) vs. what you assumed without "
+    "checking -- be explicit which is which.\n"
+    "FOLLOW-UPS: what remains or what the planner should do next; 'none' if none.\n"
+    "BLOCKERS: anything that stopped you (a write blocked outside the writable root, a "
+    "test you couldn't get passing); 'none' if none.\n"
+)
+
+
+def run_spawn(
+    oai,
+    model: str,
+    task: str,
+    tools: List[Tool],
+    base_kwargs: dict,
+    *,
+    max_tool_calls: int,
+    budget: Optional[_compact.Budget] = None,
+    ledger: Optional[CostLedger] = None,
+    focus: Optional[str] = None,
+    role: Optional[str] = None,
+    system: str = SPAWN_SYSTEM,
+) -> dict:
+    """Run one disposable, write/paid-capable worker subagent and return its report.
+
+    A thin wrapper over :func:`_run_disposable` that -- unlike :func:`run_scout` --
+    ALLOWS paid/write tools (that is the point of a worker) but still rejects recursion:
+    no tool may be the spawn or the scout, so subagent nesting is capped at exactly one
+    level (the planner scouts/spawns; a worker does neither). A worker's containment is
+    structural, not a confirm gate -- see the module note above and ``_code.spawn_tool``.
+    """
+    bad = [t.name for t in tools if t.name in (SPAWN_TOOL_NAME, SCOUT_TOOL_NAME)]
+    if bad:
+        raise ValueError(
+            "worker subagent tools must not include a spawn or scout tool "
+            f"(no nested subagents); got: {bad}"
+        )
+    if role:
+        system = f"{system}\nYour role: {role}.\n"
+    return _run_disposable(
+        oai, model, task, tools, base_kwargs, system=system,
+        max_tool_calls=max_tool_calls, budget=budget, ledger=ledger, focus=focus,
+    )

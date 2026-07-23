@@ -249,6 +249,15 @@ def register(subparsers) -> None:
         "role-specialized worker. Read-only: the scout can't edit or run (#52).",
     )
     grp.add_argument(
+        "--spawn", action="store_true", default=None, dest="spawn",
+        help="Expose venice_spawn: delegate a bounded task to a disposable WORKER "
+        "subagent with a FRESH context and a role-scoped subset of your tools. Unlike "
+        "the scout it CAN edit/run (role 'code') or generate media (role 'asset', with "
+        "--assets); returns a structured report (outcome/changes/verified/follow-ups/"
+        "blockers). Writes stay inside your writable roots (fail loud outside) and it "
+        "can't spawn further subagents or widen roots (#52).",
+    )
+    grp.add_argument(
         "--auto-compact", action="store_true", default=None, dest="auto_compact",
         help="Summarize older history once it crosses the token budget, so long "
         "runs stay within the context window (#48; costs a summarization call).",
@@ -510,6 +519,10 @@ def _run(args) -> int:
     if bool(getattr(args, "scout", None)):  # #52: opt-in read-only scout subagent
         tools.append(_code.scout_tool(oai, model, root, client, gen_kwargs,
                                       include_search=True))
+    if bool(getattr(args, "spawn", None)):  # #52 slice 2: write-capable worker subagent
+        # Passes the live `tools` list: the worker draws a role-scoped subset of these
+        # (the agent category -- scout/spawn -- is filtered out, so no nested subagents).
+        tools.append(_code.spawn_tool(oai, model, gen_kwargs, tools))
     system = PROFILE.build_system(args, root, tools)
 
     roots_note = ""  # #76: surface extra writable / read-only roots in the banner

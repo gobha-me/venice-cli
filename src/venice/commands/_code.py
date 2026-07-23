@@ -688,6 +688,67 @@ _SCOUT_SCHEMA = _obj(
     ["task"],
 )
 
+# Worker subagent (#52 slice 2): defaults for the per-worker tool-call budget (a worker
+# does more than a scout's 6/15) + the role -> tool-category presets.
+_SPAWN_MAX_TOOL_CALLS = 12
+_SPAWN_HARD_CAP = 40
+_ROLE_CATEGORIES = {
+    # 'code': read/write files, run commands, git, semantic search -- no paid media, so
+    # this role is spend-free (writes/exec contained by Roots + shell policy).
+    "code": {"fs", "exec", "vcs", "search"},
+    # 'asset': generate/edit media (paid, only present with --assets) + inspect images
+    # (vision), pick models (catalog), poll async jobs.
+    "asset": {"image", "audio", "video", "catalog", "vision", "jobs"},
+}
+_SPAWN_SCHEMA = _obj(
+    {
+        "task": _p(
+            "string",
+            "The single, self-contained task to delegate to a fresh WORKER subagent "
+            "(e.g. 'implement function X in path/y.py and add a unit test'). The worker "
+            "starts from a FRESH context with a role-scoped subset of your tools and "
+            "returns a structured report (outcome / changes / verified / follow-ups / "
+            "blockers). Give it everything it needs -- it cannot see this conversation.",
+        ),
+        "role": {
+            "type": "string",
+            "enum": ["code", "asset"],
+            "description": (
+                "The worker's role, which selects its tools (default 'code'). 'code' = "
+                "read/write files, run commands, git, search (no paid media). 'asset' = "
+                "generate/edit images, audio, video (PAID -- only available if this "
+                "session was started with --assets; bounded by max_tool_calls, not a "
+                "spend cap)."
+            ),
+        },
+        "categories": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Optional override of the role's tool categories (e.g. ['fs','vcs']). "
+                "Always intersected with the tools this session actually has -- a worker "
+                "can never exceed your own capabilities, and never gets subagent-"
+                "spawning or root-widening tools."
+            ),
+        },
+        "focus": _p(
+            "string",
+            "Optional hint: a file, directory, or subsystem to concentrate on "
+            "(a hint, not a hard scope).",
+        ),
+        "max_tool_calls": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": _SPAWN_HARD_CAP,
+            "description": (
+                f"Optional cap on the worker's tool calls (default "
+                f"{_SPAWN_MAX_TOOL_CALLS}, hard max {_SPAWN_HARD_CAP})."
+            ),
+        },
+    },
+    ["task"],
+)
+
 
 # --------------------------------------------------------------------------- #
 # Factory
@@ -998,6 +1059,86 @@ def scout_tool(oai, model, root: str, client, base_kwargs, *,
         "scout cannot edit files or run commands.",
         _SCOUT_SCHEMA, invoke, paid=False,
         category="agent", tags=("read", "spawn"),
+    )
+
+
+def spawn_tool(oai, model, base_kwargs, parent_tools, *,
+               default_max_tool_calls: int = _SPAWN_MAX_TOOL_CALLS,
+               hard_cap: int = _SPAWN_HARD_CAP) -> _agent.Tool:
+    """Build the `venice_spawn` Tool: delegate a bounded task to a disposable, write/
+    paid-capable WORKER subagent (#52 slice 2).
+
+    Where `venice_scout` is a read-only context firewall, this is the same firewall for
+    *doers*. The worker draws a role-scoped subset of the PARENT's already-built
+    `parent_tools`, so its writes flow through the same :class:`Roots` (allow-minus-deny,
+    fail loud outside it, #76) and the same `run` shell policy -- it can never exceed the
+    capabilities the operator granted this session. The `invoke` closure resolves the
+    role (or an explicit `categories` override) to a category set, filters `parent_tools`
+    to it -- excluding the `agent` category so no scout/spawn leaks in (no nested
+    subagents), and the `root`-tagged `attach_root` so a worker can't widen its own roots
+    -- clamps the tool-call budget, and runs :func:`_agent.run_spawn`.
+
+    `paid=False` mirrors `venice_scout`/`venice_chat`: the tool itself makes a bounded
+    nested model call, not a media purchase. Any paid *media* the worker generates spends
+    through the parent's own paid tools under the same confirm/spend gate.
+
+    TODO(#52 spend slice): a per-worker USD cap. Today an `asset` worker's media spend is
+    bounded only by `max_tool_calls` -- `max_spend` is inert under the worker's `yes=True`
+    loop and the parent `CostLedger` isn't in scope here. An enforceable spend cap is the
+    epic's separately-tracked "per-subagent USD budget caps" item.
+    """
+    def invoke(arguments, *, confirm: bool = False):
+        args = _clean(arguments)
+        task = (args.get("task") or "").strip()
+        if not task:
+            return _err("spawn requires a non-empty 'task'")
+        role = (args.get("role") or "code").strip().lower()
+        override = args.get("categories")
+        if isinstance(override, list) and override:
+            requested = {str(c).strip().lower() for c in override}
+        else:
+            requested = set(_ROLE_CATEGORIES.get(role, _ROLE_CATEGORIES["code"]))
+        focus = args.get("focus") or None
+        req = args.get("max_tool_calls")
+        n = default_max_tool_calls if not isinstance(req, int) or req <= 0 else req
+        n = max(1, min(int(n), hard_cap))
+
+        granted = [
+            t for t in parent_tools
+            if t.category in requested
+            and t.category != "agent"       # never scout/spawn -- no nested subagents
+            and "root" not in t.tags         # never attach_root -- can't widen roots
+        ]
+        if not granted:
+            available = sorted({
+                t.category for t in parent_tools
+                if t.category and t.category != "agent" and "root" not in t.tags
+            })
+            return _err(
+                f"spawn: no tools available for role '{role}' (requested categories "
+                f"{sorted(requested)}); this session offers: {available or ['(none)']}. "
+                "Start venice code with --assets for media generation."
+            )
+        try:
+            return _agent.run_spawn(
+                oai, model, task, granted, base_kwargs,
+                max_tool_calls=n, focus=focus, role=role,
+            )
+        except Exception as e:  # incl. openai.OpenAIError from the nested loop
+            return _err(f"spawn failed: {e}")
+
+    return _agent.Tool(
+        _agent.SPAWN_TOOL_NAME,
+        "Delegate a bounded task to a disposable WORKER subagent with a FRESH context "
+        "and a role-scoped subset of your tools. Unlike venice_scout it CAN edit files "
+        "and run commands (role 'code') or generate media (role 'asset', if --assets). "
+        "It returns a structured report (outcome / changes / verified / follow-ups / "
+        "blockers) so the implementation churn does not pollute your context. Its writes "
+        "are confined to your writable roots (fail loud outside them) and it cannot spawn "
+        "further subagents or widen roots. Use it to hand off a self-contained unit of "
+        "work you can verify from the report.",
+        _SPAWN_SCHEMA, invoke, paid=False,
+        category="agent", tags=("write", "spawn"),
     )
 
 
