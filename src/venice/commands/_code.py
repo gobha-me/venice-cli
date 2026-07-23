@@ -36,11 +36,12 @@ Safety model:
 """
 from __future__ import annotations
 
+import dataclasses
 import fnmatch
 import os
 import re
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from . import _agent, _exec, _index, _mcp
 from ._exec import (  # shared exec rails (#33): one gate for `code` and chat --shell
@@ -692,6 +693,13 @@ _SCOUT_SCHEMA = _obj(
 # does more than a scout's 6/15) + the role -> tool-category presets.
 _SPAWN_MAX_TOOL_CALLS = 12
 _SPAWN_HARD_CAP = 40
+# Per-worker USD media spend cap (#52 spend slice): the default ceiling on the cumulative
+# estimated cost of the paid media an `asset` worker generates before further paid calls
+# are refused. Finite by default -- a `yes=True` worker can't stop to ask, so its media
+# blast radius is bounded in dollars as well as in tool-calls and roots (#76). Raise or
+# disable (<= 0) via --spawn-max-spend / defaults.code.spawn_max_spend. `code` workers
+# grant no paid media, so this never bites them.
+_SPAWN_MAX_SPEND = 2.00
 _ROLE_CATEGORIES = {
     # 'code': read/write files, run commands, git, semantic search -- no paid media, so
     # this role is spend-free (writes/exec contained by Roots + shell policy).
@@ -717,8 +725,8 @@ _SPAWN_SCHEMA = _obj(
                 "The worker's role, which selects its tools (default 'code'). 'code' = "
                 "read/write files, run commands, git, search (no paid media). 'asset' = "
                 "generate/edit images, audio, video (PAID -- only available if this "
-                "session was started with --assets; bounded by max_tool_calls, not a "
-                "spend cap)."
+                "session was started with --assets; its cumulative media spend is bounded "
+                "by a per-worker USD cap, set by the operator via --spawn-max-spend)."
             ),
         },
         "categories": {
@@ -1062,9 +1070,40 @@ def scout_tool(oai, model, root: str, client, base_kwargs, *,
     )
 
 
+def _meter(tool: _agent.Tool, cap: float, spent: list) -> _agent.Tool:
+    """Wrap a paid `tool` in a per-worker spend meter over the shared `spent` accumulator.
+
+    Refuses (`status="blocked"`) once `spent[0]` has reached `cap`; otherwise runs the
+    tool and tallies the `cost_estimate_usd` its result reports (media tools; write/exec
+    tools report none, so they never move the meter). `confirm` MUST be forwarded -- the
+    worker runs `yes=True`, so a paid media tool needs `confirm=True` to actually purchase
+    (else its own `check_spend` returns an unresolved `confirmation_required`).
+    """
+    inner = tool.invoke
+
+    def metered(arguments, *, confirm: bool = False):
+        if spent[0] >= cap:
+            return {
+                "status": "blocked",
+                "message": (
+                    f"spawn: per-worker media spend cap ${cap:.2f} reached "
+                    f"(spent ${spent[0]:.4f}); stop spending and wrap up your report."
+                ),
+            }
+        result = inner(arguments, confirm=confirm)
+        if isinstance(result, dict):
+            c = result.get("cost_estimate_usd")
+            if isinstance(c, (int, float)) and not isinstance(c, bool) and c > 0:
+                spent[0] += float(c)
+        return result
+
+    return dataclasses.replace(tool, invoke=metered)
+
+
 def spawn_tool(oai, model, base_kwargs, parent_tools, *,
                default_max_tool_calls: int = _SPAWN_MAX_TOOL_CALLS,
-               hard_cap: int = _SPAWN_HARD_CAP) -> _agent.Tool:
+               hard_cap: int = _SPAWN_HARD_CAP,
+               max_spend: Optional[float] = None) -> _agent.Tool:
     """Build the `venice_spawn` Tool: delegate a bounded task to a disposable, write/
     paid-capable WORKER subagent (#52 slice 2).
 
@@ -1080,12 +1119,20 @@ def spawn_tool(oai, model, base_kwargs, parent_tools, *,
 
     `paid=False` mirrors `venice_scout`/`venice_chat`: the tool itself makes a bounded
     nested model call, not a media purchase. Any paid *media* the worker generates spends
-    through the parent's own paid tools under the same confirm/spend gate.
+    through the parent's own paid tools -- but under the worker's `yes=True` loop the
+    per-call confirm/`max_spend` gate is auto-approved, so a cumulative ceiling is enforced
+    here instead (#52 spend slice).
 
-    TODO(#52 spend slice): a per-worker USD cap. Today an `asset` worker's media spend is
-    bounded only by `max_tool_calls` -- `max_spend` is inert under the worker's `yes=True`
-    loop and the parent `CostLedger` isn't in scope here. An enforceable spend cap is the
-    epic's separately-tracked "per-subagent USD budget caps" item.
+    Per-worker USD media cap: `max_spend` (default `_SPAWN_MAX_SPEND`, `<= 0` disables)
+    caps the cumulative *estimated* media spend. Each granted paid tool is wrapped in a
+    spend meter sharing one accumulator: it refuses (`status="blocked"`) once the cap is
+    reached and otherwise tallies the `cost_estimate_usd` its result reports. Cost is only
+    known post-call, so the call that crosses the cap completes and the *next* is blocked
+    (bounds further spend, doesn't preempt -- like `run_loop`'s own gate). The no-double-
+    count relies on the worker running `yes=True` (so `_resolve_spend` never re-invokes a
+    wrapped tool). `code`-role paid tools report no cost, so the cap never bites them --
+    a code worker behaves exactly as before this slice. The final report carries
+    `spent_usd`/`spend_cap_usd` for handoff provenance.
     """
     def invoke(arguments, *, confirm: bool = False):
         args = _clean(arguments)
@@ -1119,13 +1166,28 @@ def spawn_tool(oai, model, base_kwargs, parent_tools, *,
                 f"{sorted(requested)}); this session offers: {available or ['(none)']}. "
                 "Start venice code with --assets for media generation."
             )
+
+        # Per-worker USD media cap: wrap each paid tool in a spend meter sharing one
+        # accumulator. `<= 0` disables (identity pass-through == pre-slice behavior).
+        raw = _SPAWN_MAX_SPEND if max_spend is None else max_spend
+        cap = None if raw <= 0 else float(raw)
+        spent = [0.0]
+        if cap is not None:
+            granted = [_meter(t, cap, spent) if t.paid else t for t in granted]
+
         try:
-            return _agent.run_spawn(
+            out = _agent.run_spawn(
                 oai, model, task, granted, base_kwargs,
                 max_tool_calls=n, focus=focus, role=role,
             )
         except Exception as e:  # incl. openai.OpenAIError from the nested loop
-            return _err(f"spawn failed: {e}")
+            out = _err(f"spawn failed: {e}")
+        # Report spend even on the error path -- a worker that spent then crashed still
+        # owes the parent its provenance.
+        if cap is not None and isinstance(out, dict):
+            out["spent_usd"] = round(spent[0], 4)      # handoff provenance
+            out["spend_cap_usd"] = cap
+        return out
 
     return _agent.Tool(
         _agent.SPAWN_TOOL_NAME,
@@ -1135,8 +1197,9 @@ def spawn_tool(oai, model, base_kwargs, parent_tools, *,
         "It returns a structured report (outcome / changes / verified / follow-ups / "
         "blockers) so the implementation churn does not pollute your context. Its writes "
         "are confined to your writable roots (fail loud outside them) and it cannot spawn "
-        "further subagents or widen roots. Use it to hand off a self-contained unit of "
-        "work you can verify from the report.",
+        "further subagents or widen roots; an 'asset' worker's cumulative media spend is "
+        "capped in USD. Use it to hand off a self-contained unit of work you can verify "
+        "from the report.",
         _SPAWN_SCHEMA, invoke, paid=False,
         category="agent", tags=("write", "spawn"),
     )

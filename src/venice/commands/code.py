@@ -258,6 +258,15 @@ def register(subparsers) -> None:
         "can't spawn further subagents or widen roots (#52).",
     )
     grp.add_argument(
+        "--spawn-max-spend", type=float, default=None, dest="spawn_max_spend",
+        metavar="USD",
+        help="Per-worker USD cap on the cumulative estimated media spend of an 'asset' "
+        "venice_spawn worker (default $2.00; <= 0 disables). A worker runs auto-approved, "
+        "so this bounds its media blast radius in dollars; once reached, further paid "
+        "media calls are refused and the worker wraps up. Config: defaults.code."
+        "spawn_max_spend (#52).",
+    )
+    grp.add_argument(
         "--auto-compact", action="store_true", default=None, dest="auto_compact",
         help="Summarize older history once it crosses the token budget, so long "
         "runs stay within the context window (#48; costs a summarization call).",
@@ -522,7 +531,9 @@ def _run(args) -> int:
     if bool(getattr(args, "spawn", None)):  # #52 slice 2: write-capable worker subagent
         # Passes the live `tools` list: the worker draws a role-scoped subset of these
         # (the agent category -- scout/spawn -- is filtered out, so no nested subagents).
-        tools.append(_code.spawn_tool(oai, model, gen_kwargs, tools))
+        # `spawn_max_spend` caps an 'asset' worker's cumulative media USD (#52 spend slice).
+        tools.append(_code.spawn_tool(oai, model, gen_kwargs, tools,
+                                      max_spend=getattr(args, "spawn_max_spend", None)))
     system = PROFILE.build_system(args, root, tools)
 
     roots_note = ""  # #76: surface extra writable / read-only roots in the banner
