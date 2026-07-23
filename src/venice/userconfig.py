@@ -287,6 +287,7 @@ _COMMAND_MAP = {
         "root": ("root", str),
         "auto": ("auto", _as_bool),
         "assets": ("assets", _as_bool),
+        "scout": ("scout", _as_bool),  # #52: opt-in read-only scout subagent
         "max_tool_calls": ("max_tool_calls", int),
         "exec_timeout": ("exec_timeout", int),
         "auto_compact": ("auto_compact", _as_bool),

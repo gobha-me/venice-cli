@@ -515,6 +515,37 @@ _SEARCH_SCHEMA = _obj(
 )
 _REINDEX_SCHEMA = _obj({})  # no parameters -- rebuilds the discovered .venice index
 
+# Scout subagent (#52 slice 1): defaults for the per-scout tool-call budget.
+_SCOUT_MAX_TOOL_CALLS = 6
+_SCOUT_HARD_CAP = 15
+_SCOUT_SCHEMA = _obj(
+    {
+        "task": _p(
+            "string",
+            "The specific question or investigation to delegate. The scout starts "
+            "from a FRESH context with only read-only tools and returns a structured "
+            "report (findings / confidence / dead-ends / not-checked / verified-vs-"
+            "hypothetical). Ask one focused thing.",
+        ),
+        "focus": _p(
+            "string",
+            "Optional hint: a file, directory, or subsystem to concentrate on "
+            "(a hint, not a hard scope).",
+        ),
+        "max_tool_calls": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": _SCOUT_HARD_CAP,
+            "description": (
+                f"Optional cap on the scout's tool calls (default "
+                f"{_SCOUT_MAX_TOOL_CALLS}, hard max {_SCOUT_HARD_CAP}). Each call is "
+                "a model turn -- keep it small."
+            ),
+        },
+    },
+    ["task"],
+)
+
 
 # --------------------------------------------------------------------------- #
 # Factory
@@ -693,6 +724,116 @@ def code_tools(
         # notes/tasks ride root's .venice/ (cwd == root for `venice code`).
         tools.extend(_agent.memory_tools())
     return tools
+
+
+# --------------------------------------------------------------------------- #
+# Scout subagent (#52 slice 1): the read-only inner toolset + the `venice_scout`
+# Tool that delegates a disposable investigation to `_agent.run_scout`.
+# --------------------------------------------------------------------------- #
+def read_only_tools(root: str, client=None, *, include_search: bool = False
+                    ) -> List[_agent.Tool]:
+    """The read-only subset of the coding toolset, bound to a realpath-resolved `root`:
+    `read_file` / `list_dir` / `grep` / read-only `git`, plus `project_search` when a
+    `.venice` index exists and a `client` is supplied.
+
+    This is an *additive* builder, deliberately NOT a slice of :func:`code_tools`, so
+    that factory (and its tests) stay untouched. It builds NO mutating/paid tool and NO
+    scout tool -- the structural guarantee behind the scout subagent's read-only +
+    no-self-spawn invariant (see :func:`_agent.run_scout`).
+    """
+    root = os.path.realpath(root)
+
+    def free(fn):
+        def invoke(arguments, *, confirm: bool = False):
+            return fn(root, **_clean(arguments))
+        return invoke
+
+    def git_invoke(arguments, *, confirm: bool = False):
+        return git_cmd(root, exec_timeout=DEFAULT_EXEC_TIMEOUT, **_clean(arguments))
+
+    tools = [
+        _agent.Tool("read_file",
+                    "Read a UTF-8 text file inside the project root and return its "
+                    "lines. Read-only.",
+                    _READ_SCHEMA, free(read_file), paid=False,
+                    category="fs", tags=("read",)),
+        _agent.Tool("list_dir",
+                    "List the entries of a directory inside the project root "
+                    "(secret-shaped files are hidden). Read-only.",
+                    _LIST_SCHEMA, free(list_dir), paid=False,
+                    category="fs", tags=("read",)),
+        _agent.Tool("grep",
+                    "Search project files for a regular expression and return "
+                    "matching path:line:text. Read-only.",
+                    _GREP_SCHEMA, free(grep_files), paid=False,
+                    category="fs", tags=("read", "search")),
+        _agent.Tool("git",
+                    "Run a read-only git subcommand (status/diff/log/show/...) in "
+                    "the project root.",
+                    _GIT_SCHEMA, git_invoke, paid=False,
+                    category="vcs", tags=("read",)),
+    ]
+    if include_search and client is not None and _index.discover_store(None) is not None:
+        def search_invoke(arguments, *, confirm: bool = False):
+            return _mcp.search_tool(client, **_clean(arguments))
+        tools.append(_agent.Tool(
+            "project_search",
+            "Semantic search over the project's local .venice index for code "
+            "relevant to a natural-language query. Read-only (a snapshot of the last "
+            "index build; use grep for live matches).",
+            _SEARCH_SCHEMA, search_invoke, paid=False,
+            category="search", tags=("read",),
+        ))
+    return tools
+
+
+def scout_tool(oai, model, root: str, client, base_kwargs, *,
+               include_search: bool = True,
+               default_max_tool_calls: int = _SCOUT_MAX_TOOL_CALLS,
+               hard_cap: int = _SCOUT_HARD_CAP) -> _agent.Tool:
+    """Build the `venice_scout` Tool: delegate a read-only investigation to a
+    disposable subagent (context firewall, #52).
+
+    The `invoke` closure clamps the tool-call budget (regardless of what the schema
+    lets through), assembles a read-only inner toolset via :func:`read_only_tools`, and
+    runs :func:`_agent.run_scout`, converting any error (including
+    ``openai.OpenAIError`` from the nested loop) into a `{"status":"error"}` envelope.
+
+    `paid=False` mirrors `venice_chat`: a bounded nested model call, not a media
+    purchase. The confirm/spend gate exists to guard side effects, and a read-only
+    scout has none; its cost is bounded by `max_tool_calls`.
+    """
+    root = os.path.realpath(root)
+
+    def invoke(arguments, *, confirm: bool = False):
+        args = _clean(arguments)
+        task = (args.get("task") or "").strip()
+        if not task:
+            return _err("scout requires a non-empty 'task'")
+        focus = args.get("focus") or None
+        req = args.get("max_tool_calls")
+        n = default_max_tool_calls if not isinstance(req, int) or req <= 0 else req
+        n = max(1, min(int(n), hard_cap))
+        inner = read_only_tools(root, client, include_search=include_search)
+        try:
+            return _agent.run_scout(
+                oai, model, task, inner, base_kwargs,
+                max_tool_calls=n, focus=focus,
+            )
+        except Exception as e:  # incl. openai.OpenAIError from the nested loop
+            return _err(f"scout failed: {e}")
+
+    return _agent.Tool(
+        _agent.SCOUT_TOOL_NAME,
+        "Delegate a read-only investigation to a disposable SCOUT subagent with a "
+        "FRESH context and only read tools (read_file/list_dir/grep/git/search). It "
+        "returns a structured report (findings / confidence / dead-ends / not-checked "
+        "/ verified-vs-hypothetical) so heavy exploration does not pollute your "
+        "context. Use it to answer where/how/what questions before you edit. The "
+        "scout cannot edit files or run commands.",
+        _SCOUT_SCHEMA, invoke, paid=False,
+        category="agent", tags=("read", "spawn"),
+    )
 
 
 def tool_names(tools: List[_agent.Tool]) -> str:

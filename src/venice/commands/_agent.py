@@ -24,6 +24,8 @@ and passes the combined list to :func:`run_loop`. Nothing in the loop changes.
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import itertools
 import json
 import sys
@@ -1658,3 +1660,135 @@ def run_loop(
                 f"chat: reached --max-tool-calls ({max_tool_calls}); "
                 "requesting a final answer"
             )
+
+
+# --------------------------------------------------------------------------- #
+# Scout subagent (#52 slice 1): a disposable, read-only "context firewall".
+#
+# The multi-agent epic's day-one primitive (see the operator's note on #52) is NOT
+# a role-specialized worker but a *context firewall*: delegate "figure out X, report
+# back concisely" to a subagent that runs :func:`run_loop` once on a FRESH message
+# list with only read-only tools, then return just its conclusion. The planner's
+# working context never sees the subagent's exploration (dozens of reads/greps), so
+# it stays clean and lossless -- cheaper than compaction, which bounds pollution
+# after the fact rather than preventing it.
+#
+# ``AgentProfile`` already framed this as "run the core with a profile + task"; this
+# is the non-interactive core that framing pointed at. The executable read-only
+# tool-builder + the ``venice_scout`` Tool wrapper live in ``_code`` (which owns the
+# fs read tools); this module owns only the profile-agnostic core so it stays
+# import-clean (never importing ``_code``/``code``).
+# --------------------------------------------------------------------------- #
+SCOUT_TOOL_NAME = "venice_scout"
+
+SCOUT_SYSTEM = (
+    "You are a SCOUT subagent: a disposable, read-only investigator spun up to "
+    "answer one question for a coding agent, then discarded. You start from a fresh "
+    "context and have ONLY read-only tools (read files, list directories, grep, "
+    "read-only git, and -- when an index exists -- semantic search). You CANNOT and "
+    "must NOT edit files, run commands, or make any change; if the task implies a "
+    "change, investigate what the change would involve and report, do not attempt "
+    "it.\n\n"
+    "Investigate efficiently: prefer a few targeted reads/greps over broad sweeps, "
+    "and stop as soon as you can answer. Your caller only sees your final report -- "
+    "not your tool calls -- so the report must stand on its own.\n\n"
+    "End with a report using EXACTLY these sections:\n"
+    "FINDINGS: the direct answer, concrete (cite file paths / line numbers / "
+    "symbols you actually saw).\n"
+    "CONFIDENCE: high | medium | low, plus one clause on why.\n"
+    "DEAD-ENDS: paths you tried that led nowhere (so the caller doesn't retry them); "
+    "'none' if none.\n"
+    "NOT CHECKED: what you did not verify or that was out of scope -- be honest "
+    "about gaps.\n"
+    "VERIFIED-LIVE vs HYPOTHETICAL: which claims you confirmed by reading actual "
+    "files/output vs. inferred without checking.\n"
+)
+
+
+@contextlib.contextmanager
+def _capture_stdout():
+    """Redirect ``sys.stdout`` to an in-memory buffer for the duration of the block.
+
+    Used by ``code`` (``--json`` capture) and by :func:`run_scout` (to firewall a
+    subagent's printed answer out of the planner's transcript). Restores the prior
+    stdout unconditionally.
+    """
+    old = sys.stdout
+    buf = io.StringIO()
+    sys.stdout = buf
+    try:
+        yield buf
+    finally:
+        sys.stdout = old
+
+
+def run_scout(
+    oai,
+    model: str,
+    task: str,
+    tools: List[Tool],
+    base_kwargs: dict,
+    *,
+    max_tool_calls: int,
+    budget: Optional[_compact.Budget] = None,
+    ledger: Optional[CostLedger] = None,
+    focus: Optional[str] = None,
+    system: str = SCOUT_SYSTEM,
+) -> dict:
+    """Run one disposable, read-only subagent turn-loop and return its report.
+
+    Seeds a FRESH ``messages`` list (only ``system`` + ``task`` -- nothing from the
+    caller's context leaks in), drives :func:`run_loop` with read-only ``tools``, and
+    returns ``{"status","report","tool_calls","truncated"}``. The loop's printed final
+    answer is captured and discarded (the firewall); the report text is recovered from
+    the message tail, which is the final assistant turn in both the natural-stop and
+    cap-forced paths.
+
+    Invariant (fail loud): every tool must be ``paid=False`` and none may be the scout
+    itself -- a scout can never spend, mutate, or spawn another scout. Raising here is
+    defense-in-depth behind the structural guarantee that ``_code.read_only_tools``
+    never builds such a tool. ``openai.OpenAIError`` from the loop propagates to the
+    caller (the ``venice_scout`` Tool wrapper turns it into an error envelope).
+    """
+    bad = [t.name for t in tools if t.paid or t.name == SCOUT_TOOL_NAME]
+    if bad:
+        raise ValueError(
+            "scout subagent tools must be read-only (paid=False) and must not "
+            f"include the scout itself; got: {bad}"
+        )
+    task = (task or "").strip()
+    if not task:
+        return {"status": "error", "message": "scout requires a non-empty task"}
+
+    sys_prompt = system
+    if focus:
+        sys_prompt = f"{system}\nFocus hint (not a hard scope): {focus}\n"
+    messages: List[dict] = [
+        {"role": "system", "content": sys_prompt},
+        {"role": "user", "content": task},
+    ]
+    with _capture_stdout() as buf:
+        run_loop(
+            oai, model, messages, base_kwargs, tools,
+            max_tool_calls=max_tool_calls, yes=True, json_out=False,
+            budget=budget, ledger=ledger,
+        )
+    report = (messages[-1].get("content") or "").strip() if messages else ""
+    if not report:
+        report = buf.getvalue().strip()
+
+    tool_msgs = [m for m in messages if m.get("role") == "tool"]
+    executed = [
+        m for m in tool_msgs if "not executed" not in (m.get("content") or "")
+    ]
+    capped = bool(max_tool_calls) and max_tool_calls > 0
+    truncated = bool(tool_msgs) and (
+        len(executed) != len(tool_msgs)
+        or (capped and len(executed) >= max_tool_calls)
+    )
+    return {
+        "status": "ok",
+        "report": report,
+        "tool_calls": len(executed),
+        "truncated": truncated,
+    }
