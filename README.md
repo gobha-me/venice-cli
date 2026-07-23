@@ -1168,6 +1168,8 @@ it unrestricted (unchanged behavior).
 | `--browser` / `--browser-allow HOST` / `--browser-deny PATTERN` | expose `web_fetch` + `browser_capture` so the agent can verify a rendered page; scope hosts with the `browser.*` allow/deny policy (see [Web & browser tools](#web--browser-tools---browser)) |
 | `--assets` | also expose the in-process asset-generation tools (image / image-edit / sfx / music / tts / upscale / bg-remove / video) so the agent can create images, audio & video in the project; paid — each confirms per call unless `--auto` |
 | `--scout` | expose `venice_scout`: delegate a read-only investigation to a disposable subagent with a fresh context; keeps exploration out of the main context (see [Scout subagent](#scout-subagent---scout)) |
+| `--spawn` | expose `venice_spawn`: delegate a bounded **write/paid** task to a disposable **worker** subagent with a fresh context and a role-scoped subset of your tools; edit churn stays quarantined and it returns a structured report to merge (see [Worker subagent](#worker-subagent---spawn)) |
+| `--spawn-max-spend USD` | per-worker USD cap on an `asset` worker's cumulative estimated media spend (default **$2.00**; `<= 0` disables); config `defaults.code.spawn_max_spend` |
 | `--auto-compact` | summarize older history once the prompt crosses `--compact-threshold` tokens (default 100 000), keeping the last `--compact-keep-turns` turns (default 10); long runs stay in-context |
 | `-i`, `--json`, `--model`, `--system` | interactive REPL · JSON envelope · model · extra system instructions |
 | `--persona NAME` | load `~/.config/venice/personas/NAME.md` as the system prompt at launch (`/persona` in the REPL) |
@@ -1179,7 +1181,7 @@ the project root, and paid calls are capped per call by `$VENICE_MCP_MAX_SPEND` 
 model and a sane `--max-tool-calls` when running unattended.
 
 Per-flag config defaults live under `defaults.code.*` (e.g. `model`, `root`, `auto`,
-`assets`, `scout`, `max_tool_calls`).
+`assets`, `scout`, `spawn`, `spawn_max_spend`, `max_tool_calls`).
 
 #### Scout subagent (`--scout`)
 
@@ -1203,6 +1205,42 @@ away. Use it before an edit to scope the change:
 ```bash
 venice code --scout --auto "Add rate-limiting to the API client. First scout how the \
 existing client is structured and where requests are made, then implement it."
+```
+
+#### Worker subagent (`--spawn`)
+
+Where the scout is a *read-only* context firewall, `--spawn` adds `venice_spawn` — the
+same firewall for **doers**. The coding agent can **delegate a bounded implementation task
+to a disposable worker** that runs in a **fresh context**, does the work, and returns a
+single **structured report** — outcome, changes (files + commands), what it verified live
+vs. assumed, follow-ups, and blockers. As with the scout, those sections are also parsed
+into a `fields` map on the returned report, and the caller sees only the report, not the
+edit churn behind it — so the planner's context stays clean while the worker does the
+churny part.
+
+A worker gets a **role-scoped subset of *your* already-built tools** (never more than the
+session was granted):
+
+- `role="code"` (default, spend-free) → `read_file`/`list_dir`/`grep`/`write_file`/
+  `edit_file`/`apply_patch`/`run`/`git` (plus `project_search` when a `.venice` index
+  exists) — the `fs` + `exec` + `vcs` + `search` categories.
+- `role="asset"` → the media generators and their support tools (`image`/`audio`/`video`
+  plus `catalog`/`vision`/`jobs`) — needs `--assets` on the parent, otherwise the grant is
+  empty and the call errors.
+
+Containment is **structural**, not a per-call prompt: a worker's writes flow through the
+same **writable roots** (fail loud outside them) and the
+same `run` allow/deny policy as the parent; it gets **no** `attach_root` (can't widen its
+roots) and **no** scout/spawn tools (**nesting is capped at one level** — a planner
+scouts/spawns, a worker does neither). Each run is bounded by a tool-call budget
+(`max_tool_calls` in the call, default 12, hard max 40). An `asset` worker's cumulative
+estimated **media** spend is capped in dollars by `--spawn-max-spend` (default **$2.00**,
+`<= 0` disables; config `defaults.code.spawn_max_spend`); the report then also carries
+`spent_usd`/`spend_cap_usd`.
+
+```bash
+venice code --spawn --auto "Add a /health endpoint and a test for it. Spawn a code worker \
+to implement and test it, then review its report before finishing."
 ```
 
 ## MCP server
