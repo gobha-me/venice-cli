@@ -491,5 +491,110 @@ class TestCodeFactory(unittest.TestCase):
         self.assertIn("deny", r["message"])
 
 
+class TestRoots(unittest.TestCase):
+    """#76: attachable roots + fail-loud writes + active-root ("cwd") switch."""
+
+    def setUp(self):
+        self.a = os.path.realpath(tempfile.mkdtemp())  # startup / active root
+        self.b = os.path.realpath(tempfile.mkdtemp())  # a sibling repo
+
+    def tearDown(self):
+        import shutil
+        for d in (self.a, self.b):
+            shutil.rmtree(d, ignore_errors=True)
+
+    def _tools(self, **kw):
+        return {t.name: t for t in _code.code_tools(self.a, exec_timeout=5, **kw)}
+
+    # --- default: one writable root, writes elsewhere fail loud (the guardrail) ---
+    def test_default_write_outside_root_fails_loud_and_no_leak(self):
+        tools = self._tools()
+        r = tools["write_file"].invoke(
+            {"path": os.path.join(self.b, "x.txt"), "content": "hi"}, confirm=True)
+        self.assertEqual(r["status"], "error")
+        self.assertIn("escape", r["message"])          # loud
+        self.assertIn(self.a, r["message"])            # names the writable root
+        self.assertFalse(os.path.exists(os.path.join(self.b, "x.txt")))  # not redirected
+
+    def test_attach_root_is_a_code_rail_not_in_readonly(self):
+        self.assertIn("attach_root", self._tools())
+        self.assertNotIn("attach_root",
+                         {t.name for t in _code.read_only_tools(self.a)})
+
+    # --- startup --allow-root widens the writable set ---
+    def test_allow_root_permits_write_into_second_repo(self):
+        tools = self._tools(allow_root=[self.b])
+        r = tools["write_file"].invoke(
+            {"path": os.path.join(self.b, "x.txt"), "content": "hi"}, confirm=True)
+        self.assertEqual(r["status"], "ok")
+        self.assertEqual((Path(self.b) / "x.txt").read_text(encoding="utf-8"), "hi")
+
+    # --- deny wins; reads are broader than writes ---
+    def test_deny_root_nested_is_readable_but_not_writable(self):
+        sub = os.path.join(self.a, "locked")
+        os.makedirs(sub)
+        (Path(sub) / "lib.txt").write_text("x", encoding="utf-8")
+        tools = self._tools(deny_root=[sub])
+        self.assertEqual(
+            tools["read_file"].invoke({"path": "locked/lib.txt"})["status"], "ok")
+        w = tools["write_file"].invoke(
+            {"path": "locked/lib.txt", "content": "y"}, confirm=True)
+        self.assertEqual(w["status"], "error")
+        self.assertIn("read-only", w["message"])
+
+    # --- attach_root at runtime: the incident fix ---
+    def test_attach_root_switches_active_and_relative_write_lands_there(self):
+        tools = self._tools()
+        res = tools["attach_root"].invoke({"path": self.b})
+        self.assertEqual(res["status"], "ok")
+        self.assertEqual(res["base"], self.b)          # active root switched
+        self.assertIn(self.b, res["allow"])
+        w = tools["write_file"].invoke({"path": "new.txt", "content": "hi"}, confirm=True)
+        self.assertEqual(w["status"], "ok")
+        self.assertTrue(os.path.exists(os.path.join(self.b, "new.txt")))
+        self.assertFalse(os.path.exists(os.path.join(self.a, "new.txt")))  # no leak
+
+    def test_run_cwd_follows_the_active_root(self):
+        tools = self._tools()
+        tools["attach_root"].invoke({"path": self.b})
+        r = tools["run"].invoke({"command": "pwd"}, confirm=True)
+        self.assertEqual(r["exit_code"], 0)
+        self.assertIn(self.b, r["stdout"])
+
+    def test_attach_root_no_activate_keeps_base(self):
+        tools = self._tools()
+        res = tools["attach_root"].invoke({"path": self.b, "activate": False})
+        self.assertEqual(res["base"], self.a)          # unchanged
+        self.assertIn(self.b, res["allow"])
+        tools["write_file"].invoke({"path": "z.txt", "content": "hi"}, confirm=True)
+        self.assertTrue(os.path.exists(os.path.join(self.a, "z.txt")))
+
+    def test_attach_root_read_only_grants_read_not_write(self):
+        (Path(self.b) / "r.txt").write_text("x", encoding="utf-8")
+        tools = self._tools()
+        res = tools["attach_root"].invoke(
+            {"path": self.b, "write": False, "activate": False})
+        self.assertIn(self.b, res["deny"])
+        self.assertEqual(
+            tools["read_file"].invoke(
+                {"path": os.path.join(self.b, "r.txt")})["status"], "ok")
+        w = tools["write_file"].invoke(
+            {"path": os.path.join(self.b, "r.txt"), "content": "y"}, confirm=True)
+        self.assertEqual(w["status"], "error")
+
+    def test_attach_root_rejects_bad_targets(self):
+        tools = self._tools()
+        for bad in (os.path.join(self.a, "nope"), os.sep, os.path.expanduser("~")):
+            self.assertEqual(
+                tools["attach_root"].invoke({"path": bad})["status"], "error", bad)
+
+    # --- Roots holder unit ---
+    def test_roots_single_is_legacy_single_root(self):
+        roots = _code.Roots.single(self.a)
+        self.assertEqual(roots.base, self.a)
+        self.assertEqual(roots.allow, [self.a])
+        self.assertEqual(roots.deny, [])
+
+
 if __name__ == "__main__":
     unittest.main()

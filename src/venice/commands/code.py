@@ -61,8 +61,10 @@ Project root: {root}
 Available tools: {tools}
 
 Guidelines:
-- All file paths are relative to the project root; you cannot read or write files \
-outside it.
+- File paths are relative to the active project root (above); writes outside the \
+writable roots fail loudly. If your work spans repositories, attach the other repo with \
+attach_root -- it registers the root and switches the active directory so relative paths \
+and run/git follow it -- rather than writing a path into the wrong repo.
 - Explore before you change: use read_file, list_dir, grep (and project_search when \
 available) to understand the code first.
 - Prefer edit_file for small, targeted changes; use write_file for new files or full \
@@ -190,6 +192,19 @@ def register(subparsers) -> None:
         help="Refuse `run` commands matching these globs (repeatable; matched on the "
         "whole line and each token; always enforced, wins over allow). Adds to config "
         "`shell.deny`.",
+    )
+    grp.add_argument(
+        "--allow-root", action="append", dest="allow_root", default=None,
+        metavar="DIR",
+        help="Additional directory the file tools may read AND write, beyond the "
+        "startup root (repeatable; for sessions that span repos). The agent can also "
+        "attach one at runtime with the attach_root tool. Adds to config `roots.allow` (#76).",
+    )
+    grp.add_argument(
+        "--deny-root", action="append", dest="deny_root", default=None,
+        metavar="DIR",
+        help="Directory excluded from writes (readable if under an allowed root; "
+        "deny wins). Repeatable. Adds to config `roots.deny` (#76).",
     )
     grp.add_argument(
         "--assets", action="store_true", dest="assets", default=None,
@@ -469,6 +484,9 @@ def _run(args) -> int:
     bpol = userconfig.browser_policy(doc)  # #71 URL allow/deny policy
     browser_allow = list(bpol["allow"]) + list(getattr(args, "browser_allow", None) or [])
     browser_deny = list(bpol["deny"]) + list(getattr(args, "browser_deny", None) or [])
+    rpol = userconfig.roots_policy(doc)  # #76 extra writable / read-only roots
+    allow_root = list(rpol["allow"]) + list(getattr(args, "allow_root", None) or [])
+    deny_root = list(rpol["deny"]) + list(getattr(args, "deny_root", None) or [])
     tools = _code.code_tools(
         root, client,
         exec_timeout=args.exec_timeout or _code.DEFAULT_EXEC_TIMEOUT,
@@ -477,6 +495,8 @@ def _run(args) -> int:
         config=doc,  # #58: honor defaults.<cmd>.* in tools
         shell_allow=shell_allow,  # #33: `run` honors the shared allow/deny policy
         shell_deny=shell_deny,
+        allow_root=allow_root,  # #76: extra writable roots
+        deny_root=deny_root,
         browser=bool(getattr(args, "browser", None)),  # #71
         browser_allow=browser_allow,
         browser_deny=browser_deny,
@@ -492,11 +512,16 @@ def _run(args) -> int:
                                       include_search=True))
     system = PROFILE.build_system(args, root, tools)
 
+    roots_note = ""  # #76: surface extra writable / read-only roots in the banner
+    if allow_root:
+        roots_note += f" -- also writable: {', '.join(allow_root)}"
+    if deny_root:
+        roots_note += f" -- read-only: {', '.join(deny_root)}"
     if interactive:
         args.system = system
         args.yes = _autonomous(args)  # drive the REPL's per-turn gate
         print(
-            f"code: sandboxed to {root} -- tools: {_code.tool_names(tools)}",
+            f"code: sandboxed to {root}{roots_note} -- tools: {_code.tool_names(tools)}",
             file=sys.stderr,
         )
         return _repl.run(

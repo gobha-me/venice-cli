@@ -1126,18 +1126,24 @@ complete — a loud stderr warning is printed).
 | `write_file` | create/overwrite a file (atomic) | yes |
 | `edit_file` | replace an exact, unique string in a file | yes |
 | `apply_patch` | apply a batch of edits grouped per file, atomically per file (use `occurrence=N` for non-unique strings) | yes |
-| `run` | run a shell command (`/bin/sh -c`) at the root | yes |
+| `run` | run a shell command (`/bin/sh -c`) at the **active** root | yes |
+| `attach_root` | register another directory as a project root (for work spanning repos) and, by default, switch the active root into it so relative paths and `run`/`git` follow — writes outside the writable roots fail loudly | no |
 | `venice_image` / `venice_image_edit` / `venice_sfx` / `venice_music` / `venice_tts` / `venice_upscale` / `venice_bg_remove` / `venice_video` | generate/edit images, audio & video into the project — **opt-in with `--assets`** | yes |
 | `web_fetch` / `browser_capture` | fetch a URL (text/HTML) or headless-render a page (post-JS DOM + screenshot) to verify its own work — **opt-in with `--browser`** (see [Web & browser tools](#web--browser-tools---browser)) | no |
 | `memory_write` / `memory_read` / `memory_search` / `memory_list` | durable notes the agent recalls across turns/sessions (two tiers: project + global) — **opt-in with `--memory`** (see [Memory & tasks](#memory--tasks---memory)) | no |
 | `task_add` / `task_update` / `task_list` | a project-only checklist the agent tracks (`pending`/`in_progress`/`done`) — **opt-in with `--memory`** | no |
 | `venice_scout` | delegate a read-only investigation to a disposable subagent with a fresh context; returns a structured report so exploration doesn't pollute the main context — **opt-in with `--scout`** (see [Scout subagent](#scout-subagent---scout)) | no |
 
-**Safety.** Every filesystem path is resolved and confined to the project root
-(default: cwd, or `--root` / `$VENICE_CODE_ROOT`); a path that escapes the root, names
-a secret-shaped file (`credentials`, `.env`, `*.pem`, `*.key`, …), or lives under
-`.git`/`.venice` is refused — the same denylist `venice index` uses. `run` executes
-with the working directory forced to the root, a timeout (`--exec-timeout`),
+**Safety.** Every filesystem path is resolved and confined to the **writable roots** —
+the startup root (default: cwd, or `--root` / `$VENICE_CODE_ROOT`) plus any added with
+`--allow-root` / config `roots.allow` / the `attach_root` tool. A **write** that lands
+outside the writable set **fails loudly** (naming the roots) rather than silently
+redirecting — so a session that spans repos can't leak files into the wrong one; deny
+roots (`--deny-root` / `roots.deny`) are readable but never writable (deny wins). This
+is a guardrail, not a sandbox: a *shell command* can still write anywhere. A path that
+also names a secret-shaped file (`credentials`, `.env`, `*.pem`, `*.key`, …) or lives
+under `.git`/`.venice` is refused — the same denylist `venice index` uses. `run` executes
+with the working directory forced to the **active** root, a timeout (`--exec-timeout`),
 size-capped output, and the Venice API keys scrubbed from the child environment. Note
 that a *shell command* can still touch paths outside the root (`cat ../x`); `run`'s
 boundary is the **confirm gate** (the exact command is shown before it runs) plus the
@@ -1155,6 +1161,7 @@ it unrestricted (unchanged behavior).
 | `--no-plan` | skip the planning turn and execute directly |
 | `--no-verify` | skip the post-run acceptance-criteria check |
 | `--root DIR` | project directory to sandbox to (default: cwd) |
+| `--allow-root DIR` / `--deny-root DIR` | extra directories the file tools may read+write / roots excluded from writes (repeatable; adds to config `roots.*`). The agent can also add roots at runtime with `attach_root` |
 | `--max-tool-calls N` | cap tool invocations before forcing a final answer (default 25) |
 | `--exec-timeout SECS` | timeout for `run`/`git` (default 120) |
 | `--shell-allow CMD` / `--shell-deny PATTERN` | scope the `run` tool with the shared allow/deny policy (repeatable; adds to config `shell.*`) |

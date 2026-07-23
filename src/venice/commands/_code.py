@@ -82,22 +82,125 @@ class _PathError(Exception):
 
 
 # --------------------------------------------------------------------------- #
+# Attachable roots + path sandbox (#76)
+# --------------------------------------------------------------------------- #
+class Roots:
+    """The directories `venice code`'s file tools may touch, plus the *active* root
+    that relative paths and the `run`/`git` cwd resolve against (#76).
+
+    - ``base`` is the active root ("cwd"): relative paths join here and the shell
+      tools run here. :meth:`attach` moves it (with ``activate``).
+    - ``allow`` are the readable **and** writable roots (``base`` is always one).
+    - ``deny`` roots are excluded from **writes** (deny wins), so a deny root nested
+      under an allow root is readable but not writable.
+
+    A guardrail, **not** a sandbox: writes that land outside the writable set fail
+    LOUDLY (naming the roots) so a well-behaved agent catches its own cross-repo
+    mistake instead of leaking files silently -- the exact signal missing from the
+    incident that motivated #76. All roots are ``realpath``-resolved on construction
+    and mutation so symlinked roots compare correctly (the invariant
+    :func:`_index.resolves_inside` assumes). This is a mutable, per-session holder:
+    the tool closures capture one instance and :meth:`attach` grows it at runtime.
+    """
+
+    def __init__(self, base, allow=(), deny=()):
+        self.base = os.path.realpath(base)
+        self.allow: List[str] = []
+        self.deny: List[str] = []
+        self._add(self.allow, self.base)
+        for r in allow:
+            self._add(self.allow, r)
+        for r in deny:
+            self._add(self.deny, r)
+
+    @classmethod
+    def single(cls, root):
+        """A one-root holder with no extra allow/deny -- the legacy single-root case
+        (and the read-only scout's inner toolset), behaviourally identical to the
+        pre-#76 sandbox."""
+        return cls(root)
+
+    @staticmethod
+    def _add(bucket: List[str], path) -> str:
+        real = os.path.realpath(path)
+        if real not in bucket:
+            bucket.append(real)
+        return real
+
+    def _containing(self, real):
+        """The longest allow root that contains `real` (symlinks already resolved),
+        or None when the path is outside every allow root."""
+        hits = [r for r in self.allow if _index.resolves_inside(Path(real), Path(r))]
+        return max(hits, key=len) if hits else None
+
+    def check(self, real, *, write: bool) -> str:
+        """Return the allow root containing `real`, or raise :class:`_PathError`.
+
+        A read must land inside some allow root; a write must additionally land
+        outside every deny root (deny wins). The message names the roots so the
+        failure is a usable signal, not a silent redirect.
+        """
+        root = self._containing(real)
+        if root is None:
+            kind = "writable" if write else "readable"
+            raise _PathError(
+                f"path escapes the {kind} roots {self.allow}; attach it with "
+                f"attach_root first: {real}"
+            )
+        if write:
+            for d in self.deny:
+                if _index.resolves_inside(Path(real), Path(d)):
+                    raise _PathError(
+                        f"path is under a read-only (deny) root {d}: {real}"
+                    )
+        return root
+
+    def attach(self, path, *, write: bool = True, activate: bool = True) -> str:
+        """Register `path` as an additional root (and, by default, make it active).
+
+        `path` is resolved against the current ``base`` (or used as-is if absolute)
+        and is NOT sandbox-confined -- this is the tool that *widens* the sandbox.
+        A writable attach joins ``allow``; a read-only attach (``write=False``) joins
+        both ``allow`` and ``deny`` (readable but not writable). Returns the realpath.
+        Raises :class:`_PathError` for a non-directory or a reckless target
+        (filesystem root / ``$HOME`` exactly).
+        """
+        a = str(path or "").strip()
+        if not a:
+            raise _PathError("path is required")
+        real = os.path.realpath(a if os.path.isabs(a) else os.path.join(self.base, a))
+        if not os.path.isdir(real):
+            raise _PathError(f"not a directory: {path}")
+        home = os.path.realpath(os.path.expanduser("~"))
+        if real == os.path.realpath(os.sep) or real == home:
+            raise _PathError(f"refusing to attach a top-level root: {real}")
+        self._add(self.allow, real)
+        if not write:
+            self._add(self.deny, real)
+        if activate:
+            self.base = real
+        return real
+
+
+# --------------------------------------------------------------------------- #
 # Path sandbox
 # --------------------------------------------------------------------------- #
-def _safe_path(root: str, arg, *, must_exist: bool = False):
-    """Resolve `arg` (relative to `root`) and enforce the sandbox + denylists.
+def _safe_path(roots: "Roots", arg, *, must_exist: bool = False, write: bool = False):
+    """Resolve `arg` (relative to the active root) and enforce the roots + denylists.
 
     Returns ``(real_abspath, rel_posix)``. Raises :class:`_PathError` if the path
-    escapes `root`, is secret-shaped, lives under a protected dir, or (when
-    `must_exist`) does not exist. `root` must already be realpath-resolved.
+    escapes the allowed roots (or, for a write, lands in a deny root), is
+    secret-shaped, lives under a protected dir, or (when `must_exist`) does not
+    exist. `rel` is relative to the containing allow root. `roots` holds
+    already-``realpath``-resolved roots.
     """
     if arg is None or not str(arg).strip():
         raise _PathError("path is required")
-    joined = os.path.normpath(os.path.join(root, str(arg)))
-    real = os.path.realpath(joined)
-    if not _index.resolves_inside(Path(real), Path(root)):
-        raise _PathError(f"path escapes the project root: {arg}")
-    rel = Path(os.path.relpath(real, root)).as_posix()
+    a = str(arg)
+    joined = a if os.path.isabs(a) else os.path.join(roots.base, a)
+    real = os.path.realpath(os.path.normpath(joined))
+    container = roots.check(real, write=write)  # raises if outside / deny
+    rel = Path(os.path.relpath(real, container)).as_posix()
     if _index.is_secret_path(rel) or _index.is_protected_dir_path(rel):
         raise _PathError(f"path is in a protected location (secret/.git/.venice): {arg}")
     if must_exist and not os.path.exists(real):
@@ -141,9 +244,9 @@ def _atomic_write(target: str, text: str) -> None:
 # --------------------------------------------------------------------------- #
 # Tool implementations (print-free; return JSON-serializable dicts)
 # --------------------------------------------------------------------------- #
-def read_file(root: str, path, *, offset=None, limit=None) -> dict:
+def read_file(roots, path, *, offset=None, limit=None) -> dict:
     try:
-        real, rel = _safe_path(root, path, must_exist=True)
+        real, rel = _safe_path(roots, path, must_exist=True)
     except _PathError as e:
         return _err(str(e))
     if os.path.isdir(real):
@@ -170,9 +273,9 @@ def read_file(root: str, path, *, offset=None, limit=None) -> dict:
     )
 
 
-def list_dir(root: str, *, path=".") -> dict:
+def list_dir(roots, *, path=".") -> dict:
     try:
-        real, rel = _safe_path(root, path or ".", must_exist=True)
+        real, rel = _safe_path(roots, path or ".", must_exist=True)
     except _PathError as e:
         return _err(str(e))
     if not os.path.isdir(real):
@@ -198,7 +301,7 @@ def list_dir(root: str, *, path=".") -> dict:
 
 
 def grep_files(
-    root: str, pattern, *, path=None, glob=None, ignore_case=False,
+    roots, pattern, *, path=None, glob=None, ignore_case=False,
     max_matches: int = MAX_GREP_MATCHES,
 ) -> dict:
     if not pattern or not str(pattern).strip():
@@ -209,10 +312,10 @@ def grep_files(
         return _err(f"invalid regex: {e}")
 
     single_file = None
-    walk_root = root
+    walk_root = roots.base
     if path:
         try:
-            real, _rel = _safe_path(root, path, must_exist=True)
+            real, _rel = _safe_path(roots, path, must_exist=True)
         except _PathError as e:
             return _err(str(e))
         if os.path.isfile(real):
@@ -230,7 +333,7 @@ def grep_files(
         if scanned > MAX_GREP_FILES:
             truncated = True
             break
-        rel = Path(os.path.relpath(str(fp), root)).as_posix()
+        rel = Path(os.path.relpath(str(fp), roots.base)).as_posix()
         if glob and not (fnmatch.fnmatch(rel, glob) or fnmatch.fnmatch(fp.name, glob)):
             continue
         _data, text = _index.read_text(fp)
@@ -247,11 +350,11 @@ def grep_files(
     return _ok(matches=matches, count=len(matches), truncated=truncated)
 
 
-def write_file(root: str, path, content, *, confirm: bool = False) -> dict:
+def write_file(roots, path, content, *, confirm: bool = False) -> dict:
     if content is None:
         return _err("content is required")
     try:
-        real, rel = _safe_path(root, path)
+        real, rel = _safe_path(roots, path, write=True)
     except _PathError as e:
         return _err(str(e))
     if os.path.isdir(real):
@@ -268,13 +371,13 @@ def write_file(root: str, path, content, *, confirm: bool = False) -> dict:
                bytes=len(str(content).encode("utf-8")))
 
 
-def edit_file(root: str, path, old, new, *, confirm: bool = False) -> dict:
+def edit_file(roots, path, old, new, *, confirm: bool = False) -> dict:
     if old is None or new is None:
         return _err("both old and new are required")
     if old == "":
         return _err("old must be a non-empty string")
     try:
-        real, rel = _safe_path(root, path, must_exist=True)
+        real, rel = _safe_path(roots, path, must_exist=True, write=True)
     except _PathError as e:
         return _err(str(e))
     if os.path.isdir(real):
@@ -339,7 +442,7 @@ def _replace_nth(text: str, old: str, new: str, n: int) -> str:
     return text[:start] + new + text[start + len(old):]
 
 
-def apply_patch(root: str, patches, *, confirm: bool = False,
+def apply_patch(roots, patches, *, confirm: bool = False,
                 dry_run: bool = False) -> dict:
     """Apply a batch of edits, grouped per file, atomically across all files.
 
@@ -368,7 +471,7 @@ def apply_patch(root: str, patches, *, confirm: bool = False,
         if not isinstance(edits, list) or not edits:
             return _err(f"patches[{fi}]: edits must be a non-empty list")
         try:
-            real, rel = _safe_path(root, path, must_exist=True)
+            real, rel = _safe_path(roots, path, must_exist=True, write=True)
         except _PathError as e:
             return _err(f"patches[{fi}]: {e}")
         if os.path.isdir(real):
@@ -421,6 +524,25 @@ def apply_patch(root: str, patches, *, confirm: bool = False,
         results.append({"path": rel, "edits": n})
     return _ok(action="patched", files=results,
                total_edits=sum(r["edits"] for r in results))
+
+
+def attach_root(roots: "Roots", path, *, write: bool = True,
+                activate: bool = True) -> dict:
+    """Register another project root so the file tools can work across repos (#76).
+
+    Widens `roots` (and, by default, moves the active root into `path`) so a session
+    that spans repos writes where it means to instead of silently leaking into the
+    startup root. No filesystem side effect of its own -- the writes it enables still
+    route through the confirm gate -- so it is free/unconfirmed; its effect is loudly
+    reported (the result names the new writable + active roots).
+    """
+    try:
+        real = roots.attach(path, write=bool(write) if write is not None else True,
+                            activate=bool(activate) if activate is not None else True)
+    except _PathError as e:
+        return _err(str(e))
+    return _ok(attached=real, writable=bool(write) if write is not None else True,
+               base=roots.base, allow=list(roots.allow), deny=list(roots.deny))
 
 
 # `_scrubbed_env`, `run_cmd`, `git_cmd`, and `_GIT_READONLY` now live in `_exec`
@@ -506,6 +628,26 @@ _PATCH_SCHEMA = _obj(
     ["patches"],
 )
 # `_RUN_SCHEMA` / `_GIT_SCHEMA` are imported from `_exec` (shared with chat --shell).
+_ATTACH_ROOT_SCHEMA = _obj(
+    {
+        "path": _p(
+            "string",
+            "Directory to attach as an additional project root (relative to the "
+            "current active root, or absolute). Use when work spans repos.",
+        ),
+        "write": _p(
+            "boolean",
+            "Whether the attached root is writable (default true). Pass false to "
+            "attach it read-only (readable, but writes there fail).",
+        ),
+        "activate": _p(
+            "boolean",
+            "Make the attached root the active root so relative paths and the run/git "
+            "tools resolve there (default true). Pass false to keep the current cwd.",
+        ),
+    },
+    ["path"],
+)
 _SEARCH_SCHEMA = _obj(
     {
         "query": _p("string", "Natural-language description of the code to find."),
@@ -561,6 +703,8 @@ def code_tools(
     config=None,
     shell_allow=(),
     shell_deny=(),
+    allow_root=(),
+    deny_root=(),
     browser: bool = False,
     browser_allow=(),
     browser_deny=(),
@@ -572,6 +716,14 @@ def code_tools(
     (`write_file`/`edit_file`/`run`) are ``paid=True`` and route through the confirm
     gate. `project_search` (reusing the free `_mcp.search_tool`) is added only when
     `include_search` and a `client` are supplied and a `.venice` index exists.
+
+    `allow_root`/`deny_root` (#76) seed the session's :class:`Roots`: `root` is the
+    active (startup) root, `allow_root` adds extra readable+writable roots, and
+    `deny_root` marks roots excluded from writes (deny wins). The agent can widen the
+    set at runtime with the free `attach_root` tool, which also switches the active
+    root so relative paths + `run`/`git` cwd follow it. Writes outside the writable
+    set fail loudly (a guardrail, not a sandbox) so a cross-repo session can't leak
+    files silently into the startup root.
 
     `shell_allow`/`shell_deny` (#33) apply the shared allow/deny policy to the `run`
     tool -- the same policy `venice chat --shell` enforces (see `_exec.check_policy`).
@@ -592,24 +744,26 @@ def code_tools(
     through the same confirm/spend gate; generated files land in
     ``$VENICE_MCP_OUTPUT_DIR`` or, by default, under `root`.
     """
-    root = os.path.realpath(root)
+    roots = Roots(root, allow=allow_root, deny=deny_root)
+    root = roots.base  # startup-root snapshot for the asset/browser output dirs
 
     def free(fn):
         def invoke(arguments, *, confirm: bool = False):
-            return fn(root, **_clean(arguments))
+            return fn(roots, **_clean(arguments))
         return invoke
 
     def paid(fn):
         def invoke(arguments, *, confirm: bool = False):
-            return fn(root, confirm=confirm, **_clean(arguments))
+            return fn(roots, confirm=confirm, **_clean(arguments))
         return invoke
 
     def run_invoke(arguments, *, confirm: bool = False):
-        return run_cmd(root, confirm=confirm, exec_timeout=exec_timeout,
+        # cwd follows the active root so the shell and file tools stay in sync (#76).
+        return run_cmd(roots.base, confirm=confirm, exec_timeout=exec_timeout,
                        allow=shell_allow, deny=shell_deny, **_clean(arguments))
 
     def git_invoke(arguments, *, confirm: bool = False):
-        return git_cmd(root, exec_timeout=exec_timeout, **_clean(arguments))
+        return git_cmd(roots.base, exec_timeout=exec_timeout, **_clean(arguments))
 
     tools = [
         _agent.Tool("read_file",
@@ -658,6 +812,15 @@ def code_tools(
                     "the project root. For commits/adds use the run tool.",
                     _GIT_SCHEMA, git_invoke, paid=False,
                     category="vcs", tags=("read",)),
+        _agent.Tool("attach_root",
+                    "Attach another directory as a project root when your work spans "
+                    "repos, and (by default) make it the active root so relative "
+                    "paths and run/git resolve there. Writes outside the writable "
+                    "roots fail loudly -- attach the repo first instead of writing to "
+                    "the wrong one. Read-only: use write=false to attach without "
+                    "granting writes.",
+                    _ATTACH_ROOT_SCHEMA, free(attach_root), paid=False,
+                    category="fs", tags=("root",)),
     ]
 
     if include_search and client is not None and _index.discover_store(None) is not None:
@@ -737,19 +900,21 @@ def read_only_tools(root: str, client=None, *, include_search: bool = False
     `.venice` index exists and a `client` is supplied.
 
     This is an *additive* builder, deliberately NOT a slice of :func:`code_tools`, so
-    that factory (and its tests) stay untouched. It builds NO mutating/paid tool and NO
-    scout tool -- the structural guarantee behind the scout subagent's read-only +
-    no-self-spawn invariant (see :func:`_agent.run_scout`).
+    that factory (and its tests) stay untouched. It builds NO mutating/paid tool, NO
+    scout tool, and NO `attach_root` -- the structural guarantee behind the scout
+    subagent's read-only + no-self-spawn invariant (see :func:`_agent.run_scout`). The
+    single, immovable :class:`Roots` (no writable extras, no attach) keeps the scout
+    confined to one root exactly as before #76.
     """
-    root = os.path.realpath(root)
+    roots = Roots.single(root)
 
     def free(fn):
         def invoke(arguments, *, confirm: bool = False):
-            return fn(root, **_clean(arguments))
+            return fn(roots, **_clean(arguments))
         return invoke
 
     def git_invoke(arguments, *, confirm: bool = False):
-        return git_cmd(root, exec_timeout=DEFAULT_EXEC_TIMEOUT, **_clean(arguments))
+        return git_cmd(roots.base, exec_timeout=DEFAULT_EXEC_TIMEOUT, **_clean(arguments))
 
     tools = [
         _agent.Tool("read_file",

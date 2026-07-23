@@ -211,6 +211,29 @@ def browser_policy(doc: dict) -> dict:
     }
 
 
+def roots_policy(doc: dict) -> dict:
+    """Read the top-level ``roots`` policy section: the extra writable / read-only
+    project roots for `venice code`'s file tools (#76). Returns
+    ``{"allow": [...], "deny": [...]}`` -- string lists (directory paths), empty
+    when unset/malformed.
+
+    Mirrors :func:`shell_policy`/:func:`browser_policy` (a non-`defaults` top-level
+    section with its own reader): ``allow`` roots are readable **and** writable in
+    addition to the startup root; ``deny`` roots are excluded from writes (deny wins,
+    so a deny root nested under an allow root is readable but not writable). Round-trips
+    through the generic dotted-key store: ``venice config set roots.deny '["*/vendor"]'``.
+    The agent can also widen the set at runtime with the ``attach_root`` tool; this is
+    the startup floor.
+    """
+    section = doc.get("roots")
+    if not isinstance(section, dict):
+        return {"allow": [], "deny": []}
+    return {
+        "allow": _as_list(section["allow"]) if section.get("allow") else [],
+        "deny": _as_list(section["deny"]) if section.get("deny") else [],
+    }
+
+
 # --------------------------------------------------------------------------- #
 # #17 default-flag loader
 # --------------------------------------------------------------------------- #
