@@ -60,6 +60,27 @@ def _write_call(cid, path="new.py", content="x = 1\n"):
                    json.dumps({"path": path, "content": content}))
 
 
+def _fake_paid_tool(name="venice_image", category="image", cost=0.90):
+    """A paid Tool whose invoke records each `confirm` and returns a fixed cost.
+
+    `cost=None` models a code-role paid tool (write_file/run) that reports no USD, so
+    the spend meter never moves for it.
+    """
+    seen = {"confirms": [], "calls": 0}
+
+    def inv(arguments, *, confirm=False):
+        seen["confirms"].append(confirm)
+        seen["calls"] += 1
+        r = {"status": "ok", "paths": ["x"]}
+        if cost is not None:
+            r["cost_estimate_usd"] = cost
+        return r
+
+    tool = _agent.Tool(name, "gen", {"type": "object", "properties": {}}, inv,
+                       paid=True, category=category, tags=("write",))
+    return tool, seen
+
+
 _REPORT = (
     "FINDINGS: read_file is defined in _code.py.\n"
     "CONFIDENCE: high -- read the source.\n"
@@ -239,8 +260,9 @@ def _code_args(**ov):
         max_tokens=None, json=False, auto=None, manual=None, yes=None,
         plan_only=False, no_plan=False, no_verify=False, max_tool_calls=None,
         exec_timeout=None, interactive=False, resume=None, assets=None,
-        scout=None, spawn=None, auto_compact=None, compact_threshold=None,
-        compact_keep_turns=None, session_max_spend=None, cont=None, ephemeral=None,
+        scout=None, spawn=None, spawn_max_spend=None, auto_compact=None,
+        compact_threshold=None, compact_keep_turns=None, session_max_spend=None,
+        cont=None, ephemeral=None,
     )
     base.update(ov)
     return argparse.Namespace(**base)
@@ -471,6 +493,88 @@ class TestSpawnTool(_ScoutBase):
         out = st.invoke({"task": "do x", "role": "code"})
         self.assertEqual(out["status"], "error")
         self.assertIn("spawn failed", out["message"])
+        # Even on the error path the spend provenance rides along (default cap active).
+        self.assertEqual(out["spent_usd"], 0.0)
+        self.assertEqual(out["spend_cap_usd"], _code._SPAWN_MAX_SPEND)
+
+    # ---- per-worker USD media spend cap (#52 spend slice) -------------------- #
+    def _spend_run(self, media_name, n):
+        """A run_spawn stub that fires the granted `media_name` tool `n` times
+        (confirm=True, as the yes=True worker loop does) and reports the statuses."""
+        def _run(oai, model, task, tools, base_kwargs, *, max_tool_calls, **kw):
+            media = next(t for t in tools if t.name == media_name)
+            statuses = [media.invoke({"prompt": "p"}, confirm=True)["status"]
+                        for _ in range(n)]
+            return {"status": "ok", "report": "OUTCOME: done", "tool_calls": n,
+                    "truncated": False, "_statuses": statuses}
+        return _run
+
+    def test_asset_worker_media_spend_capped_and_provenance(self):
+        tool, seen = _fake_paid_tool(cost=0.90)
+        with mock.patch.object(_agent, "run_spawn",
+                               self._spend_run("venice_image", 4)):
+            out = _code.spawn_tool(None, "m", {}, [tool], max_spend=2.00).invoke(
+                {"task": "make art", "role": "asset"})
+        # 0.90, 1.80, 2.70 all pass the pre-call check; the 4th (2.70 >= 2.00) is refused.
+        self.assertEqual(out["_statuses"], ["ok", "ok", "ok", "blocked"])
+        self.assertEqual(seen["calls"], 3)            # blocked call never reached inner
+        self.assertTrue(seen["confirms"] and all(seen["confirms"]))  # confirm forwarded
+        self.assertAlmostEqual(out["spent_usd"], 2.70)               # handoff provenance
+        self.assertEqual(out["spend_cap_usd"], 2.00)
+
+    def test_blocked_envelope_has_status_blocked_not_error(self):
+        tool, _seen = _fake_paid_tool(cost=5.0)  # one call overshoots a $2 cap
+        captured = {}
+
+        def _run(oai, model, task, tools, base_kwargs, *, max_tool_calls, **kw):
+            media = next(t for t in tools if t.name == "venice_image")
+            media.invoke({"prompt": "p"}, confirm=True)          # spends 5.0
+            captured["second"] = media.invoke({"prompt": "p"}, confirm=True)
+            return {"status": "ok", "report": "r", "tool_calls": 1, "truncated": False}
+
+        with mock.patch.object(_agent, "run_spawn", _run):
+            _code.spawn_tool(None, "m", {}, [tool], max_spend=2.00).invoke(
+                {"task": "x", "role": "asset"})
+        self.assertEqual(captured["second"]["status"], "blocked")
+        self.assertIn("spend cap", captured["second"]["message"])
+
+    def test_default_cap_applies_when_max_spend_unset(self):
+        # No max_spend arg -> the module default _SPAWN_MAX_SPEND caps the worker.
+        tool, _seen = _fake_paid_tool(cost=_code._SPAWN_MAX_SPEND + 1.0)
+        with mock.patch.object(_agent, "run_spawn",
+                               self._spend_run("venice_image", 2)):
+            out = _code.spawn_tool(None, "m", {}, [tool]).invoke(
+                {"task": "x", "role": "asset"})
+        self.assertEqual(out["_statuses"], ["ok", "blocked"])  # 1st overshoots, 2nd refused
+        self.assertEqual(out["spend_cap_usd"], _code._SPAWN_MAX_SPEND)
+
+    def test_code_worker_spend_cap_never_bites(self):
+        # A code-role paid tool reports no cost, so even a tiny cap never fires.
+        tool, seen = _fake_paid_tool(name="write_file", category="fs", cost=None)
+        with mock.patch.object(_agent, "run_spawn",
+                               self._spend_run("write_file", 5)):
+            out = _code.spawn_tool(None, "m", {}, [tool], max_spend=0.01).invoke(
+                {"task": "x", "role": "code"})
+        self.assertEqual(out["_statuses"], ["ok"] * 5)
+        self.assertEqual(seen["calls"], 5)
+        self.assertEqual(out["spent_usd"], 0.0)
+
+    def test_spawn_max_spend_zero_disables_metering(self):
+        # <= 0 => identity pass-through: granted holds the parent's own tool instances
+        # (unwrapped) and no spend provenance is attached -- exact pre-slice behavior.
+        tool, _seen = _fake_paid_tool(cost=0.90)
+        rec = {}
+
+        def _capture(oai, model, task, tools, base_kwargs, *, max_tool_calls, **kw):
+            rec["media"] = next(t for t in tools if t.name == "venice_image")
+            return {"status": "ok", "report": "r", "tool_calls": 0, "truncated": False}
+
+        with mock.patch.object(_agent, "run_spawn", _capture):
+            out = _code.spawn_tool(None, "m", {}, [tool], max_spend=0).invoke(
+                {"task": "x", "role": "asset"})
+        self.assertIs(rec["media"], tool)             # not wrapped -> same object
+        self.assertNotIn("spent_usd", out)
+        self.assertNotIn("spend_cap_usd", out)
 
 
 class TestSpawnWiring(_ScoutBase):
@@ -511,6 +615,23 @@ class TestSpawnWiring(_ScoutBase):
             _code_args(task="do x", root=self.root, plan_only=True), seq)
         self.assertEqual(rc, 0)
         self.assertNotIn(_agent.SPAWN_TOOL_NAME, calls[0]["messages"][0]["content"])
+
+    def test_spawn_max_spend_threads_into_spawn_tool(self):
+        # `venice code --spawn --spawn-max-spend X` reaches _code.spawn_tool(max_spend=X).
+        captured = {}
+        real = _code.spawn_tool
+
+        def spy(oai, model, base_kwargs, parent_tools, **kw):
+            captured["max_spend"] = kw.get("max_spend")
+            return real(oai, model, base_kwargs, parent_tools, **kw)
+
+        seq = [FakeToolCompletion("1. do it\nAcceptance criteria:\n- ok")]
+        with mock.patch.object(_code, "spawn_tool", spy):
+            rc, calls = self._run(
+                _code_args(task="do x", root=self.root, plan_only=True,
+                           spawn=True, spawn_max_spend=1.5), seq)
+        self.assertEqual(rc, 0)
+        self.assertEqual(captured["max_spend"], 1.5)
 
 
 if __name__ == "__main__":

@@ -19,7 +19,7 @@ import venice.userconfig as uc
 from venice import cli
 from venice.commands import config as cfgcmd
 from venice.commands import (
-    chat, image, image_edit, index, music, sfx, tts, upscale, video,
+    chat, code, image, image_edit, index, music, sfx, tts, upscale, video,
 )
 
 
@@ -147,6 +147,27 @@ class TestApplyDefaults(_Base):
         doc = {"defaults": {"chat": {"persona": "pirate"}}}
         uc.apply_defaults(args, "chat", doc)
         self.assertEqual(args.persona, "pirate")
+
+    def test_apply_fills_code_spawn_max_spend(self):
+        # #52: defaults.code.spawn_max_spend backs --spawn-max-spend (float, None-only).
+        doc = {"defaults": {"code": {"spawn_max_spend": 1.25}}}
+        args = argparse.Namespace(spawn_max_spend=None, model=None, system=None)
+        uc.apply_defaults(args, "code", doc)
+        self.assertEqual(args.spawn_max_spend, 1.25)
+        args2 = argparse.Namespace(spawn_max_spend=0.5, model=None, system=None)
+        uc.apply_defaults(args2, "code", doc)
+        self.assertEqual(args2.spawn_max_spend, 0.5)  # explicit wins
+
+    def test_code_parser_has_spawn_max_spend_dest_config_fills_it(self):
+        # Guards the config key against the real argparser's dest: a wrong dest name
+        # (or a missing flag) would silently no-op the config backing.
+        parser = _build_parser(code)
+        args = parser.parse_args(["code", "do x"])
+        self.assertTrue(hasattr(args, "spawn_max_spend"))
+        self.assertIsNone(args.spawn_max_spend)
+        doc = {"defaults": {"code": {"spawn_max_spend": 3.0}}}
+        uc.apply_defaults(args, "code", doc)
+        self.assertEqual(args.spawn_max_spend, 3.0)
 
     def test_apply_global_output_dir_expands_user(self):
         doc = {"defaults": {"output_dir": "~/venice-out", "max_spend": 0.5, "yes": True}}
