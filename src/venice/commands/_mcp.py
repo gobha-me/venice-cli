@@ -24,7 +24,7 @@ from types import SimpleNamespace
 from typing import List, Optional
 
 from ..client import VeniceAPIError
-from . import _audio, _browser, _index, _models, _openai, _queue, _shared
+from . import _audio, _browser, _index, _memory, _models, _openai, _queue, _shared
 from . import bg_remove as _bg
 from . import chat as _chat
 from . import image as _image
@@ -1097,6 +1097,86 @@ def reindex_tool(
     except _index.IndexingError as e:
         return _err(str(e) or f"reindex: failed (exit {e.exit_code})")
     return {"status": "ok", **summary}
+
+
+# --------------------------------------------------------------------------- #
+# Persistent memory + task tools (issue #49)
+#
+# Free, local, stdlib-only (no client, no network, no spend gate) -- the agent's
+# own durable notes + checklist, delegated to the print-free `_memory` store. Two
+# memory tiers (project rides `<root>/.venice/memory`, global rides
+# `~/.config/venice/memory`); tasks are project-only. `client` is accepted but
+# unused (the free-tool wrapper always passes it). Task results NEST the task under
+# `task`/`tasks` so a task's own `status` never collides with the envelope `status`.
+# --------------------------------------------------------------------------- #
+def memory_write_tool(client, *, name, content, scope: str = "project",
+                      type=None, description=None) -> dict:
+    """Save (or overwrite) a durable memory note. `scope`: "project" (default, rides
+    the repo's .venice/ so subagents share it) or "global" (travels with the agent)."""
+    try:
+        meta = _memory.write_entry(
+            name, content, scope=scope, type=type, description=description)
+    except _memory.MemStoreError as e:
+        return _err(f"memory_write: {e}")
+    return {"status": "ok", **meta}
+
+
+def memory_read_tool(client, *, name, scope=None) -> dict:
+    """Read one memory note by name. Omit `scope` to try project then global."""
+    try:
+        entry = _memory.read_entry(name, scope=scope)
+    except _memory.MemStoreError as e:
+        return _err(f"memory_read: {e}")
+    if entry is None:
+        return _err(f"memory_read: no memory named {str(name)!r}")
+    return {"status": "ok", **entry}
+
+
+def memory_search_tool(client, *, query, scope=None) -> dict:
+    """Plain substring search over memory names/descriptions/bodies. Omit `scope` to
+    search both tiers; each hit is tagged with its scope + a preview snippet."""
+    try:
+        results = _memory.search_entries(query, scope=scope)
+    except _memory.MemStoreError as e:
+        return _err(f"memory_search: {e}")
+    return {"status": "ok", "results": results, "count": len(results)}
+
+
+def memory_list_tool(client, *, scope=None) -> dict:
+    """List memory notes (metadata only -- name/type/description/updated/scope, no
+    bodies). Omit `scope` to list both tiers."""
+    try:
+        entries = _memory.list_entries(scope=scope)
+    except _memory.MemStoreError as e:
+        return _err(f"memory_list: {e}")
+    return {"status": "ok", "entries": entries, "count": len(entries)}
+
+
+def task_add_tool(client, *, text) -> dict:
+    """Add a project task (starts `pending`). Returns the created task under `task`."""
+    try:
+        task = _memory.add_task(text)
+    except _memory.MemStoreError as e:
+        return _err(f"task_add: {e}")
+    return {"status": "ok", "task": task}
+
+
+def task_update_tool(client, *, id, status=None, text=None) -> dict:
+    """Update a task's status (pending/in_progress/done) and/or text by id."""
+    try:
+        task = _memory.update_task(id, status=status, text=text)
+    except _memory.MemStoreError as e:
+        return _err(f"task_update: {e}")
+    return {"status": "ok", "task": task}
+
+
+def task_list_tool(client, *, status=None) -> dict:
+    """List project tasks, optionally filtered by status. Returns them under `tasks`."""
+    try:
+        tasks = _memory.list_tasks(status=status)
+    except _memory.MemStoreError as e:
+        return _err(f"task_list: {e}")
+    return {"status": "ok", "tasks": tasks, "count": len(tasks)}
 
 
 def web_fetch_tool(

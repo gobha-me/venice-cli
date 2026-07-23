@@ -34,6 +34,7 @@ from typing import Callable, Dict, List, NamedTuple, Optional, Tuple
 from .. import userconfig
 from . import _exec
 from . import _mcp
+from . import _memory
 from . import _models
 from . import _compact
 from .models import MODEL_TYPES
@@ -596,6 +597,60 @@ _SEARCH_SCHEMA = _obj(
 
 _REINDEX_SCHEMA = _obj({})  # no parameters -- rebuilds the discovered .venice index
 
+# Memory + task tools (#49). `scope` picks the tier (project rides the repo's
+# .venice/, global travels with the agent); tasks are project-only (no scope).
+_SCOPE_PROP = {
+    "type": "string",
+    "enum": ["project", "global"],
+    "description": "Which memory tier: 'project' (default, rides the repo's .venice/ "
+    "so subagents share it) or 'global' (user-global, travels with the agent).",
+}
+_TASK_STATUS_PROP = {
+    "type": "string",
+    "enum": list(_memory.TASK_STATUSES),
+    "description": "Task status: pending, in_progress, or done.",
+}
+_MEMORY_WRITE_SCHEMA = _obj(
+    {
+        "name": _p("string", "Short slug id for the note (letters/digits/_.- only). "
+                   "Reusing a name overwrites it."),
+        "content": _p("string", "The note body to remember."),
+        "scope": _SCOPE_PROP,
+        "type": _p("string", "Optional kind, e.g. note/feedback/project/reference "
+                   "(default: note)."),
+        "description": _p("string", "Optional one-line summary shown in list/search."),
+    },
+    required=["name", "content"],
+)
+_MEMORY_READ_SCHEMA = _obj(
+    {
+        "name": _p("string", "The note's name."),
+        "scope": _SCOPE_PROP,  # omit -> try project then global
+    },
+    required=["name"],
+)
+_MEMORY_SEARCH_SCHEMA = _obj(
+    {
+        "query": _p("string", "Substring to find in names/descriptions/bodies."),
+        "scope": _SCOPE_PROP,  # omit -> search both tiers
+    },
+    required=["query"],
+)
+_MEMORY_LIST_SCHEMA = _obj({"scope": _SCOPE_PROP})  # omit -> both tiers; metadata only
+_TASK_ADD_SCHEMA = _obj(
+    {"text": _p("string", "What the task is.")},
+    required=["text"],
+)
+_TASK_UPDATE_SCHEMA = _obj(
+    {
+        "id": _p("string", "The task id (from task_add/task_list)."),
+        "status": _TASK_STATUS_PROP,
+        "text": _p("string", "Optional new text for the task."),
+    },
+    required=["id"],
+)
+_TASK_LIST_SCHEMA = _obj({"status": _TASK_STATUS_PROP})  # omit -> all tasks
+
 _MODELS_SCHEMA = _obj(
     {
         "type": {
@@ -1047,6 +1102,116 @@ def browser_tools(*, allow=(), deny=(), output_dir=None, config=None) -> List[To
     ]
 
 
+def memory_tools() -> List[Tool]:
+    """The persistent memory + task rails (issue #49).
+
+    Free, local, stdlib-only tools over the agent's own durable store (`_memory`):
+    four `memory_*` tools (two-tier notes -- project rides `<root>/.venice/memory`,
+    global rides `~/.config/venice/memory`) and three `task_*` tools (a project-only
+    checklist). Like the shell/browser rails they are NOT in `_REGISTRY` (so they
+    don't bloat chat's default advertised set) and are appended only when the caller
+    opts in via `builtin_tools(memory=True)` / `code_tools(memory=True)` -- the #52
+    planner enables them for a subagent the same way. Categories `memory`/`tasks`
+    live on the built Tools for downstream iterators, not in the registry taxonomy.
+    """
+    def _free(impl):
+        def invoke(arguments, *, confirm: bool = False):
+            return impl(None, **_clean(arguments))
+        return invoke
+
+    return [
+        Tool(
+            name="memory_write",
+            description=(
+                "Save a durable note you can recall in a later step or session. "
+                "scope='project' (default) rides the repo's .venice/ so subagents "
+                "share it; scope='global' travels with you across projects. Reusing "
+                "a name overwrites it."
+            ),
+            parameters=_MEMORY_WRITE_SCHEMA,
+            invoke=_free(_mcp.memory_write_tool),
+            paid=False,
+            category="memory",
+            tags=("write",),
+        ),
+        Tool(
+            name="memory_read",
+            description=(
+                "Read one saved note by name (returns its body + metadata). Omit "
+                "scope to try project then global."
+            ),
+            parameters=_MEMORY_READ_SCHEMA,
+            invoke=_free(_mcp.memory_read_tool),
+            paid=False,
+            category="memory",
+            tags=("read",),
+        ),
+        Tool(
+            name="memory_search",
+            description=(
+                "Find saved notes by a plain substring over names/descriptions/"
+                "bodies. Omit scope to search both tiers; each hit is tagged with "
+                "its scope + a preview."
+            ),
+            parameters=_MEMORY_SEARCH_SCHEMA,
+            invoke=_free(_mcp.memory_search_tool),
+            paid=False,
+            category="memory",
+            tags=("read",),
+        ),
+        Tool(
+            name="memory_list",
+            description=(
+                "List saved notes (names/types/descriptions/timestamps only, no "
+                "bodies) -- the cheap index to decide what to memory_read. Omit "
+                "scope to list both tiers."
+            ),
+            parameters=_MEMORY_LIST_SCHEMA,
+            invoke=_free(_mcp.memory_list_tool),
+            paid=False,
+            category="memory",
+            tags=("read",),
+        ),
+        Tool(
+            name="task_add",
+            description=(
+                "Add a task to the project checklist (starts 'pending'). Use it to "
+                "track multi-step work so progress survives across turns/resume."
+            ),
+            parameters=_TASK_ADD_SCHEMA,
+            invoke=_free(_mcp.task_add_tool),
+            paid=False,
+            category="tasks",
+            tags=("write",),
+        ),
+        Tool(
+            name="task_update",
+            description=(
+                "Update a task by id: set status (pending/in_progress/done) and/or "
+                "change its text. Mark a task in_progress when you start it and done "
+                "when finished."
+            ),
+            parameters=_TASK_UPDATE_SCHEMA,
+            invoke=_free(_mcp.task_update_tool),
+            paid=False,
+            category="tasks",
+            tags=("write",),
+        ),
+        Tool(
+            name="task_list",
+            description=(
+                "List the project's tasks (optionally filtered by status) to see "
+                "what's left."
+            ),
+            parameters=_TASK_LIST_SCHEMA,
+            invoke=_free(_mcp.task_list_tool),
+            paid=False,
+            category="tasks",
+            tags=("read",),
+        ),
+    ]
+
+
 def builtin_tools(
     client,
     *,
@@ -1062,6 +1227,7 @@ def builtin_tools(
     browser_allow=(),
     browser_deny=(),
     browser_output_dir: Optional[str] = None,
+    memory: bool = False,
     exec_timeout: int = _exec.DEFAULT_EXEC_TIMEOUT,
 ) -> List[Tool]:
     """Build the in-process venice tools, bound to `client`.
@@ -1086,6 +1252,10 @@ def builtin_tools(
 
     `browser` (issue #71) likewise appends the `web_fetch`/`browser_capture` rails,
     scoped by the `browser_allow`/`browser_deny` URL policy (see `browser_tools`).
+
+    `memory` (issue #49) appends the persistent memory + task rails (`memory_tools`):
+    free, local notes (two tiers) + a project task list. Also a rail (added after the
+    `only` filter, absent from `_BUILTINS`/`mcp-serve`).
     """
 
     def _config_defaults(section, impl) -> dict:
@@ -1173,6 +1343,9 @@ def builtin_tools(
             allow=browser_allow, deny=browser_deny,
             output_dir=browser_output_dir, config=config,
         ))
+
+    if memory:
+        tools.extend(memory_tools())
     return tools
 
 

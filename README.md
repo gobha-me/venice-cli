@@ -758,6 +758,7 @@ Details and safety:
 | `--browser` | add `web_fetch` + `browser_capture` tools (fetch a URL / headless-render a page); implies `--tools` |
 | `--browser-allow HOST` | allow only these hosts for the browser tools (repeatable; adds to config `browser.allow`) |
 | `--browser-deny PATTERN` | refuse URLs whose host/URL matches these globs (repeatable; adds to config `browser.deny`) |
+| `--memory` | add persistent memory + task tools (durable notes + a checklist); implies `--tools` (see [Memory & tasks](#memory--tasks---memory)) |
 | `--mcp NAME` | attach a registered external MCP server's tools (repeatable) |
 | `--no-mcp` | attach no MCP servers (overrides a configured default) |
 
@@ -839,6 +840,45 @@ venice config set browser.allow '["localhost", "*.example.com"]'
   (`wait_ms`, `timeout`, `max_bytes`).
 - **Not exposed over `venice mcp-serve`** in this release (chat/code only), like
   `project_search`/`reindex`.
+
+#### Memory & tasks (`--memory`)
+
+`--memory` gives the agent a durable place to keep notes and a checklist, so multi-step
+and cross-session work survives beyond one transcript. Implies `--tools`. Seven free,
+local, offline tools (no API calls, no spend gate):
+
+- **`memory_write` / `memory_read` / `memory_search` / `memory_list`** — named notes the
+  agent recalls later. **Two tiers:** `scope="project"` (default) rides the repo at
+  `<root>/.venice/memory/` so it's shared by anything working in that tree; `scope="global"`
+  lives user-global (travels with the agent across projects). `memory_search` is a plain
+  substring match over names/descriptions/bodies (zero-dep, always works); `memory_list`
+  returns metadata only (names/types/descriptions/timestamps — a cheap index to decide what
+  to read).
+- **`task_add` / `task_update` / `task_list`** — a lightweight **project-only** checklist
+  (`pending` → `in_progress` → `done`) the agent maintains across turns and `--resume`.
+
+```sh
+venice code --memory --auto "Refactor the parser; track your steps as tasks."
+venice chat --memory "Remember that this project uses tabs, not spaces (scope=project)."
+```
+
+Inspect or prune what the agent stored with the **`venice memory`** command:
+
+```sh
+venice memory ls                 # both tiers (metadata only)
+venice memory ls --scope global  # just the global tier
+venice memory show <name>        # one note, including its body
+venice memory rm <name>          # delete a note (default: project tier)
+venice memory tasks              # the project checklist (--status filters)
+```
+
+- **Locations:** project notes/tasks at `<root>/.venice/memory/` (git-ignored by default,
+  like the semantic index); global notes at `~/.config/venice/memory/`
+  (`$VENICE_MEMORY_DIR` overrides). All store files are `0600`.
+- **Hygiene (CLAUDE.md):** a note **name** is refused if it's secret-shaped
+  (`credentials`, `id_rsa*`, `*.key`, `.env`, `*secrets*`, …), so the store can't be used
+  to label or stash a credential.
+- **Not exposed over `venice mcp-serve`** (chat/code only), like the browser rails.
 
 #### External MCP tools (`--mcp`)
 
@@ -1089,6 +1129,8 @@ complete — a loud stderr warning is printed).
 | `run` | run a shell command (`/bin/sh -c`) at the root | yes |
 | `venice_image` / `venice_image_edit` / `venice_sfx` / `venice_music` / `venice_tts` / `venice_upscale` / `venice_bg_remove` / `venice_video` | generate/edit images, audio & video into the project — **opt-in with `--assets`** | yes |
 | `web_fetch` / `browser_capture` | fetch a URL (text/HTML) or headless-render a page (post-JS DOM + screenshot) to verify its own work — **opt-in with `--browser`** (see [Web & browser tools](#web--browser-tools---browser)) | no |
+| `memory_write` / `memory_read` / `memory_search` / `memory_list` | durable notes the agent recalls across turns/sessions (two tiers: project + global) — **opt-in with `--memory`** (see [Memory & tasks](#memory--tasks---memory)) | no |
+| `task_add` / `task_update` / `task_list` | a project-only checklist the agent tracks (`pending`/`in_progress`/`done`) — **opt-in with `--memory`** | no |
 
 **Safety.** Every filesystem path is resolved and confined to the project root
 (default: cwd, or `--root` / `$VENICE_CODE_ROOT`); a path that escapes the root, names

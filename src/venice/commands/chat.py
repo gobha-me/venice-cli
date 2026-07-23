@@ -231,6 +231,14 @@ def register(subparsers) -> None:
         help="Refuse URLs whose host or full URL matches these globs (repeatable, "
         "always enforced, wins over --browser-allow). Adds to config browser.deny.",
     )
+    ag.add_argument(
+        "--memory", action="store_true", dest="memory", default=None,
+        help="Add persistent memory + task tools (memory_write/read/search/list, "
+        "task_add/update/list) so the agent keeps durable notes and a checklist "
+        "across turns/sessions. Implies --tools. Project notes ride <cwd>/.venice/, "
+        "global notes ~/.config/venice/memory ($VENICE_MEMORY_DIR); see `venice "
+        "memory` to inspect them (#49).",
+    )
 
     # --- External MCP servers (#21) ---
     mc = p.add_argument_group("External MCP tools")
@@ -380,10 +388,11 @@ def _run(args) -> int:
         return 2
     _session.apply_to_args(args, session, "chat")
     userconfig.apply_defaults(args, "chat")
-    # --shell (#33) and --browser (#71) are tools, so they imply the agent loop -- flip
-    # --tools on so both the one-shot trigger below and the REPL's tools gate pick them up.
-    if (getattr(args, "shell", None) or getattr(args, "browser", None)) \
-            and not getattr(args, "tools", None):
+    # --shell (#33), --browser (#71) and --memory (#49) are tools, so they imply the
+    # agent loop -- flip --tools on so both the one-shot trigger below and the REPL's
+    # tools gate pick them up.
+    if (getattr(args, "shell", None) or getattr(args, "browser", None)
+            or getattr(args, "memory", None)) and not getattr(args, "tools", None):
         args.tools = True
     # A startup persona (--persona or defaults.chat.persona) seeds the same lever
     # both one-shot and REPL modes read -- args.system -- so it flows through
@@ -496,6 +505,7 @@ def _tools_for(args, client, models, model):
             browser_allow=browser_allow,
             browser_deny=browser_deny,
             browser_output_dir=str(args.output) if args.output else None,
+            memory=bool(getattr(args, "memory", None)),
         )
     except ValueError as e:
         print(f"chat: {e}", file=sys.stderr)

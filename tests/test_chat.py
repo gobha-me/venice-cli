@@ -56,10 +56,13 @@ def setUpModule():
     global _SESSIONS_TMP
     _SESSIONS_TMP = tempfile.mkdtemp()
     os.environ["VENICE_SESSIONS_DIR"] = _SESSIONS_TMP
+    # #49: also redirect the global memory tier (see test_repl for the rationale).
+    os.environ["VENICE_MEMORY_DIR"] = os.path.join(_SESSIONS_TMP, "memory")
 
 
 def tearDownModule():
     os.environ.pop("VENICE_SESSIONS_DIR", None)
+    os.environ.pop("VENICE_MEMORY_DIR", None)
     if _SESSIONS_TMP:
         __import__("shutil").rmtree(_SESSIONS_TMP, ignore_errors=True)
 
