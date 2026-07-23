@@ -297,6 +297,30 @@ def _gen_kwargs(args) -> dict:
     return kwargs
 
 
+def _system_for(args, root=None, tools=None) -> Optional[str]:
+    """chat's system prompt is just the user-supplied ``--system``/``--persona``
+    string (verbatim, no template). ``root``/``tools`` are ignored -- they are part
+    of the shared :class:`_agent.AgentProfile.build_system` contract that code's
+    root-aware prompt needs."""
+    return args.system
+
+
+#: The ``venice chat`` profile (#51): plain chat over the shared agent core -- no
+#: coding template, no plan/accept/verify, degrades to tool-less chat on a
+#: non-function-calling model, and lets the REPL derive tools from ``args``.
+PROFILE = _agent.AgentProfile(
+    name="chat",
+    label="venice chat",
+    build_gen_kwargs=_gen_kwargs,
+    build_system=_system_for,
+    default_max_tool_calls=8,
+    plan_mode=False,
+    degrade_to_chat=True,
+    system_reseed=False,
+    injects_tools_session=False,
+)
+
+
 def _build_kwargs(args, model: str, message: str) -> dict:
     messages = []
     if args.system:
@@ -345,16 +369,6 @@ def _print_usage(usage) -> None:
         print(f"usage: prompt={pt} completion={ct} total={tt}", file=sys.stderr)
 
 
-def _is_interactive(args, message) -> bool:
-    """REPL when explicitly requested (`-i` / `--resume`) or when there is no
-    message and stdin is an interactive terminal. A piped or `-` message is
-    always one-shot."""
-    if getattr(args, "interactive", False) or getattr(args, "resume", None) \
-            or getattr(args, "cont", None):
-        return True
-    return message is None and sys.stdin.isatty()
-
-
 def _run(args) -> int:
     # Resolve a resumed session (#47) BEFORE apply_defaults so restored settings
     # (model/temperature/max_tokens/max_tool_calls) outrank config defaults: both
@@ -382,7 +396,7 @@ def _run(args) -> int:
             print(f"chat: {e}", file=sys.stderr)
             return 2
     message = _resolve_message(args)
-    interactive = _is_interactive(args, message)
+    interactive = _agent.wants_interactive(args, message)
     if not interactive and not message:
         print("chat: no message (pass an argument or pipe stdin)", file=sys.stderr)
         return 2
@@ -435,20 +449,14 @@ def _tools_for(args, client, models, model):
     requested ``--tool`` subset is invalid. Prints the same capability notes the
     one-shot path always did.
     """
-    supported = _agent.supports_function_calling(models, model)
-    if supported is False:
-        print(
-            f"chat: model {model} does not support function calling; "
-            "running without tools",
-            file=sys.stderr,
-        )
-        return None, None
-    if supported is None:
-        print(
-            f"chat: could not verify function-calling support for {model}; "
-            "attempting tools",
-            file=sys.stderr,
-        )
+    ok, rc = _agent.check_function_calling(
+        models, model, label=PROFILE.name,
+        degraded_tail="running without tools",
+        unverified_tail="attempting tools",
+        degrade=PROFILE.degrade_to_chat,
+    )
+    if not ok:
+        return None, rc  # degrade_to_chat -> (None, None): caller falls through to plain chat
     doc = userconfig.load_config()  # #58 tool defaults + #33 shell policy
     shell_on = bool(getattr(args, "shell", None))
     shell_allow, shell_deny = (), ()
@@ -570,7 +578,8 @@ def _run_agent(args, oai, openai, client, models, model, kwargs) -> Optional[int
         try:
             return _agent.run_loop(
                 oai, model, messages, kwargs, tools,
-                max_tool_calls=(args.max_tool_calls if args.max_tool_calls is not None else 8),
+                max_tool_calls=(args.max_tool_calls if args.max_tool_calls is not None
+                                else PROFILE.default_max_tool_calls),
                 yes=bool(args.yes),
                 json_out=args.json,
                 budget=_compact.budget_from_args(args),  # #48 auto-compact parity
