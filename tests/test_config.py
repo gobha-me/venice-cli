@@ -495,6 +495,26 @@ class TestBrowserPolicy(_Base):
         self.assertEqual(uc.browser_policy(doc), {"allow": [], "deny": ["*.internal"]})
 
 
+class TestRootsPolicy(_Base):
+    """The top-level `roots` writable/read-only reader (#76), mirroring shell_policy."""
+
+    def test_missing_and_malformed_are_empty(self):
+        self.assertEqual(uc.roots_policy({}), {"allow": [], "deny": []})
+        self.assertEqual(uc.roots_policy({"roots": "nope"}), {"allow": [], "deny": []})
+
+    def test_reads_lists_and_coerces_scalar(self):
+        doc = {"roots": {"allow": ["/a", "/b"], "deny": "/a/vendor"}}
+        self.assertEqual(
+            uc.roots_policy(doc),
+            {"allow": ["/a", "/b"], "deny": ["/a/vendor"]},
+        )
+
+    def test_dotted_key_set_roundtrips(self):
+        doc = uc.load_config()
+        uc.set_value(doc, "roots.deny", ["*/vendor"])
+        self.assertEqual(uc.roots_policy(doc), {"allow": [], "deny": ["*/vendor"]})
+
+
 class TestConfigDefaultsFor(unittest.TestCase):
     """#58: the shared tool-path resolver -- allow-listed, coerced, signature-gated.
 

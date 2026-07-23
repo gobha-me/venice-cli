@@ -122,6 +122,42 @@ class TestCodeCommand(unittest.TestCase):
         with open(os.path.join(self.root, "hello.py")) as f:
             self.assertEqual(f.read(), "def hi():\n    return 1\n")
 
+    # --- #76: cross-repo write protection wired through code._run ---
+    def _sibling(self):
+        other = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(other, ignore_errors=True))
+        return other
+
+    def test_write_outside_root_blocked_without_allow_root(self):
+        other = self._sibling()
+        seq = [
+            FakeToolCompletion("plan"),
+            FakeToolCompletion(tool_calls=[
+                _write_call("c1", os.path.join(other, "x.txt"), "hi")]),
+            FakeToolCompletion("wrote it"),               # model's (wrong) final
+            FakeToolCompletion("ACCEPTANCE: PASS"),
+        ]
+        rc, _calls = self._run(
+            _code_args(task="write x", root=self.root, auto=True), seq)
+        self.assertEqual(rc, 0)
+        self.assertFalse(os.path.exists(os.path.join(other, "x.txt")))  # guard held
+
+    def test_allow_root_flag_enables_cross_repo_write(self):
+        other = self._sibling()
+        seq = [
+            FakeToolCompletion("plan"),
+            FakeToolCompletion(tool_calls=[
+                _write_call("c1", os.path.join(other, "x.txt"), "hi")]),
+            FakeToolCompletion("wrote it"),
+            FakeToolCompletion("ACCEPTANCE: PASS"),
+        ]
+        rc, _calls = self._run(
+            _code_args(task="write x", root=self.root, auto=True,
+                       allow_root=[other]), seq)
+        self.assertEqual(rc, 0)
+        with open(os.path.join(other, "x.txt")) as f:
+            self.assertEqual(f.read(), "hi")
+
     # --- --memory surfaces the memory/task rails and persists a note (#49) ---
     def test_memory_flag_writes_a_note(self):
         # `venice code` runs with cwd == root in practice; the memory project tier
