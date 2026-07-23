@@ -68,6 +68,73 @@ class Tool:
     tags: Tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class AgentProfile:
+    """The seeded values that make ``venice chat`` and ``venice code`` two faces of
+    one agent core (#51).
+
+    Both commands already share the engine (:func:`run_loop` + ``_repl.run``); they
+    differ only in the values seeded here. Formalizing that difference as a profile
+    de-dups the surfaces and gives the multi-agent epic (#52) a clean spawn contract:
+    a subagent is "run the core with profile ``P`` + task ``T``".
+
+    ``build_gen_kwargs``/``build_system`` are injected by the owning command module
+    (they reference command-local helpers), so this type stays import-clean —
+    ``_agent`` never imports ``chat``/``code``. The tool axis is deliberately *not* an
+    executable field here (see the ticket): chat's REPL must derive tools from
+    ``args`` while code injects a prebuilt session, and ``injects_tools_session``
+    records that policy without forcing either command to restructure. The executable
+    tool-builder belongs to #52's non-interactive ``spawn`` core.
+    """
+
+    name: str  # session command key: "chat" | "code"
+    label: str  # "venice chat" | "venice code"
+    build_gen_kwargs: Callable[..., dict]  # (args) -> per-turn gen kwargs
+    build_system: Callable[..., Optional[str]]  # (args, root, tools) -> system prompt
+    default_max_tool_calls: int  # 8 | 25
+    plan_mode: bool = False  # code's plan/accept/verify harness
+    degrade_to_chat: bool = True  # non-FC model: True=plain chat, False=exit 2
+    system_reseed: bool = False  # rebuild leading system message on resume
+    injects_tools_session: bool = False  # code injects a prebuilt tools_session; chat must not
+
+
+def wants_interactive(args, initial) -> bool:
+    """Whether a chat/code command should enter the REPL: explicitly requested
+    (``-i`` / ``--resume`` / ``--continue``), or no initial message/task and stdin is
+    an interactive terminal. A piped or ``-`` initial is always one-shot. Shared by
+    both commands so the two profiles decide interactivity identically (#51)."""
+    if getattr(args, "interactive", False) or getattr(args, "resume", None) \
+            or getattr(args, "cont", None):
+        return True
+    return initial is None and sys.stdin.isatty()
+
+
+def check_function_calling(models, model, *, label, degraded_tail, unverified_tail,
+                           degrade):
+    """Shared non-function-calling capability gate (#51).
+
+    Prints the same capability notes each command always printed. ``label`` is the
+    command name (``chat``/``code``), and the two ``*_tail`` strings carry the
+    per-profile wording. Returns ``(ok, rc)``: ``ok`` True means proceed with tools;
+    ``ok`` False means the caller should surface ``rc`` -- ``None`` when the profile
+    degrades to plain chat (``degrade=True``), else exit-code ``2``. An unverifiable
+    (``None``) result prints a soft note and proceeds."""
+    supported = supports_function_calling(models, model)
+    if supported is False:
+        print(
+            f"{label}: model {model} does not support function calling; {degraded_tail}",
+            file=sys.stderr,
+        )
+        return (False, None if degrade else 2)
+    if supported is None:
+        print(
+            f"{label}: could not verify function-calling support for {model}; "
+            f"{unverified_tail}",
+            file=sys.stderr,
+        )
+    return (True, None)
+
+
 def to_openai_tools(tools: List[Tool]) -> List[dict]:
     """Render tools as an OpenAI-compatible ``tools`` array for /chat/completions."""
     return [

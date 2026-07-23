@@ -297,6 +297,24 @@ def _autonomous(args) -> bool:
     return bool(args.auto or args.yes)
 
 
+#: The ``venice code`` profile (#51): the coding agent over the shared agent core --
+#: always-on fs/exec/vcs tools (injected as a prebuilt session), the root-aware
+#: coding system prompt (re-seeded on resume), a larger tool-call budget, the
+#: plan/accept/verify harness, and a hard error (not a degrade) on a
+#: non-function-calling model.
+PROFILE = _agent.AgentProfile(
+    name="code",
+    label="venice code",
+    build_gen_kwargs=_gen_kwargs,
+    build_system=_system_prompt,
+    default_max_tool_calls=_DEFAULT_MAX_TOOL_CALLS,
+    plan_mode=True,
+    degrade_to_chat=False,
+    system_reseed=True,
+    injects_tools_session=True,
+)
+
+
 def _no_tool_turn(oai, model, messages, gen_kwargs, oai_tools) -> str:
     """One completion with tools advertised but ``tool_choice="none"`` (no side
     effects) -- used for the plan turn and the acceptance-check turn."""
@@ -403,9 +421,7 @@ def _run(args) -> int:
         return 2
 
     task = _resolve_task(args)
-    interactive = bool(args.interactive or args.resume or getattr(args, "cont", None)) or (
-        task is None and sys.stdin.isatty()
-    )
+    interactive = _agent.wants_interactive(args, task)
     if not interactive and not task:
         print("code: no task (pass an argument or pipe stdin)", file=sys.stderr)
         return 2
@@ -426,20 +442,14 @@ def _run(args) -> int:
     if rc is not None:
         return rc
 
-    supported = _agent.supports_function_calling(models, model)
-    if supported is False:
-        print(
-            f"code: model {model} does not support function calling; venice code "
-            "needs a tool-calling model (pass --model).",
-            file=sys.stderr,
-        )
-        return 2
-    if supported is None:
-        print(
-            f"code: could not verify function-calling support for {model}; "
-            "attempting anyway",
-            file=sys.stderr,
-        )
+    ok, rc = _agent.check_function_calling(
+        models, model, label=PROFILE.name,
+        degraded_tail="venice code needs a tool-calling model (pass --model).",
+        unverified_tail="attempting anyway",
+        degrade=PROFILE.degrade_to_chat,
+    )
+    if not ok:
+        return rc  # degrade_to_chat is False for code -> rc == 2
 
     oai = _openai.build_openai(openai, client)
     doc = userconfig.load_config()  # #58 tool defaults + #33 shell policy
@@ -461,8 +471,8 @@ def _run(args) -> int:
         browser_allow=browser_allow,
         browser_deny=browser_deny,
     )
-    system = _system_prompt(args, root, tools)
-    gen_kwargs = _gen_kwargs(args)
+    system = PROFILE.build_system(args, root, tools)
+    gen_kwargs = PROFILE.build_gen_kwargs(args)
 
     if interactive:
         args.system = system
@@ -474,9 +484,9 @@ def _run(args) -> int:
         return _repl.run(
             args, oai, openai, client, models, model, initial=task,
             tools_session=_code_session(tools), gen_kwargs=gen_kwargs,
-            label="venice code", max_tool_calls=_DEFAULT_MAX_TOOL_CALLS,
+            label=PROFILE.label, max_tool_calls=PROFILE.default_max_tool_calls,
             session=session, ephemeral=bool(getattr(args, "ephemeral", None)),
-            root=root, system_reseed=True,
+            root=root, system_reseed=PROFILE.system_reseed,
         )
 
     return _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task,
@@ -557,7 +567,7 @@ def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task
     yes = mode == "auto"
     max_calls = (
         args.max_tool_calls if args.max_tool_calls is not None
-        else _DEFAULT_MAX_TOOL_CALLS
+        else PROFILE.default_max_tool_calls
     )
     final_text = None
     budget = _budget_for(args)
