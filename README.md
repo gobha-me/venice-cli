@@ -1189,7 +1189,9 @@ scout starts from a **fresh context**, gets **only read-only tools**
 (`read_file`/`list_dir`/`grep`/read-only `git`, plus `project_search` when a `.venice`
 index exists), investigates, and returns a single **structured report** — findings,
 confidence, dead-ends, what it did *not* check, and which claims it verified live vs.
-inferred. The caller sees only that report, not the dozens of tool calls behind it, so a
+inferred. Those sections are also parsed into a `fields` map on the returned report, so
+the planner can consume the handoff programmatically rather than re-reading prose. The
+caller sees only that report, not the dozens of tool calls behind it, so a
 big "where/how does X work?" question doesn't fill the main agent's context with
 exploration noise. This is a **context firewall**, not a role-specialized worker.
 

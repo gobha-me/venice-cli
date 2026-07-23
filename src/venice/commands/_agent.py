@@ -1704,6 +1704,19 @@ SCOUT_SYSTEM = (
     "files/output vs. inferred without checking.\n"
 )
 
+# The section headers SCOUT_SYSTEM mandates, in order. The single source of truth for
+# :func:`_parse_sections` -- keep in lockstep with the prompt text above. Match the exact
+# casing/punctuation the prompt uses (hyphen in ``DEAD-ENDS``/``VERIFIED-LIVE``, the space
+# in ``NOT CHECKED``, lowercase `` vs ``); parsing is case-insensitive but the returned keys
+# are these canonical strings.
+SCOUT_SECTIONS = (
+    "FINDINGS",
+    "CONFIDENCE",
+    "DEAD-ENDS",
+    "NOT CHECKED",
+    "VERIFIED-LIVE vs HYPOTHETICAL",
+)
+
 
 @contextlib.contextmanager
 def _capture_stdout():
@@ -1789,6 +1802,57 @@ def _run_disposable(
     }
 
 
+def _parse_sections(report: str, headers) -> Dict[str, str]:
+    """Best-effort split of a subagent report into ``{canonical_header: body}``.
+
+    The scout/spawn system prompts mandate fixed report sections (``SCOUT_SECTIONS`` /
+    ``SPAWN_SECTIONS``), but the headers are prompt-enforced only -- a model may decorate
+    them (``**OUTCOME:**``, ``### FINDINGS``) or drop one. This is a tolerant line scanner,
+    not a strict parser: a line begins a section when, after stripping leading markdown
+    noise, it equals a known header or starts with it followed by ``:`` or ``*`` (case-
+    insensitively); the body is the remainder of that line plus every line up to the next
+    header. It deliberately does NOT treat ``HEADER `` + prose as a header (no colon), so a
+    body sentence that merely opens with a section word can't spuriously start a section.
+
+    Returns only the sections actually found -- a missing section is simply absent
+    (consumers use ``.get(...)``) and a report with no recognizable headers yields ``{}``.
+    The caller always keeps the raw ``report`` string, so nothing is lost. First occurrence
+    of a header wins; a later stray repeat is folded into the current section rather than
+    clobbering the real one.
+    """
+    if not report:
+        return {}
+    # Longest header first so a header that is a prefix of another can't shadow it.
+    ordered = sorted(headers, key=len, reverse=True)
+    fields: Dict[str, str] = {}
+    current: Optional[str] = None
+    buf: List[str] = []
+
+    def _flush() -> None:
+        if current is not None and current not in fields:
+            fields[current] = "\n".join(buf).strip()
+
+    for line in report.splitlines():
+        stripped = line.strip().lstrip("#*->• \t").strip()
+        up = stripped.upper()
+        matched = None
+        rest = ""
+        for h in ordered:
+            hu = h.upper()
+            if up == hu or up.startswith(hu + ":") or up.startswith(hu + "*"):
+                matched = h
+                rest = stripped[len(h):].lstrip(" *:\t-—").rstrip()
+                break
+        if matched is not None:
+            _flush()
+            current = matched
+            buf = [rest] if rest else []
+        elif current is not None:
+            buf.append(line)
+    _flush()
+    return fields
+
+
 def run_scout(
     oai,
     model: str,
@@ -1815,10 +1879,13 @@ def run_scout(
             "scout subagent tools must be read-only (paid=False) and must not "
             f"include the scout itself; got: {bad}"
         )
-    return _run_disposable(
+    out = _run_disposable(
         oai, model, task, tools, base_kwargs, system=system,
         max_tool_calls=max_tool_calls, budget=budget, ledger=ledger, focus=focus,
     )
+    if out.get("status") == "ok":
+        out["fields"] = _parse_sections(out.get("report", ""), SCOUT_SECTIONS)
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -1861,6 +1928,15 @@ SPAWN_SYSTEM = (
     "test you couldn't get passing); 'none' if none.\n"
 )
 
+# The section headers SPAWN_SYSTEM mandates, in order (see SCOUT_SECTIONS note).
+SPAWN_SECTIONS = (
+    "OUTCOME",
+    "CHANGES",
+    "VERIFIED",
+    "FOLLOW-UPS",
+    "BLOCKERS",
+)
+
 
 def run_spawn(
     oai,
@@ -1892,7 +1968,10 @@ def run_spawn(
         )
     if role:
         system = f"{system}\nYour role: {role}.\n"
-    return _run_disposable(
+    out = _run_disposable(
         oai, model, task, tools, base_kwargs, system=system,
         max_tool_calls=max_tool_calls, budget=budget, ledger=ledger, focus=focus,
     )
+    if out.get("status") == "ok":
+        out["fields"] = _parse_sections(out.get("report", ""), SPAWN_SECTIONS)
+    return out

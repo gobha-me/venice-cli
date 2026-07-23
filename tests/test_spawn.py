@@ -108,6 +108,90 @@ class _ScoutBase(unittest.TestCase):
             fh.write("def f():\n    return 1\n")
 
 
+class TestParseSections(unittest.TestCase):
+    """Field-parsed handoff provenance (#52): `_agent._parse_sections` turns a mandated
+    report into `{canonical_header: body}` -- tolerant of markdown, order, and drift, and
+    lossless (the raw `report` is always kept by the caller)."""
+
+    def test_scout_report_parses_all_sections(self):
+        f = _agent._parse_sections(_REPORT, _agent.SCOUT_SECTIONS)
+        self.assertEqual(set(f), set(_agent.SCOUT_SECTIONS))
+        self.assertEqual(f["FINDINGS"], "read_file is defined in _code.py.")
+        self.assertEqual(f["CONFIDENCE"], "high -- read the source.")
+        self.assertEqual(f["DEAD-ENDS"], "none.")
+        self.assertEqual(f["NOT CHECKED"], "the tests.")
+        self.assertEqual(f["VERIFIED-LIVE vs HYPOTHETICAL"], "live (read the file).")
+
+    def test_spawn_report_parses_all_sections(self):
+        f = _agent._parse_sections(_WREPORT, _agent.SPAWN_SECTIONS)
+        self.assertEqual(set(f), set(_agent.SPAWN_SECTIONS))
+        self.assertEqual(f["OUTCOME"], "done -- created new.py.")
+        self.assertEqual(f["CHANGES"], "wrote new.py; ran no commands.")
+        self.assertEqual(f["BLOCKERS"], "none.")
+
+    def test_markdown_decorated_and_heading_headers(self):
+        report = (
+            "## Report\n"
+            "**OUTCOME:** done\n"
+            "### CHANGES\n"
+            "- a.py\n"
+            "- b.py\n"
+            "**VERIFIED**: ran the test\n"
+            "FOLLOW-UPS: none\n"
+            "BLOCKERS: none\n"
+        )
+        f = _agent._parse_sections(report, _agent.SPAWN_SECTIONS)
+        self.assertEqual(f["OUTCOME"], "done")
+        self.assertEqual(f["CHANGES"], "- a.py\n- b.py")  # multi-line body captured
+        self.assertEqual(f["VERIFIED"], "ran the test")
+        self.assertEqual(f["FOLLOW-UPS"], "none")
+        self.assertEqual(f["BLOCKERS"], "none")
+
+    def test_lowercase_headers_normalize_to_canonical_keys(self):
+        # Model drifts on casing; keys are still the canonical section strings.
+        report = "findings: it is here\nconfidence: high"
+        f = _agent._parse_sections(report, _agent.SCOUT_SECTIONS)
+        self.assertEqual(f["FINDINGS"], "it is here")
+        self.assertEqual(f["CONFIDENCE"], "high")
+
+    def test_missing_section_is_absent_not_empty(self):
+        report = "OUTCOME: done\nBLOCKERS: none"
+        f = _agent._parse_sections(report, _agent.SPAWN_SECTIONS)
+        self.assertEqual(set(f), {"OUTCOME", "BLOCKERS"})
+        self.assertNotIn("CHANGES", f)
+
+    def test_out_of_order_sections_still_parse(self):
+        report = "BLOCKERS: none\nOUTCOME: done\nCHANGES: edited x.py"
+        f = _agent._parse_sections(report, _agent.SPAWN_SECTIONS)
+        self.assertEqual(f["OUTCOME"], "done")
+        self.assertEqual(f["CHANGES"], "edited x.py")
+        self.assertEqual(f["BLOCKERS"], "none")
+
+    def test_body_word_does_not_spuriously_start_a_section(self):
+        # A body sentence that merely opens with a section word (no colon) stays body.
+        report = ("OUTCOME: done\n"
+                  "CHANGES made were small and verified locally\n"
+                  "BLOCKERS: none")
+        f = _agent._parse_sections(report, _agent.SPAWN_SECTIONS)
+        self.assertEqual(f["OUTCOME"],
+                         "done\nCHANGES made were small and verified locally")
+        self.assertNotIn("CHANGES", f)
+        self.assertEqual(f["BLOCKERS"], "none")
+
+    def test_duplicate_header_first_wins(self):
+        report = "OUTCOME: first\nBLOCKERS: none\nOUTCOME: second"
+        f = _agent._parse_sections(report, _agent.SPAWN_SECTIONS)
+        self.assertEqual(f["OUTCOME"], "first")
+
+    def test_no_recognizable_headers_yields_empty(self):
+        self.assertEqual(
+            _agent._parse_sections("just prose, no sections here", _agent.SPAWN_SECTIONS),
+            {})
+
+    def test_empty_report_yields_empty(self):
+        self.assertEqual(_agent._parse_sections("", _agent.SCOUT_SECTIONS), {})
+
+
 class TestRunScout(_ScoutBase):
     def test_returns_structured_report_and_firewalls_stdout(self):
         seq = [
@@ -131,6 +215,12 @@ class TestRunScout(_ScoutBase):
         self.assertFalse(out["truncated"])
         # Firewall: the nested report never reaches the caller's stdout.
         self.assertEqual(outer.getvalue(), "")
+        # Field-parsed handoff provenance: the mandated sections are broken out for
+        # the planner while the raw `report` string is preserved untouched.
+        self.assertEqual(set(out["fields"]), set(_agent.SCOUT_SECTIONS))
+        self.assertEqual(out["fields"]["FINDINGS"], "read_file is defined in _code.py.")
+        self.assertEqual(out["fields"]["VERIFIED-LIVE vs HYPOTHETICAL"],
+                         "live (read the file).")
 
     def test_fresh_context_only_task_and_system(self):
         # The subagent must start from a clean slate -- system + user(task) only.
@@ -158,6 +248,7 @@ class TestRunScout(_ScoutBase):
                                {}, max_tool_calls=4)
         self.assertEqual(out["status"], "error")
         self.assertEqual(calls, [])  # never called the model
+        self.assertNotIn("fields", out)  # no report -> no parsed sections
 
     def test_budget_cap_forces_final_and_marks_truncated(self):
         # One turn asks for TWO tool calls but the cap is 1: the first runs, the
@@ -174,6 +265,8 @@ class TestRunScout(_ScoutBase):
         self.assertEqual(out["report"], "partial report")
         self.assertEqual(out["tool_calls"], 1)
         self.assertEqual(calls[-1]["tool_choice"], "none")  # _force_final fired
+        # A headerless (truncated) report parses to no sections, but is preserved raw.
+        self.assertEqual(out["fields"], {})
 
     def test_recursion_guard_rejects_paid_or_scout_tools(self):
         schema = {"type": "object", "properties": {}}
@@ -338,6 +431,10 @@ class TestRunSpawn(_ScoutBase):
         self.assertEqual(outer.getvalue(), "")  # firewall
         # A worker is a *doer*: the paid write actually happened (yes=True).
         self.assertTrue(os.path.exists(os.path.join(self.root, "new.py")))
+        # Field-parsed handoff provenance: worker sections broken out for the planner.
+        self.assertEqual(set(out["fields"]), set(_agent.SPAWN_SECTIONS))
+        self.assertEqual(out["fields"]["OUTCOME"], "done -- created new.py.")
+        self.assertEqual(out["fields"]["CHANGES"], "wrote new.py; ran no commands.")
 
     def test_guard_allows_paid_but_rejects_self_spawn(self):
         schema = {"type": "object", "properties": {}}
