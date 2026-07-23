@@ -27,10 +27,13 @@ def setUpModule():
     global _SESSIONS_TMP
     _SESSIONS_TMP = tempfile.mkdtemp()
     os.environ["VENICE_SESSIONS_DIR"] = _SESSIONS_TMP
+    # #49: also redirect the global memory tier (see test_repl for the rationale).
+    os.environ["VENICE_MEMORY_DIR"] = os.path.join(_SESSIONS_TMP, "memory")
 
 
 def tearDownModule():
     os.environ.pop("VENICE_SESSIONS_DIR", None)
+    os.environ.pop("VENICE_MEMORY_DIR", None)
     if _SESSIONS_TMP:
         __import__("shutil").rmtree(_SESSIONS_TMP, ignore_errors=True)
 
@@ -51,6 +54,11 @@ def _code_args(**ov):
 def _write_call(cid, path, content):
     return _FnCall(cid, "write_file",
                    json.dumps({"path": path, "content": content}))
+
+
+def _mem_call(cid, name, content, scope="project"):
+    return _FnCall(cid, "memory_write",
+                   json.dumps({"name": name, "content": content, "scope": scope}))
 
 
 class TestCodeCommand(unittest.TestCase):
@@ -113,6 +121,49 @@ class TestCodeCommand(unittest.TestCase):
         # auto -> confirm=True -> the write actually happened
         with open(os.path.join(self.root, "hello.py")) as f:
             self.assertEqual(f.read(), "def hi():\n    return 1\n")
+
+    # --- --memory surfaces the memory/task rails and persists a note (#49) ---
+    def test_memory_flag_writes_a_note(self):
+        # `venice code` runs with cwd == root in practice; the memory project tier
+        # discovers from cwd, so chdir into root for the run (and to keep the test's
+        # .venice/ out of the repo).
+        seq = [
+            FakeToolCompletion("plan: remember the convention"),
+            FakeToolCompletion(tool_calls=[
+                _mem_call("c1", "conv", "use tabs", "project")]),
+            FakeToolCompletion("done -- remembered"),
+            FakeToolCompletion("- works: MET\nACCEPTANCE: PASS"),
+        ]
+        cwd = os.getcwd()
+        os.chdir(self.root)
+        try:
+            rc, calls = self._run(
+                _code_args(task="remember", root=self.root, auto=True, memory=True), seq)
+        finally:
+            os.chdir(cwd)
+        self.assertEqual(rc, 0)
+        store = os.path.join(self.root, ".venice", "memory", "memory.json")
+        self.assertTrue(os.path.exists(store))
+        with open(store) as f:
+            self.assertEqual(json.load(f)["entries"]["conv"]["content"], "use tabs")
+
+    def test_no_memory_flag_omits_the_tools(self):
+        # Without --memory the model calling memory_write is an unknown tool -> the
+        # loop returns a tool error, but no store is created.
+        seq = [
+            FakeToolCompletion("plan"),
+            FakeToolCompletion(tool_calls=[_mem_call("c1", "x", "y")]),
+            FakeToolCompletion("done"),
+            FakeToolCompletion("ACCEPTANCE: PASS"),
+        ]
+        cwd = os.getcwd()
+        os.chdir(self.root)
+        try:
+            rc, calls = self._run(
+                _code_args(task="x", root=self.root, auto=True), seq)
+        finally:
+            os.chdir(cwd)
+        self.assertFalse(os.path.exists(os.path.join(self.root, ".venice", "memory")))
 
     # --- auto-compact (#48) ---
     def test_auto_compact_compacts_during_execute(self):

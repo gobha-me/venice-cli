@@ -54,6 +54,21 @@ ENV_INDEX_DIR = "VENICE_INDEX_DIR"
 # project root; $VENICE_CODE_ROOT overrides the default (the current directory).
 ENV_CODE_ROOT = "VENICE_CODE_ROOT"
 
+# Persistent agent memory + task list (#49): the chat/code agent's own durable
+# notes and checklist, so multi-step and cross-session work (and the #52 planner
+# handing state to subagents) survives beyond one transcript. TWO TIERS:
+#   - GLOBAL memory (knowledge that travels with the agent) lives user-global at
+#     <MEMORY_DIR>/memory.json; $VENICE_MEMORY_DIR overrides (mirrors the sessions
+#     pair), resolved at runtime so this module stays side-effect-free.
+#   - PROJECT memory + the task list ride the repo at <project>/.venice/memory/
+#     (discovered like the .venice index), so subagents in the same tree share them.
+# Both files are name-keyed JSON maps written 0600 (mirrors the store hygiene above).
+MEMORY_DIR = CONFIG_DIR / "memory"
+ENV_MEMORY_DIR = "VENICE_MEMORY_DIR"
+MEMORY_SUBDIR = "memory"  # under INDEX_DIRNAME (.venice) for the project tier
+MEMORY_FILENAME = "memory.json"
+TASKS_FILENAME = "tasks.json"
+
 SFX_POLL_INTERVAL_SEC = 2.0
 SFX_POLL_MAX_WAIT_SEC = 300
 

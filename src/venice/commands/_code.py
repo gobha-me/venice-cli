@@ -533,6 +533,7 @@ def code_tools(
     browser: bool = False,
     browser_allow=(),
     browser_deny=(),
+    memory: bool = False,
 ) -> List[_agent.Tool]:
     """Build the coding tools bound to a realpath-resolved project `root`.
 
@@ -548,6 +549,10 @@ def code_tools(
 
     `browser` (#71) appends the `web_fetch`/`browser_capture` rails, scoped by the
     `browser_allow`/`browser_deny` URL policy (see `_agent.browser_tools`).
+
+    `memory` (#49) appends the persistent memory + task rails (`_agent.memory_tools`):
+    free, local notes (two tiers) + a project task list the agent maintains across
+    turns/sessions -- the shared state a #52 planner hands to subagents.
 
     When `assets` and a `client` are supplied, the in-process asset-generation tools
     (`venice_image`/`venice_image_edit`/`venice_sfx`/`venice_music`/`venice_tts`/
@@ -682,6 +687,11 @@ def code_tools(
             output_dir=os.environ.get("VENICE_MCP_OUTPUT_DIR") or root,
             config=config,
         ))
+
+    if memory:
+        # persistent memory + task rails (#49): free, local, no client needed. Project
+        # notes/tasks ride root's .venice/ (cwd == root for `venice code`).
+        tools.extend(_agent.memory_tools())
     return tools
 
 

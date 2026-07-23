@@ -219,6 +219,14 @@ def register(subparsers) -> None:
         "always enforced, wins over --browser-allow). Adds to config browser.deny.",
     )
     grp.add_argument(
+        "--memory", action="store_true", dest="memory", default=None,
+        help="Add persistent memory + task tools (memory_write/read/search/list, "
+        "task_add/update/list) so the agent keeps durable notes and a checklist "
+        "across turns/sessions -- the shared state a #52 planner hands to subagents. "
+        "Project notes ride <root>/.venice/memory; global notes "
+        "~/.config/venice/memory ($VENICE_MEMORY_DIR). Inspect with `venice memory` (#49).",
+    )
+    grp.add_argument(
         "--auto-compact", action="store_true", default=None, dest="auto_compact",
         help="Summarize older history once it crosses the token budget, so long "
         "runs stay within the context window (#48; costs a summarization call).",
@@ -470,6 +478,7 @@ def _run(args) -> int:
         browser=bool(getattr(args, "browser", None)),  # #71
         browser_allow=browser_allow,
         browser_deny=browser_deny,
+        memory=bool(getattr(args, "memory", None)),  # #49
     )
     system = PROFILE.build_system(args, root, tools)
     gen_kwargs = PROFILE.build_gen_kwargs(args)
