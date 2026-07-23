@@ -311,6 +311,7 @@ _COMMAND_MAP = {
         "auto": ("auto", _as_bool),
         "assets": ("assets", _as_bool),
         "scout": ("scout", _as_bool),  # #52: opt-in read-only scout subagent
+        "spawn": ("spawn", _as_bool),  # #52 slice 2: opt-in write-capable worker subagent
         "max_tool_calls": ("max_tool_calls", int),
         "exec_timeout": ("exec_timeout", int),
         "auto_compact": ("auto_compact", _as_bool),
