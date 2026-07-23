@@ -32,7 +32,6 @@ engine is stdlib-only + mcp-free. Reuses `_openai`/`_models`/`_agent` and, for t
 from __future__ import annotations
 
 import contextlib
-import io
 import json
 import os
 import re
@@ -227,6 +226,14 @@ def register(subparsers) -> None:
         "~/.config/venice/memory ($VENICE_MEMORY_DIR). Inspect with `venice memory` (#49).",
     )
     grp.add_argument(
+        "--scout", action="store_true", default=None, dest="scout",
+        help="Expose venice_scout: delegate a read-only investigation to a "
+        "disposable subagent with a FRESH context and only read tools. It returns a "
+        "structured report (findings/confidence/dead-ends/not-checked/verified) so "
+        "heavy exploration doesn't pollute this session -- a context firewall, not a "
+        "role-specialized worker. Read-only: the scout can't edit or run (#52).",
+    )
+    grp.add_argument(
         "--auto-compact", action="store_true", default=None, dest="auto_compact",
         help="Summarize older history once it crosses the token budget, so long "
         "runs stay within the context window (#48; costs a summarization call).",
@@ -335,15 +342,10 @@ def _no_tool_turn(oai, model, messages, gen_kwargs, oai_tools) -> str:
     return ""
 
 
-@contextlib.contextmanager
-def _capture_stdout():
-    old = sys.stdout
-    buf = io.StringIO()
-    sys.stdout = buf
-    try:
-        yield buf
-    finally:
-        sys.stdout = old
+# Promoted to `_agent` (#52): the scout subagent firewalls its stdout the same way,
+# and `_agent` must not import `code`. Kept here as an alias so `_run_oneshot`'s
+# `--json` capture (and any other callers) keep working unchanged.
+_capture_stdout = _agent._capture_stdout
 
 
 @contextlib.contextmanager
@@ -480,8 +482,15 @@ def _run(args) -> int:
         browser_deny=browser_deny,
         memory=bool(getattr(args, "memory", None)),  # #49
     )
-    system = PROFILE.build_system(args, root, tools)
+    # gen_kwargs is built BEFORE the scout tool (its nested loop needs these per-turn
+    # kwargs) and BEFORE build_system (so the coding prompt's tool list can advertise
+    # venice_scout). `_gen_kwargs` reads only args.temperature/max_tokens -- no
+    # dependency on `tools`, so the reorder is safe.
     gen_kwargs = PROFILE.build_gen_kwargs(args)
+    if bool(getattr(args, "scout", None)):  # #52: opt-in read-only scout subagent
+        tools.append(_code.scout_tool(oai, model, root, client, gen_kwargs,
+                                      include_search=True))
+    system = PROFILE.build_system(args, root, tools)
 
     if interactive:
         args.system = system

@@ -1131,6 +1131,7 @@ complete — a loud stderr warning is printed).
 | `web_fetch` / `browser_capture` | fetch a URL (text/HTML) or headless-render a page (post-JS DOM + screenshot) to verify its own work — **opt-in with `--browser`** (see [Web & browser tools](#web--browser-tools---browser)) | no |
 | `memory_write` / `memory_read` / `memory_search` / `memory_list` | durable notes the agent recalls across turns/sessions (two tiers: project + global) — **opt-in with `--memory`** (see [Memory & tasks](#memory--tasks---memory)) | no |
 | `task_add` / `task_update` / `task_list` | a project-only checklist the agent tracks (`pending`/`in_progress`/`done`) — **opt-in with `--memory`** | no |
+| `venice_scout` | delegate a read-only investigation to a disposable subagent with a fresh context; returns a structured report so exploration doesn't pollute the main context — **opt-in with `--scout`** (see [Scout subagent](#scout-subagent---scout)) | no |
 
 **Safety.** Every filesystem path is resolved and confined to the project root
 (default: cwd, or `--root` / `$VENICE_CODE_ROOT`); a path that escapes the root, names
@@ -1159,6 +1160,7 @@ it unrestricted (unchanged behavior).
 | `--shell-allow CMD` / `--shell-deny PATTERN` | scope the `run` tool with the shared allow/deny policy (repeatable; adds to config `shell.*`) |
 | `--browser` / `--browser-allow HOST` / `--browser-deny PATTERN` | expose `web_fetch` + `browser_capture` so the agent can verify a rendered page; scope hosts with the `browser.*` allow/deny policy (see [Web & browser tools](#web--browser-tools---browser)) |
 | `--assets` | also expose the in-process asset-generation tools (image / image-edit / sfx / music / tts / upscale / bg-remove / video) so the agent can create images, audio & video in the project; paid — each confirms per call unless `--auto` |
+| `--scout` | expose `venice_scout`: delegate a read-only investigation to a disposable subagent with a fresh context; keeps exploration out of the main context (see [Scout subagent](#scout-subagent---scout)) |
 | `--auto-compact` | summarize older history once the prompt crosses `--compact-threshold` tokens (default 100 000), keeping the last `--compact-keep-turns` turns (default 10); long runs stay in-context |
 | `-i`, `--json`, `--model`, `--system` | interactive REPL · JSON envelope · model · extra system instructions |
 | `--persona NAME` | load `~/.config/venice/personas/NAME.md` as the system prompt at launch (`/persona` in the REPL) |
@@ -1170,7 +1172,29 @@ the project root, and paid calls are capped per call by `$VENICE_MCP_MAX_SPEND` 
 model and a sane `--max-tool-calls` when running unattended.
 
 Per-flag config defaults live under `defaults.code.*` (e.g. `model`, `root`, `auto`,
-`assets`, `max_tool_calls`).
+`assets`, `scout`, `max_tool_calls`).
+
+#### Scout subagent (`--scout`)
+
+`--scout` adds one tool, `venice_scout`, so the coding agent can **delegate an
+investigation to a disposable subagent instead of exploring in its own context**. The
+scout starts from a **fresh context**, gets **only read-only tools**
+(`read_file`/`list_dir`/`grep`/read-only `git`, plus `project_search` when a `.venice`
+index exists), investigates, and returns a single **structured report** — findings,
+confidence, dead-ends, what it did *not* check, and which claims it verified live vs.
+inferred. The caller sees only that report, not the dozens of tool calls behind it, so a
+big "where/how does X work?" question doesn't fill the main agent's context with
+exploration noise. This is a **context firewall**, not a role-specialized worker.
+
+A scout **cannot edit files or run commands** (read-only by construction — it can never
+be handed a write/exec tool, nor spawn another scout), and each run is bounded by a
+tool-call budget (`max_tool_calls` in the call, default 6, hard max 15) so it can't run
+away. Use it before an edit to scope the change:
+
+```bash
+venice code --scout --auto "Add rate-limiting to the API client. First scout how the \
+existing client is structured and where requests are made, then implement it."
+```
 
 ## MCP server
 
