@@ -311,6 +311,17 @@ def register(subparsers) -> None:
         "spawn_max_spend (#52).",
     )
     grp.add_argument(
+        "--subagent-max-tokens", type=int, default=None, dest="subagent_max_tokens",
+        metavar="N",
+        help="Per-subagent cap on the cumulative prompt+completion tokens a venice_scout "
+        "OR venice_spawn subagent spends across its turns (default off/uncapped; <= 0 "
+        "disables). Once crossed the subagent is asked for a final answer and wraps up; "
+        "its report carries the token count. This is a cumulative-usage ceiling, NOT a "
+        "context-window size limit (re-sent history makes prompt tokens grow super-"
+        "linearly), and is distinct from --max-tokens (per-turn output). Config: "
+        "defaults.code.subagent_max_tokens (#52).",
+    )
+    grp.add_argument(
         "--planner", action="store_true", default=None, dest="planner",
         help="Planner harness: implies --scout --spawn --memory, mandates the "
         "decompose -> task_add -> dispatch -> task_update -> merge protocol in the "
@@ -624,9 +635,13 @@ def _run(args) -> int:
             oai, model, models=models,
             search_model=getattr(args, "web_search_model", None),
         )
+    # #52: per-subagent cumulative-token ceiling (None = uncapped); applies to BOTH the
+    # read-only scout and the write/paid worker -- token burn is universal to both.
+    subagent_max_tokens = getattr(args, "subagent_max_tokens", None)
     if bool(getattr(args, "scout", None)):  # #52: opt-in read-only scout subagent
         tools.append(_code.scout_tool(oai, model, root, client, gen_kwargs,
                                       include_search=True, web_tool=ws_tool,
+                                      max_tokens=subagent_max_tokens,
                                       dispatches=dispatches))
     if bool(getattr(args, "spawn", None)):  # #52 slice 2: write-capable worker subagent
         # Passes the live `tools` list: the worker draws a role-scoped subset of these
@@ -634,6 +649,7 @@ def _run(args) -> int:
         # `spawn_max_spend` caps an 'asset' worker's cumulative media USD (#52 spend slice).
         tools.append(_code.spawn_tool(oai, model, gen_kwargs, tools,
                                       max_spend=getattr(args, "spawn_max_spend", None),
+                                      max_tokens=subagent_max_tokens,
                                       dispatches=dispatches))
     if ws_tool is not None:  # #77: parent (planner included) gets web discovery directly
         tools.append(ws_tool)

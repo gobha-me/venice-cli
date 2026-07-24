@@ -1039,6 +1039,7 @@ def scout_tool(oai, model, root: str, client, base_kwargs, *,
                web_tool: Optional[_agent.Tool] = None,
                default_max_tool_calls: int = _SCOUT_MAX_TOOL_CALLS,
                hard_cap: int = _SCOUT_HARD_CAP,
+               max_tokens: Optional[int] = None,
                dispatches: Optional[list] = None) -> _agent.Tool:
     """Build the `venice_scout` Tool: delegate a read-only investigation to a
     disposable subagent (context firewall, #52).
@@ -1060,6 +1061,13 @@ def scout_tool(oai, model, root: str, client, base_kwargs, *,
     `dispatches`, when given (the `--planner` harness, #52), is the session's shared
     dispatch record list: every launched scout -- including one that errored -- is
     appended for the `venice_merge` rollup. `None` (the default) records nothing.
+
+    Per-subagent token cap: `max_tokens` (`--subagent-max-tokens`, None = uncapped) bounds
+    the scout's cumulative prompt+completion tokens. A fresh per-invoke `CostLedger` (built
+    for every call, so `tokens` is always reported) meters the nested loop; `run_loop`'s
+    token gate forces a final answer once the ceiling is crossed. The ledger is unpriced
+    (token counting needs no catalog) and per-invoke, so it stays thread-safe under
+    `--parallel`. The report carries `tokens`/`token_cap` for handoff provenance.
     """
     root = os.path.realpath(root)
 
@@ -1076,13 +1084,19 @@ def scout_tool(oai, model, root: str, client, base_kwargs, *,
         inner = read_only_tools(root, client, include_search=include_search)
         if web_tool is not None:
             inner.append(web_tool)  # #77 "docs scout": read-only + web discovery
+        led = _agent.CostLedger(max_tokens=max_tokens)  # per-invoke -> --parallel-safe
         try:
             out = _agent.run_scout(
                 oai, model, task, inner, base_kwargs,
-                max_tool_calls=n, focus=focus,
+                max_tool_calls=n, focus=focus, ledger=led,
             )
         except Exception as e:  # incl. openai.OpenAIError from the nested loop
             out = _err(f"scout failed: {e}")
+        # Report token usage on every path -- a scout that spent tokens then crashed still
+        # owes the parent its provenance (mirrors spawn's spent_usd).
+        if isinstance(out, dict):
+            out["tokens"] = led.prompt_tokens + led.completion_tokens
+            out["token_cap"] = led.max_tokens
         if tid:
             out["task_id"] = tid  # echo: link the report to its checklist task
         if dispatches is not None:
@@ -1188,6 +1202,7 @@ def spawn_tool(oai, model, base_kwargs, parent_tools, *,
                default_max_tool_calls: int = _SPAWN_MAX_TOOL_CALLS,
                hard_cap: int = _SPAWN_HARD_CAP,
                max_spend: Optional[float] = None,
+               max_tokens: Optional[int] = None,
                dispatches: Optional[list] = None) -> _agent.Tool:
     """Build the `venice_spawn` Tool: delegate a bounded task to a disposable, write/
     paid-capable WORKER subagent (#52 slice 2).
@@ -1223,6 +1238,13 @@ def spawn_tool(oai, model, base_kwargs, parent_tools, *,
     dispatch record list: every launched worker -- including one that errored, which
     still owes its provenance -- is appended for the `venice_merge` rollup. `None`
     (the default) records nothing.
+
+    Per-subagent token cap: `max_tokens` (`--subagent-max-tokens`, None = uncapped) bounds
+    the worker's cumulative prompt+completion tokens over its turns -- orthogonal to the USD
+    media cap (that meters paid-tool spend; this meters the model turns). Enforced via a
+    fresh per-invoke `CostLedger` and `run_loop`'s token gate; the report carries
+    `tokens`/`token_cap`. `tokens` can slightly exceed the cap (the crossing turn completes,
+    like `spent_usd` vs the media cap).
     """
     def invoke(arguments, *, confirm: bool = False):
         args = _clean(arguments)
@@ -1270,10 +1292,16 @@ def spawn_tool(oai, model, base_kwargs, parent_tools, *,
         if cap is not None:
             granted = [_meter(t, cap, spent) if t.paid else t for t in granted]
 
+        # Per-subagent token cap: a fresh per-invoke ledger meters the worker's own LLM
+        # turns (prompt+completion). Distinct from the USD media meter above (that gates
+        # paid *tool calls*; this gates the *next model turn*). Built always so `tokens` is
+        # reported even uncapped; per-invoke so it's --parallel-safe; unpriced (token
+        # counting needs no catalog).
+        led = _agent.CostLedger(max_tokens=max_tokens)
         try:
             out = _agent.run_spawn(
                 oai, model, task, granted, base_kwargs,
-                max_tool_calls=n, focus=focus, role=role,
+                max_tool_calls=n, focus=focus, role=role, ledger=led,
             )
         except Exception as e:  # incl. openai.OpenAIError from the nested loop
             out = _err(f"spawn failed: {e}")
@@ -1282,6 +1310,9 @@ def spawn_tool(oai, model, base_kwargs, parent_tools, *,
         if cap is not None and isinstance(out, dict):
             out["spent_usd"] = round(spent[0], 4)      # handoff provenance
             out["spend_cap_usd"] = cap
+        if isinstance(out, dict):
+            out["tokens"] = led.prompt_tokens + led.completion_tokens
+            out["token_cap"] = led.max_tokens
         if tid:
             out["task_id"] = tid  # echo: link the report to its checklist task
         if dispatches is not None:
@@ -1351,6 +1382,8 @@ def _record_dispatch(dispatches: list, kind: str, *, task: str,
             "tool_calls": out.get("tool_calls"),
             "truncated": out.get("truncated"),
             "spent_usd": out.get("spent_usd"),
+            "tokens": out.get("tokens"),               # cumulative LLM tokens (both kinds)
+            "token_cap": out.get("token_cap"),         # None when uncapped
         })
 
 
@@ -1373,6 +1406,7 @@ def merge_summary(dispatches: List[dict]) -> dict:
         warnings.append("no dispatches recorded (nothing was delegated this session)")
 
     spent = 0.0
+    tok = 0
     errors = 0
     known = {str(t.get("id")) for t in tasks}
     dispatched = {str(d.get("task_id")) for d in dispatches if d.get("task_id")}
@@ -1389,6 +1423,13 @@ def merge_summary(dispatches: List[dict]) -> dict:
         c = d.get("spent_usd")
         if isinstance(c, (int, float)) and not isinstance(c, bool):
             spent += float(c)
+        n = d.get("tokens")
+        if isinstance(n, int) and not isinstance(n, bool):
+            tok += n
+        tcap = d.get("token_cap")
+        if isinstance(tcap, int) and not isinstance(tcap, bool) and tcap > 0 \
+                and isinstance(n, int) and not isinstance(n, bool) and n >= tcap:
+            warnings.append(f"{tag} hit its token cap; its report may be incomplete")
     for t in tasks:
         status = t.get("status")
         if status == "done":
@@ -1405,6 +1446,7 @@ def merge_summary(dispatches: List[dict]) -> dict:
             "scouts": sum(1 for d in dispatches if d.get("kind") == "scout"),
             "errors": errors,
             "spent_usd": round(spent, 4),
+            "tokens": tok,
         },
         "tasks": tasks,
         "warnings": warnings,
