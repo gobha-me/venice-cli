@@ -1907,6 +1907,12 @@ def run_scout(
 # --------------------------------------------------------------------------- #
 SPAWN_TOOL_NAME = "venice_spawn"
 
+#: The planner-harness merge tool (#52 planner slice). Named here beside the other
+#: subagent tool names so :func:`run_spawn`'s recursion guard can reject it without
+#: importing ``_code`` (which owns the executable Tool, built over the session's
+#: dispatch record list). A worker must never merge -- merging is the planner's job.
+MERGE_TOOL_NAME = "venice_merge"
+
 SPAWN_SYSTEM = (
     "You are a WORKER subagent: a disposable, role-scoped agent spun up to carry out "
     "ONE task for a coding agent (the planner), then discarded. You start from a fresh "
@@ -1960,11 +1966,14 @@ def run_spawn(
     level (the planner scouts/spawns; a worker does neither). A worker's containment is
     structural, not a confirm gate -- see the module note above and ``_code.spawn_tool``.
     """
-    bad = [t.name for t in tools if t.name in (SPAWN_TOOL_NAME, SCOUT_TOOL_NAME)]
+    bad = [
+        t.name for t in tools
+        if t.name in (SPAWN_TOOL_NAME, SCOUT_TOOL_NAME, MERGE_TOOL_NAME)
+    ]
     if bad:
         raise ValueError(
-            "worker subagent tools must not include a spawn or scout tool "
-            f"(no nested subagents); got: {bad}"
+            "worker subagent tools must not include a spawn, scout, or merge tool "
+            f"(no nested subagents; merging is the planner's job); got: {bad}"
         )
     if role:
         system = f"{system}\nYour role: {role}.\n"

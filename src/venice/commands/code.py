@@ -75,6 +75,29 @@ change the project and may require the user's confirmation before they execute.
 when practical.
 - Keep your final message a concise summary: what you changed and how you verified it."""
 
+# The planner-harness overlay (#52 planner slice), appended to the coding system
+# prompt by --planner. The workflow is prompt-mandated (the model decides what to
+# decompose and when to dispatch -- run_loop stays the only loop); the structure
+# around it is harness-enforced: task tools persist the checklist (#49), every
+# scout/spawn dispatch is recorded for venice_merge, and task_id links the two.
+PLANNER_PROTOCOL = """\
+
+You are running as a PLANNER: decompose, dispatch, track, and MERGE.
+1. DECOMPOSE: split the task into small self-contained units and task_add each one \
+BEFORE dispatching anything.
+2. DISPATCH serially, one unit at a time: task_update it in_progress; use \
+venice_scout first when you need facts; delegate the work with venice_spawn, passing \
+the unit's task_id. The subagent cannot see this conversation -- its task text must \
+stand alone.
+3. TRACK: when the report returns, task_update the unit done (or leave it \
+in_progress with the blocker recorded in its text) before dispatching the next one. \
+Never two dispatches in flight for one task.
+4. MERGE (mandatory): after the last unit, call venice_merge for the consolidated \
+rollup, resolve its warnings (re-dispatch, fix inline, or record a follow-up), and \
+end your final message with a 'MERGE SUMMARY:' section -- what shipped, per-unit \
+outcome, unresolved blockers/follow-ups.
+Do trivial glue work yourself; dispatch anything multi-file or self-contained."""
+
 _PLAN_INSTRUCTION = (
     "Before doing anything, output a short numbered plan of the steps you will take, "
     "followed by an 'Acceptance criteria:' section listing concrete, checkable "
@@ -267,6 +290,16 @@ def register(subparsers) -> None:
         "spawn_max_spend (#52).",
     )
     grp.add_argument(
+        "--planner", action="store_true", default=None, dest="planner",
+        help="Planner harness: implies --scout --spawn --memory, mandates the "
+        "decompose -> task_add -> dispatch -> task_update -> merge protocol in the "
+        "system prompt, records every scout/spawn dispatch, and exposes venice_merge "
+        "-- a consolidated rollup of all dispatch reports, the task checklist, and "
+        "structural warnings (merge is first-class, not prose). With --json the "
+        "envelope carries the same rollup under 'planner'. Serial dispatch only. "
+        "Config: defaults.code.planner (#52).",
+    )
+    grp.add_argument(
         "--auto-compact", action="store_true", default=None, dest="auto_compact",
         help="Summarize older history once it crosses the token budget, so long "
         "runs stay within the context window (#48; costs a summarization call).",
@@ -336,6 +369,8 @@ def _gen_kwargs(args) -> dict:
 
 def _system_prompt(args, root: str, tools: List[_agent.Tool]) -> str:
     base = CODING_SYSTEM_PROMPT.format(root=root, tools=_code.tool_names(tools))
+    if getattr(args, "planner", None):  # #52 planner slice: the harness protocol
+        base += PLANNER_PROTOCOL
     if args.system:
         base += "\n\nProject-specific instructions:\n" + args.system
     return base
@@ -505,6 +540,12 @@ def _run(args) -> int:
     rpol = userconfig.roots_policy(doc)  # #76 extra writable / read-only roots
     allow_root = list(rpol["allow"]) + list(getattr(args, "allow_root", None) or [])
     deny_root = list(rpol["deny"]) + list(getattr(args, "deny_root", None) or [])
+    # #52 planner slice: --planner implies the three rails it orchestrates (there are
+    # no --no-scout/--no-spawn/--no-memory flags, so nothing can conflict -- the same
+    # one-flag bundling as --browser/--assets). Must precede code_tools (reads memory).
+    planner = bool(getattr(args, "planner", None))
+    if planner:
+        args.scout = args.spawn = args.memory = True
     tools = _code.code_tools(
         root, client,
         exec_timeout=args.exec_timeout or _code.DEFAULT_EXEC_TIMEOUT,
@@ -525,15 +566,21 @@ def _run(args) -> int:
     # venice_scout). `_gen_kwargs` reads only args.temperature/max_tokens -- no
     # dependency on `tools`, so the reorder is safe.
     gen_kwargs = PROFILE.build_gen_kwargs(args)
+    # #52 planner slice: the session's shared dispatch record list. scout/spawn append
+    # every launched dispatch to it; venice_merge (and the --json envelope) roll it up.
+    dispatches = [] if planner else None
     if bool(getattr(args, "scout", None)):  # #52: opt-in read-only scout subagent
         tools.append(_code.scout_tool(oai, model, root, client, gen_kwargs,
-                                      include_search=True))
+                                      include_search=True, dispatches=dispatches))
     if bool(getattr(args, "spawn", None)):  # #52 slice 2: write-capable worker subagent
         # Passes the live `tools` list: the worker draws a role-scoped subset of these
         # (the agent category -- scout/spawn -- is filtered out, so no nested subagents).
         # `spawn_max_spend` caps an 'asset' worker's cumulative media USD (#52 spend slice).
         tools.append(_code.spawn_tool(oai, model, gen_kwargs, tools,
-                                      max_spend=getattr(args, "spawn_max_spend", None)))
+                                      max_spend=getattr(args, "spawn_max_spend", None),
+                                      dispatches=dispatches))
+    if planner:
+        tools.append(_code.merge_tool(dispatches))
     system = PROFILE.build_system(args, root, tools)
 
     roots_note = ""  # #76: surface extra writable / read-only roots in the banner
@@ -557,11 +604,11 @@ def _run(args) -> int:
         )
 
     return _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task,
-                        models)
+                        models, dispatches=dispatches)
 
 
 def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task,
-                 models=None) -> int:
+                 models=None, *, dispatches=None) -> int:
     messages: List[dict] = [
         {"role": "system", "content": system},
         {"role": "user", "content": task},
@@ -688,6 +735,9 @@ def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task
                 "passed": {"pass": True, "fail": False}.get(verdict),  # None when unknown
                 "report": report,
             }
+        if dispatches is not None:  # #52 planner slice: the rollup, structurally --
+            # callers get it even if the model skipped the venice_merge call.
+            envelope["planner"] = _code.merge_summary(dispatches)
         json.dump(envelope, sys.stdout, indent=2, default=str)
         sys.stdout.write("\n")
 

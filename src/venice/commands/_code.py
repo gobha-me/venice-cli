@@ -43,7 +43,7 @@ import re
 from pathlib import Path
 from typing import List, Optional
 
-from . import _agent, _exec, _index, _mcp
+from . import _agent, _exec, _index, _mcp, _memory
 from ._exec import (  # shared exec rails (#33): one gate for `code` and chat --shell
     DEFAULT_EXEC_TIMEOUT,
     MAX_OUTPUT_CHARS,
@@ -675,6 +675,12 @@ _SCOUT_SCHEMA = _obj(
             "Optional hint: a file, directory, or subsystem to concentrate on "
             "(a hint, not a hard scope).",
         ),
+        "task_id": _p(
+            "string",
+            "Optional id of the checklist task (from task_add) this dispatch serves; "
+            "echoed on the report and in the venice_merge rollup so track and merge "
+            "stay linked.",
+        ),
         "max_tool_calls": {
             "type": "integer",
             "minimum": 1,
@@ -743,6 +749,12 @@ _SPAWN_SCHEMA = _obj(
             "string",
             "Optional hint: a file, directory, or subsystem to concentrate on "
             "(a hint, not a hard scope).",
+        ),
+        "task_id": _p(
+            "string",
+            "Optional id of the checklist task (from task_add) this dispatch "
+            "implements; echoed on the report and in the venice_merge rollup so "
+            "track and merge stay linked.",
         ),
         "max_tool_calls": {
             "type": "integer",
@@ -1024,7 +1036,8 @@ def read_only_tools(root: str, client=None, *, include_search: bool = False
 def scout_tool(oai, model, root: str, client, base_kwargs, *,
                include_search: bool = True,
                default_max_tool_calls: int = _SCOUT_MAX_TOOL_CALLS,
-               hard_cap: int = _SCOUT_HARD_CAP) -> _agent.Tool:
+               hard_cap: int = _SCOUT_HARD_CAP,
+               dispatches: Optional[list] = None) -> _agent.Tool:
     """Build the `venice_scout` Tool: delegate a read-only investigation to a
     disposable subagent (context firewall, #52).
 
@@ -1036,6 +1049,10 @@ def scout_tool(oai, model, root: str, client, base_kwargs, *,
     `paid=False` mirrors `venice_chat`: a bounded nested model call, not a media
     purchase. The confirm/spend gate exists to guard side effects, and a read-only
     scout has none; its cost is bounded by `max_tool_calls`.
+
+    `dispatches`, when given (the `--planner` harness, #52), is the session's shared
+    dispatch record list: every launched scout -- including one that errored -- is
+    appended for the `venice_merge` rollup. `None` (the default) records nothing.
     """
     root = os.path.realpath(root)
 
@@ -1045,17 +1062,24 @@ def scout_tool(oai, model, root: str, client, base_kwargs, *,
         if not task:
             return _err("scout requires a non-empty 'task'")
         focus = args.get("focus") or None
+        tid = str(args["task_id"]).strip() if args.get("task_id") else None
         req = args.get("max_tool_calls")
         n = default_max_tool_calls if not isinstance(req, int) or req <= 0 else req
         n = max(1, min(int(n), hard_cap))
         inner = read_only_tools(root, client, include_search=include_search)
         try:
-            return _agent.run_scout(
+            out = _agent.run_scout(
                 oai, model, task, inner, base_kwargs,
                 max_tool_calls=n, focus=focus,
             )
         except Exception as e:  # incl. openai.OpenAIError from the nested loop
-            return _err(f"scout failed: {e}")
+            out = _err(f"scout failed: {e}")
+        if tid:
+            out["task_id"] = tid  # echo: link the report to its checklist task
+        if dispatches is not None:
+            _record_dispatch(dispatches, "scout", task=task, role=None,
+                             task_id=tid, out=out)
+        return out
 
     return _agent.Tool(
         _agent.SCOUT_TOOL_NAME,
@@ -1103,7 +1127,8 @@ def _meter(tool: _agent.Tool, cap: float, spent: list) -> _agent.Tool:
 def spawn_tool(oai, model, base_kwargs, parent_tools, *,
                default_max_tool_calls: int = _SPAWN_MAX_TOOL_CALLS,
                hard_cap: int = _SPAWN_HARD_CAP,
-               max_spend: Optional[float] = None) -> _agent.Tool:
+               max_spend: Optional[float] = None,
+               dispatches: Optional[list] = None) -> _agent.Tool:
     """Build the `venice_spawn` Tool: delegate a bounded task to a disposable, write/
     paid-capable WORKER subagent (#52 slice 2).
 
@@ -1133,12 +1158,18 @@ def spawn_tool(oai, model, base_kwargs, parent_tools, *,
     wrapped tool). `code`-role paid tools report no cost, so the cap never bites them --
     a code worker behaves exactly as before this slice. The final report carries
     `spent_usd`/`spend_cap_usd` for handoff provenance.
+
+    `dispatches`, when given (the `--planner` harness, #52), is the session's shared
+    dispatch record list: every launched worker -- including one that errored, which
+    still owes its provenance -- is appended for the `venice_merge` rollup. `None`
+    (the default) records nothing.
     """
     def invoke(arguments, *, confirm: bool = False):
         args = _clean(arguments)
         task = (args.get("task") or "").strip()
         if not task:
             return _err("spawn requires a non-empty 'task'")
+        tid = str(args["task_id"]).strip() if args.get("task_id") else None
         role = (args.get("role") or "code").strip().lower()
         override = args.get("categories")
         if isinstance(override, list) and override:
@@ -1187,6 +1218,11 @@ def spawn_tool(oai, model, base_kwargs, parent_tools, *,
         if cap is not None and isinstance(out, dict):
             out["spent_usd"] = round(spent[0], 4)      # handoff provenance
             out["spend_cap_usd"] = cap
+        if tid:
+            out["task_id"] = tid  # echo: link the report to its checklist task
+        if dispatches is not None:
+            _record_dispatch(dispatches, "spawn", task=task, role=role,
+                             task_id=tid, out=out)
         return out
 
     return _agent.Tool(
@@ -1202,6 +1238,120 @@ def spawn_tool(oai, model, base_kwargs, parent_tools, *,
         "from the report.",
         _SPAWN_SCHEMA, invoke, paid=False,
         category="agent", tags=("write", "spawn"),
+    )
+
+
+# Planner harness (#52 planner slice): the dispatch record list + the merge rollup.
+#
+# `venice code --planner` gives the parent session one shared, append-only list of
+# dispatch records. `scout_tool`/`spawn_tool` append to it as dispatches return, so
+# by merge time the harness already holds every report's parsed `fields` map (the
+# v0.63 provenance) without the model re-typing anything. `merge_summary` is the
+# deterministic heart: pure over (records, #49 task store) -> rollup + structural
+# warnings; `merge_tool` exposes it to the planner as `venice_merge`, and the
+# `--json` envelope embeds the same rollup so callers get it even if the model
+# skipped the merge call. Category `agent` keeps it out of every worker's grant
+# (spawn's own filter) -- merging is the planner's job, a worker can't do it.
+_MERGE_SCHEMA = _obj({})  # no parameters -- the harness already holds the records
+_DISPATCH_TASK_CHARS = 200  # task text kept per record (a label, not the transcript)
+
+
+def _record_dispatch(dispatches: list, kind: str, *, task: str,
+                     role: Optional[str], task_id: Optional[str], out: dict) -> None:
+    """Append one dispatch record for the `venice_merge` rollup (#52 planner slice).
+
+    Called by `scout_tool`/`spawn_tool` after every *launched* dispatch -- ok or
+    error envelope alike (a failed dispatch still owes provenance); validation
+    refusals (empty task, empty grant) never launched anything and are not recorded.
+    """
+    task = task if len(task) <= _DISPATCH_TASK_CHARS else (
+        task[:_DISPATCH_TASK_CHARS] + "...")
+    dispatches.append({
+        "seq": len(dispatches) + 1,
+        "kind": kind,                              # 'scout' | 'spawn'
+        "role": role,                              # spawn only; None for a scout
+        "task_id": task_id,                        # checklist link; None if unlinked
+        "task": task,
+        "status": out.get("status"),
+        "fields": out.get("fields"),               # the v0.63 parsed section map
+        "tool_calls": out.get("tool_calls"),
+        "truncated": out.get("truncated"),
+        "spent_usd": out.get("spent_usd"),
+    })
+
+
+def merge_summary(dispatches: List[dict]) -> dict:
+    """The consolidated merge rollup: dispatch records + task store + warnings.
+
+    Pure and deterministic over its inputs -- no model call. Warnings are strictly
+    *structural* facts (a task not done, a dispatch that errored/truncated, a
+    task_id that matches no task); judging report *content* stays the planner's
+    job. The #49 task store is read tolerantly: unreadable -> empty + a warning,
+    never a raise (merge must always produce a rollup).
+    """
+    warnings: List[str] = []
+    try:
+        tasks = _memory.list_tasks()
+    except Exception as e:
+        tasks = []
+        warnings.append(f"task store unreadable: {e}")
+    if not dispatches:
+        warnings.append("no dispatches recorded (nothing was delegated this session)")
+
+    spent = 0.0
+    errors = 0
+    known = {str(t.get("id")) for t in tasks}
+    dispatched = {str(d.get("task_id")) for d in dispatches if d.get("task_id")}
+    for d in dispatches:
+        tag = f"dispatch #{d.get('seq')} ({d.get('kind')})"
+        if d.get("status") != "ok":
+            errors += 1
+            warnings.append(f"{tag} ended status={d.get('status')!r}")
+        if d.get("truncated"):
+            warnings.append(f"{tag} hit its tool-call cap; its report may be incomplete")
+        tid = d.get("task_id")
+        if tid is not None and str(tid) not in known:
+            warnings.append(f"{tag} references unknown task_id {str(tid)!r}")
+        c = d.get("spent_usd")
+        if isinstance(c, (int, float)) and not isinstance(c, bool):
+            spent += float(c)
+    for t in tasks:
+        status = t.get("status")
+        if status == "done":
+            continue  # a done task never dispatched was handled inline -- fine
+        suffix = "" if str(t.get("id")) in dispatched else " and was never dispatched"
+        text = str(t.get("text") or "")[:80]
+        warnings.append(f"task {t.get('id')} still {status}{suffix}: {text}")
+
+    return {
+        "dispatches": dispatches,
+        "totals": {
+            "dispatches": len(dispatches),
+            "spawns": sum(1 for d in dispatches if d.get("kind") == "spawn"),
+            "scouts": sum(1 for d in dispatches if d.get("kind") == "scout"),
+            "errors": errors,
+            "spent_usd": round(spent, 4),
+        },
+        "tasks": tasks,
+        "warnings": warnings,
+    }
+
+
+def merge_tool(dispatches: list) -> _agent.Tool:
+    """Build the `venice_merge` Tool over the session's shared dispatch list."""
+    def invoke(arguments, *, confirm: bool = False):
+        return {"status": "ok", **merge_summary(dispatches)}
+
+    return _agent.Tool(
+        _agent.MERGE_TOOL_NAME,
+        "Consolidated rollup of every scout/spawn dispatch this session: per-dispatch "
+        "provenance (parsed report fields, task_id link, tool calls, spend), the "
+        "current task checklist, totals, and structural warnings (tasks not done, "
+        "dispatches that errored or were truncated, unknown task_ids). Call it after "
+        "the last unit, resolve its warnings, and base your MERGE SUMMARY on it. "
+        "Free and read-only -- it reports what already happened.",
+        _MERGE_SCHEMA, invoke, paid=False,
+        category="agent", tags=("read",),
     )
 
 
