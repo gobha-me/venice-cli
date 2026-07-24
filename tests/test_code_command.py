@@ -665,5 +665,115 @@ class TestOneShotSteering(unittest.TestCase):
         self.assertIn("update the changelog", steers[0]["content"])
 
 
+class TestAttachedCtrlCSteering(unittest.TestCase):
+    """#79: on an attached tty, `code` wraps the execute loop in `pause_and_steer` and
+    aborts cleanly on Ctrl+C. The real signal/prompt machinery is covered by
+    `test_steer`; here we assert the wiring (enabled flag, injected steer, exit 130).
+    """
+
+    def setUp(self):
+        _cfg = mock.patch(
+            "venice.userconfig.load_config",
+            lambda *a, **k: {"version": 1, "mcpServers": {}, "defaults": {}},
+        )
+        _cfg.start()
+        self.addCleanup(_cfg.stop)
+        self.tmp = tempfile.mkdtemp()
+        self.root = os.path.realpath(self.tmp)
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, ignore_errors=True))
+
+    def _run(self, args, seq, pause_cm):
+        from venice.commands import code, _steer
+        fake, calls = _fake_openai_seq(seq)
+        stdin = mock.MagicMock()
+        stdin.isatty.return_value = True  # attached terminal
+        self._sess_dir = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(self._sess_dir, ignore_errors=True))
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake",
+                                          "VENICE_SESSIONS_DIR": self._sess_dir}), \
+             mock.patch("venice.client.urllib.request.urlopen", _urlopen_ok()), \
+             mock.patch("openai.OpenAI", return_value=fake), \
+             mock.patch.object(_steer, "pause_and_steer", pause_cm), \
+             mock.patch.object(sys, "stdin", stdin), \
+             mock.patch.object(sys, "stdout", io.StringIO()), \
+             mock.patch.object(sys, "stderr", err):
+            rc = code._run(args)
+        self._err = err.getvalue()
+        return rc, calls
+
+    def _sessions(self):
+        import glob
+        return sorted(glob.glob(os.path.join(self._sess_dir, "*.json")))
+
+    def test_attached_tty_enables_steering_and_injects(self):
+        from contextlib import contextmanager
+        seen = {}
+
+        @contextmanager
+        def _inject_once(session_id, *, enabled):
+            seen["enabled"] = enabled
+            seen["sid"] = session_id
+            state = {"n": 0}
+
+            def _drain():
+                state["n"] += 1
+                return ["reprioritize: fix the #3 bug first"] if state["n"] == 1 else []
+
+            yield _drain
+
+        seq = [
+            FakeToolCompletion("plan"),
+            FakeToolCompletion("done -- and I saw the steer"),  # execute final
+            FakeToolCompletion("ACCEPTANCE: PASS"),
+        ]
+        rc, _ = self._run(_code_args(task="do x", root=self.root, auto=True), seq,
+                          _inject_once)
+        self.assertEqual(rc, 0)
+        self.assertTrue(seen["enabled"])       # tty + not --json -> steering armed
+        self.assertIsNotNone(seen["sid"])      # non-ephemeral run has a session id
+        with open(self._sessions()[0]) as f:
+            doc = json.loads(f.read())
+        steers = [m for m in doc["messages"] if m.get("role") == "user"
+                  and "steering message received mid-run" in m.get("content", "")]
+        self.assertEqual(len(steers), 1)
+        self.assertIn("fix the #3 bug", steers[0]["content"])
+
+    def test_json_mode_disables_prompt_steering(self):
+        from contextlib import contextmanager
+        seen = {}
+
+        @contextmanager
+        def _capture(session_id, *, enabled):
+            seen["enabled"] = enabled
+            yield (lambda: [])
+
+        seq = [
+            FakeToolCompletion("plan"),
+            FakeToolCompletion("done"),
+            FakeToolCompletion("ACCEPTANCE: PASS"),
+        ]
+        rc, _ = self._run(_code_args(task="do x", root=self.root, auto=True, json=True),
+                          seq, _capture)
+        self.assertEqual(rc, 0)
+        self.assertFalse(seen["enabled"])  # --json is machine-facing: no tty prompt
+
+    def test_ctrlc_at_prompt_aborts_exit_130(self):
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _abort(session_id, *, enabled):
+            def _drain():
+                raise KeyboardInterrupt  # Ctrl+C at the steer prompt / 2nd Ctrl+C
+
+            yield _drain
+
+        seq = [FakeToolCompletion("plan")]  # execute create is never reached
+        rc, _ = self._run(_code_args(task="do x", root=self.root, auto=True), seq, _abort)
+        self.assertEqual(rc, 130)                 # documented Ctrl-C exit code
+        self.assertIn("aborted", self._err)
+        self.assertEqual(len(self._sessions()), 1)  # partial transcript still saved
+
+
 if __name__ == "__main__":
     unittest.main()

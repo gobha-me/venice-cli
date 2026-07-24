@@ -567,7 +567,8 @@ cost out correctly), `/reset` (clear history, keep the system prompt),
 `/cancel` aborts), `/edit [text]` (compose your next message in `$EDITOR`, like
 `git commit`, optionally pre-seeded with `text`),
 `/help`, and `/exit` (or `/quit`, or Ctrl-D). Ctrl-C aborts the current turn
-without ending the session. Tab completes slash-commands (and model ids after
+without ending the session (while a tool-loop turn is running it first pauses to
+steer — see [Mid-run steering](#mid-run-steering-venice-sessions-send)). Tab completes slash-commands (and model ids after
 `/model `, persona names after `/persona `). At a per-tool confirmation prompt, `a` accepts that call **and**
 auto-accepts the rest of the run. `--max-tool-calls 0` runs until the model
 stops on its own (instead of capping at the default and asking to continue).
@@ -643,6 +644,23 @@ simply waits in its mailbox and is drained the next time you `--resume` it. The
 mailbox is a local, owner-only directory (0700), not a network channel: a steer
 carries the same trust as the original task. This is stdlib-only — no daemon, no
 sockets, no extra dependency.
+
+When you're **watching** an attached run in a terminal (`venice code --interactive`,
+or a foreground `--auto`/`--manual` run), you don't need a second shell — just press
+**Ctrl+C**:
+
+- **First Ctrl+C** lets the current step finish, then pauses at the next checkpoint and
+  asks: `[paused] message to the agent (empty = resume, Ctrl+C = abort):`. Type a line
+  and it's fed in as a steer exactly like `sessions send`; press Enter (or Ctrl+D) on an
+  empty line to resume unchanged.
+- **Second Ctrl+C** — either at that prompt, or before the checkpoint is reached —
+  aborts, as it always has (the one-shot run exits 130 with its partial transcript
+  saved; the REPL rolls the current turn back and keeps the session).
+
+This is tty-only (a piped or `--json` run keeps the plain, non-interactive behavior)
+and needs no flag or mailbox — it works even for a `--ephemeral` attached run. Under the
+hood it's the same checkpoint as `sessions send`, so an in-flight tool call is never cut
+off mid-write.
 
 #### Personas (local system-prompt files)
 
