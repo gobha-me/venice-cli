@@ -319,5 +319,52 @@ class TestMemoryCLI(_Base):
         self.assertIn("ACTION", err)
 
 
+# --------------------------------------------------------------------------- #
+# #52 --parallel: the in-process store lock serializes the read-modify-write so
+# concurrent subagents can't drop one another's change.
+# --------------------------------------------------------------------------- #
+class TestStoreConcurrency(_Base):
+    def test_concurrent_add_task_loses_nothing(self):
+        import threading
+        n = 40
+        errors = []
+
+        def add(i):
+            try:
+                M.add_task(f"unit {i}", start=self.proj)
+            except Exception as e:  # pragma: no cover - would signal a lock bug
+                errors.append(e)
+
+        threads = [threading.Thread(target=add, args=(i,)) for i in range(n)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [])
+        tasks = M.list_tasks(start=self.proj)
+        self.assertEqual(len(tasks), n)                      # no lost write
+        self.assertEqual(len({t["id"] for t in tasks}), n)   # unique ids (racy next_id)
+
+    def test_concurrent_write_entry_loses_nothing(self):
+        import threading
+        n = 40
+
+        def put(i):
+            M.write_entry(f"k{i}", f"v{i}", start=self.proj)
+
+        threads = [threading.Thread(target=put, args=(i,)) for i in range(n)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        rows = M.list_entries(scope="project", start=self.proj)
+        self.assertEqual(len(rows), n)                        # every entry survived
+        # And the file is still valid JSON (an interleaved _save would corrupt it).
+        path = self.proj / ".venice" / "memory" / "memory.json"
+        json.loads(path.read_text())
+
+
 if __name__ == "__main__":
     unittest.main()

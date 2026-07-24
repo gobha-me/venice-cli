@@ -8,6 +8,8 @@ import io
 import os
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -838,6 +840,194 @@ class TestToolRegistry(unittest.TestCase):
         names = {t.name for t in _agent.builtin_tools(
             object(), only=_agent.select(categories={"image", "audio", "video"}))}
         self.assertEqual(names, self._ASSETS)
+
+
+# --------------------------------------------------------------------------- #
+# #52 --parallel: thread-safe stdout router + concurrent subagent dispatch
+# --------------------------------------------------------------------------- #
+class TestStdoutRouter(unittest.TestCase):
+    """The thread-local stdout router that replaces the old global-swap capture."""
+
+    def test_install_is_idempotent(self):
+        with mock.patch.object(sys, "stdout", io.StringIO()):
+            r1 = _agent._install_router()
+            r2 = _agent._install_router()
+            self.assertIs(r1, r2)
+            self.assertIsInstance(sys.stdout, _agent._StdoutRouter)
+
+    def test_idle_router_delegates_to_base(self):
+        base = io.StringIO()
+        base.isatty = lambda: True  # attribute delegation via __getattr__/isatty
+        with mock.patch.object(sys, "stdout", base):
+            _agent._install_router()
+            print("straight through")          # no target pushed -> base
+            self.assertTrue(sys.stdout.isatty())  # delegates to base.isatty()
+        self.assertEqual(base.getvalue(), "straight through\n")
+
+    def test_single_thread_capture_still_works(self):
+        with mock.patch.object(sys, "stdout", io.StringIO()) as base:
+            with _agent._capture_stdout() as buf:
+                print("captured")
+            self.assertEqual(buf.getvalue(), "captured\n")
+            print("after")                     # target popped -> base
+        self.assertEqual(base.getvalue(), "after\n")
+
+    def test_nested_capture_restores_outer(self):
+        with mock.patch.object(sys, "stdout", io.StringIO()) as base:
+            with _agent._capture_stdout() as outer:
+                print("O1")
+                with _agent._capture_stdout() as inner:
+                    print("I")
+                print("O2")
+            self.assertEqual(inner.getvalue(), "I\n")
+            self.assertEqual(outer.getvalue(), "O1\nO2\n")
+        self.assertEqual(base.getvalue(), "")  # nothing leaked to base
+
+    def test_concurrent_captures_are_isolated(self):
+        # Two threads capture at the same time -> each buffer gets ONLY its own writes,
+        # and the base stdout gets neither. This is the property the old global swap
+        # could not provide.
+        with mock.patch.object(sys, "stdout", io.StringIO()) as base:
+            _agent._install_router()
+            results = {}
+            start = threading.Barrier(2)
+
+            def worker(tag):
+                with _agent._capture_stdout() as buf:
+                    start.wait()
+                    for _ in range(50):
+                        print(tag)
+                        time.sleep(0)  # yield to interleave the threads
+                results[tag] = buf.getvalue()
+
+            ta = threading.Thread(target=worker, args=("A",))
+            tb = threading.Thread(target=worker, args=("B",))
+            ta.start(); tb.start(); ta.join(); tb.join()
+
+            self.assertEqual(results["A"], "A\n" * 50)  # no B leaked in
+            self.assertEqual(results["B"], "B\n" * 50)  # no A leaked in
+        self.assertEqual(base.getvalue(), "")           # nothing reached base
+
+
+def _sub_tool(name, *, record=None, sleep_arg=None):
+    """A fake subagent Tool (venice_scout/venice_spawn) whose invoke records its call
+    and echoes a per-call report. `sleep_arg` (a JSON key) lets a call sleep so tests
+    can force out-of-order completion."""
+    def inv(a, *, confirm=False):
+        if record is not None:
+            record.append(name)
+        if sleep_arg and isinstance(a.get(sleep_arg), (int, float)):
+            time.sleep(a[sleep_arg] / 1000.0)
+        return {"status": "ok", "report": a.get("tag", name)}
+    return _agent.Tool(name, name, {"type": "object", "properties": {}}, inv,
+                       paid=False, category="agent", tags=("spawn",))
+
+
+def _tool_msgs(messages):
+    return [m for m in messages if m.get("role") == "tool"]
+
+
+class TestParallelDispatch(unittest.TestCase):
+    """`run_loop(parallel=True)`: subagent calls fan out, bookkeeping stays serial."""
+
+    def _spawn_call(self, cid, tag, **extra):
+        args = {"tag": tag, **extra}
+        import json as _json
+        return _FnCall(cid, _agent.SPAWN_TOOL_NAME, _json.dumps(args))
+
+    def test_predicate_selects_only_scout_and_spawn(self):
+        mk = lambda n: _FnCall("x", n, "{}")
+        self.assertTrue(_agent._is_parallelizable(mk(_agent.SCOUT_TOOL_NAME)))
+        self.assertTrue(_agent._is_parallelizable(mk(_agent.SPAWN_TOOL_NAME)))
+        self.assertFalse(_agent._is_parallelizable(mk(_agent.MERGE_TOOL_NAME)))
+        self.assertFalse(_agent._is_parallelizable(mk("write_file")))
+
+    def _run(self, seq, tools, *, max_tool_calls, parallel):
+        fake, calls = _fake_oai(seq)
+        messages = [{"role": "user", "content": "go"}]
+        with mock.patch.object(sys, "stdout", io.StringIO()), \
+             mock.patch.object(sys, "stderr", io.StringIO()):
+            _agent.run_loop(fake, "m", messages, {}, tools,
+                            max_tool_calls=max_tool_calls, yes=True, json_out=False,
+                            parallel=parallel)
+        return messages, calls
+
+    def test_batch_runs_and_appends_in_original_order(self):
+        record = []
+        tools = [_sub_tool(_agent.SPAWN_TOOL_NAME, record=record)]
+        turn = FakeToolCompletion(tool_calls=[
+            self._spawn_call("c1", "A"),
+            self._spawn_call("c2", "B"),
+            self._spawn_call("c3", "C"),
+        ])
+        messages, _ = self._run([turn, FakeToolCompletion("done")], tools,
+                                max_tool_calls=0, parallel=True)
+        tms = _tool_msgs(messages)
+        self.assertEqual([m["tool_call_id"] for m in tms], ["c1", "c2", "c3"])
+        self.assertEqual(sorted(record), ["venice_spawn"] * 3)  # all three ran
+        for m, tag in zip(tms, ["A", "B", "C"]):
+            self.assertIn(tag, m["content"])
+
+    def test_budget_marks_overflow_not_executed_without_running(self):
+        record = []
+        tools = [_sub_tool(_agent.SPAWN_TOOL_NAME, record=record),
+                 _free_tool()]  # a non-subagent serial tool named "t"
+        turn = FakeToolCompletion(tool_calls=[
+            self._spawn_call("c1", "A"),
+            self._spawn_call("c2", "B"),
+            _FnCall("c3", "t", "{}"),        # serial, position 2
+        ])
+        # slots = 2 -> positions 0,1 run; position 2 is over budget, never executed.
+        messages, calls = self._run([turn, FakeToolCompletion("done")], tools,
+                                    max_tool_calls=2, parallel=True)
+        tms = _tool_msgs(messages)
+        self.assertEqual([m["tool_call_id"] for m in tms], ["c1", "c2", "c3"])
+        self.assertIn("not executed", tms[2]["content"])
+        self.assertEqual(len(record), 2)                 # only the 2 within budget ran
+        self.assertEqual(calls[-1]["tool_choice"], "none")  # cap -> forced final
+
+    def test_parallel_matches_serial_for_independent_calls(self):
+        def build():
+            return [_sub_tool(_agent.SPAWN_TOOL_NAME)]
+
+        def turns():
+            return [FakeToolCompletion(tool_calls=[
+                        self._spawn_call("c1", "A"),
+                        self._spawn_call("c2", "B")]),
+                    FakeToolCompletion("done")]
+
+        ser_msgs, _ = self._run(turns(), build(), max_tool_calls=0, parallel=False)
+        par_msgs, _ = self._run(turns(), build(), max_tool_calls=0, parallel=True)
+        strip = lambda ms: [(m["tool_call_id"], m["name"], m["content"])
+                            for m in _tool_msgs(ms)]
+        self.assertEqual(strip(ser_msgs), strip(par_msgs))  # byte-identical results
+
+    def test_out_of_order_completion_keeps_submission_order(self):
+        # c1 sleeps longer than c2, so c2 finishes first -- appended order must still be
+        # c1, c2 (original tool_calls order), not completion order.
+        tools = [_sub_tool(_agent.SPAWN_TOOL_NAME, sleep_arg="ms")]
+        turn = FakeToolCompletion(tool_calls=[
+            self._spawn_call("c1", "SLOW", ms=80),
+            self._spawn_call("c2", "FAST", ms=1),
+        ])
+        messages, _ = self._run([turn, FakeToolCompletion("done")], tools,
+                                max_tool_calls=0, parallel=True)
+        tms = _tool_msgs(messages)
+        self.assertEqual([m["tool_call_id"] for m in tms], ["c1", "c2"])
+        self.assertIn("SLOW", tms[0]["content"])
+        self.assertIn("FAST", tms[1]["content"])
+
+    def test_non_subagent_turn_falls_through_to_serial(self):
+        # parallel=True but the turn has no scout/spawn call -> the serial path runs
+        # (identical result), proving the predicate gate.
+        record = []
+        tools = [_tool("t", lambda a, *, confirm=False: (record.append("t"),
+                                                         {"status": "ok"})[1])]
+        turn = FakeToolCompletion(tool_calls=[_FnCall("c1", "t", "{}")])
+        messages, _ = self._run([turn, FakeToolCompletion("done")], tools,
+                                max_tool_calls=0, parallel=True)
+        self.assertEqual([m["tool_call_id"] for m in _tool_msgs(messages)], ["c1"])
+        self.assertEqual(record, ["t"])
 
 
 if __name__ == "__main__":

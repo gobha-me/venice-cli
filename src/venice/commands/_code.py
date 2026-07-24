@@ -40,6 +40,7 @@ import dataclasses
 import fnmatch
 import os
 import re
+import threading
 from pathlib import Path
 from typing import List, Optional
 
@@ -1318,6 +1319,13 @@ def spawn_tool(oai, model, base_kwargs, parent_tools, *,
 _MERGE_SCHEMA = _obj({})  # no parameters -- the harness already holds the records
 _DISPATCH_TASK_CHARS = 200  # task text kept per record (a label, not the transcript)
 
+# #52 --parallel: scout/spawn dispatches complete on worker threads, so the seq compute-
+# and-append below is a read-modify-write that must be atomic (list.append is GIL-atomic
+# but `len(dispatches) + 1` then append is two steps -> duplicate/gapped seq under a race).
+# Serialize the whole record so seq stays unique and gap-free; `merge_summary` is otherwise
+# order-tolerant. In-process only (subagents are threads in one process).
+_DISPATCH_LOCK = threading.Lock()
+
 
 def _record_dispatch(dispatches: list, kind: str, *, task: str,
                      role: Optional[str], task_id: Optional[str], out: dict) -> None:
@@ -1326,21 +1334,24 @@ def _record_dispatch(dispatches: list, kind: str, *, task: str,
     Called by `scout_tool`/`spawn_tool` after every *launched* dispatch -- ok or
     error envelope alike (a failed dispatch still owes provenance); validation
     refusals (empty task, empty grant) never launched anything and are not recorded.
+    Thread-safe: the seq compute-and-append is serialized (`--parallel` workers append
+    concurrently).
     """
     task = task if len(task) <= _DISPATCH_TASK_CHARS else (
         task[:_DISPATCH_TASK_CHARS] + "...")
-    dispatches.append({
-        "seq": len(dispatches) + 1,
-        "kind": kind,                              # 'scout' | 'spawn'
-        "role": role,                              # spawn only; None for a scout
-        "task_id": task_id,                        # checklist link; None if unlinked
-        "task": task,
-        "status": out.get("status"),
-        "fields": out.get("fields"),               # the v0.63 parsed section map
-        "tool_calls": out.get("tool_calls"),
-        "truncated": out.get("truncated"),
-        "spent_usd": out.get("spent_usd"),
-    })
+    with _DISPATCH_LOCK:
+        dispatches.append({
+            "seq": len(dispatches) + 1,
+            "kind": kind,                              # 'scout' | 'spawn'
+            "role": role,                              # spawn only; None for a scout
+            "task_id": task_id,                        # checklist link; None if unlinked
+            "task": task,
+            "status": out.get("status"),
+            "fields": out.get("fields"),               # the v0.63 parsed section map
+            "tool_calls": out.get("tool_calls"),
+            "truncated": out.get("truncated"),
+            "spent_usd": out.get("spent_usd"),
+        })
 
 
 def merge_summary(dispatches: List[dict]) -> dict:

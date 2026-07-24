@@ -98,6 +98,27 @@ end your final message with a 'MERGE SUMMARY:' section -- what shipped, per-unit
 outcome, unresolved blockers/follow-ups.
 Do trivial glue work yourself; dispatch anything multi-file or self-contained."""
 
+# Appended AFTER PLANNER_PROTOCOL only under `--planner --parallel` (#52). It RELAXES
+# step 2's "one unit at a time" for units that are provably independent, while keeping
+# every other rule (task_add-first, dependent units serial, one dispatch per task, the
+# mandatory MERGE). Kept a separate overlay so the default planner prompt -- and its
+# test pins -- stay byte-identical when --parallel is off.
+PLANNER_PARALLEL_OVERLAY = """
+
+PARALLEL DISPATCH IS ENABLED, relaxing step 2's "one unit at a time" for INDEPENDENT \
+units. You MAY emit several venice_scout/venice_spawn calls in a SINGLE turn; they run \
+concurrently and their reports return together. Rules that still hold:
+- task_add EVERY unit FIRST (step 1) before dispatching anything.
+- Dispatch units together ONLY when they are truly INDEPENDENT: none needs another's \
+output and no two touch the same files. Dependent units stay SERIAL -- dispatch the \
+prerequisite, wait for its report, then dispatch what depends on it.
+- Never two dispatches in flight for the SAME task_id.
+- Mark every unit in a batch in_progress before dispatching it, and task_update each \
+one done (or record its blocker) from the returned reports before starting the next batch.
+- MERGE is unchanged and still mandatory: after the LAST unit call venice_merge, resolve \
+its warnings, and end with a 'MERGE SUMMARY:' section.
+Prefer a concurrent batch of independent units over strict one-at-a-time when it is safe."""
+
 _PLAN_INSTRUCTION = (
     "Before doing anything, output a short numbered plan of the steps you will take, "
     "followed by an 'Acceptance criteria:' section listing concrete, checkable "
@@ -296,8 +317,16 @@ def register(subparsers) -> None:
         "system prompt, records every scout/spawn dispatch, and exposes venice_merge "
         "-- a consolidated rollup of all dispatch reports, the task checklist, and "
         "structural warnings (merge is first-class, not prose). With --json the "
-        "envelope carries the same rollup under 'planner'. Serial dispatch only. "
-        "Config: defaults.code.planner (#52).",
+        "envelope carries the same rollup under 'planner'. Serial dispatch unless "
+        "--parallel is also set. Config: defaults.code.planner (#52).",
+    )
+    grp.add_argument(
+        "--parallel", action="store_true", default=None, dest="parallel",
+        help="Dispatch INDEPENDENT scout/spawn subagents CONCURRENTLY (bounded pool) "
+        "instead of one at a time -- so a planner's independent units overlap in "
+        "wall-clock. Opt-in; serial otherwise. Only affects venice_scout/venice_spawn "
+        "calls (everything else stays serial) and is inert without a subagent rail; "
+        "best paired with --planner. Config: defaults.code.parallel (#52).",
     )
     grp.add_argument(
         "--web-search", action="store_true", default=None, dest="web_search",
@@ -386,6 +415,8 @@ def _system_prompt(args, root: str, tools: List[_agent.Tool]) -> str:
     base = CODING_SYSTEM_PROMPT.format(root=root, tools=_code.tool_names(tools))
     if getattr(args, "planner", None):  # #52 planner slice: the harness protocol
         base += PLANNER_PROTOCOL
+        if getattr(args, "parallel", None):  # #52: permit concurrent independent dispatch
+            base += PLANNER_PARALLEL_OVERLAY
     if args.system:
         base += "\n\nProject-specific instructions:\n" + args.system
     return base
@@ -739,18 +770,21 @@ def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task
     # plain #78 mailbox drain and installs no handler, so detached steering is unchanged.
     sid = active.id if active is not None else None
     steer_enabled = sys.stdin.isatty() and not args.json
+    parallel = bool(getattr(args, "parallel", None))  # #52: concurrent subagent dispatch
     try:
         with _steer.pause_and_steer(sid, enabled=steer_enabled) as steer_drain:
             if args.json:
                 with _capture_stdout() as buf:
                     _agent.run_loop(oai, model, messages, gen_kwargs, tools,
                                     max_tool_calls=max_calls, yes=yes, json_out=False,
-                                    budget=budget, ledger=ledger, steer_drain=steer_drain)
+                                    budget=budget, ledger=ledger, steer_drain=steer_drain,
+                                    parallel=parallel)
                 final_text = buf.getvalue().strip()
             else:
                 _agent.run_loop(oai, model, messages, gen_kwargs, tools,
                                 max_tool_calls=max_calls, yes=yes, json_out=False,
-                                budget=budget, ledger=ledger, steer_drain=steer_drain)
+                                budget=budget, ledger=ledger, steer_drain=steer_drain,
+                                parallel=parallel)
     except openai.OpenAIError as e:
         return _openai.status_to_exit(openai, e, "code")
     except KeyboardInterrupt:

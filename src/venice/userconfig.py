@@ -314,6 +314,7 @@ _COMMAND_MAP = {
         "spawn": ("spawn", _as_bool),  # #52 slice 2: opt-in write-capable worker subagent
         "spawn_max_spend": ("spawn_max_spend", float),  # #52: per-worker media USD cap
         "planner": ("planner", _as_bool),  # #52: planner harness (implies scout/spawn/memory)
+        "parallel": ("parallel", _as_bool),  # #52: concurrent scout/spawn dispatch
         "web_search": ("web_search", _as_bool),  # #77: opt-in web-discovery rail
         "web_search_model": ("web_search_model", str),  # #77: supportsWebSearch model override
         "max_tool_calls": ("max_tool_calls", int),

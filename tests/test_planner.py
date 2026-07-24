@@ -18,6 +18,8 @@ import json
 import os
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -216,6 +218,25 @@ class TestDispatchRecording(_ProjBase):
         self.assertEqual(len(led[0]["task"]), _code._DISPATCH_TASK_CHARS + 3)
         self.assertTrue(led[0]["task"].endswith("..."))
 
+    def test_concurrent_records_keep_unique_gapless_seq(self):
+        # #52 --parallel: workers append records from threads. The lock keeps seq
+        # unique and gap-free (len+1 compute-and-append must be atomic).
+        import threading
+        led = []
+        out = {"status": "ok"}
+
+        def rec(i):
+            _code._record_dispatch(led, "spawn", task=f"u{i}", role="code",
+                                   task_id=str(i), out=out)
+
+        threads = [threading.Thread(target=rec, args=(i,)) for i in range(50)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(len(led), 50)
+        self.assertEqual({d["seq"] for d in led}, set(range(1, 51)))  # 1..50, no dupes
+
     @staticmethod
     def _paid():
         seen = {}
@@ -283,6 +304,7 @@ def _code_args(**ov):
         plan_only=False, no_plan=False, no_verify=False, max_tool_calls=None,
         exec_timeout=None, interactive=False, resume=None, assets=None,
         scout=None, spawn=None, spawn_max_spend=None, planner=None, memory=None,
+        parallel=None,
         auto_compact=None, compact_threshold=None, compact_keep_turns=None,
         session_max_spend=None, cont=None, ephemeral=None,
         web_search=None, web_search_model=None,
@@ -346,6 +368,77 @@ class TestPlannerWiring(_WiringBase):
             list(self._PLAN), config=doc)
         self.assertEqual(rc, 0)
         self.assertIn(_agent.MERGE_TOOL_NAME, calls[0]["messages"][0]["content"])
+
+    _OVERLAY_MARK = "PARALLEL DISPATCH IS ENABLED"
+
+    def test_parallel_overlay_present_under_planner_parallel(self):
+        rc, calls = self._run(
+            _code_args(task="do x", root=self.root, plan_only=True,
+                       planner=True, parallel=True), list(self._PLAN))
+        self.assertEqual(rc, 0)
+        system_msg = calls[0]["messages"][0]["content"]
+        self.assertIn(self._OVERLAY_MARK, system_msg)   # overlay appended
+        self.assertIn("MERGE SUMMARY", system_msg)       # base protocol still there
+
+    def test_parallel_overlay_absent_without_parallel(self):
+        rc, calls = self._run(
+            _code_args(task="do x", root=self.root, plan_only=True, planner=True),
+            list(self._PLAN))
+        self.assertEqual(rc, 0)
+        self.assertNotIn(self._OVERLAY_MARK, calls[0]["messages"][0]["content"])
+
+    def test_parallel_without_planner_adds_no_overlay(self):
+        rc, calls = self._run(
+            _code_args(task="do x", root=self.root, plan_only=True, parallel=True),
+            list(self._PLAN))
+        self.assertEqual(rc, 0)
+        system_msg = calls[0]["messages"][0]["content"]
+        self.assertNotIn(self._OVERLAY_MARK, system_msg)
+        self.assertNotIn("PLANNER", system_msg)          # inert without a planner
+
+    def _spy_run_loop_parallel(self, args):
+        real = _agent.run_loop
+        seen = {}
+
+        def spy(*a, **kw):
+            seen["parallel"] = kw.get("parallel")
+            return real(*a, **kw)
+
+        with mock.patch.object(_agent, "run_loop", spy):
+            rc, _ = self._run(args, [FakeToolCompletion("did it")])
+        return rc, seen
+
+    def test_parallel_flag_reaches_the_top_level_run_loop(self):
+        rc, seen = self._spy_run_loop_parallel(
+            _code_args(task="do x", root=self.root, no_plan=True, no_verify=True,
+                       auto=True, parallel=True))
+        self.assertEqual(rc, 0)
+        self.assertIs(seen["parallel"], True)
+
+    def test_default_off_leaves_run_loop_serial(self):
+        rc, seen = self._spy_run_loop_parallel(
+            _code_args(task="do x", root=self.root, no_plan=True, no_verify=True,
+                       auto=True))
+        self.assertEqual(rc, 0)
+        self.assertFalse(seen["parallel"])
+
+    def test_config_default_enables_parallel(self):
+        doc = {"version": 1, "mcpServers": {},
+               "defaults": {"code": {"parallel": True}}}
+        real = _agent.run_loop
+        seen = {}
+
+        def spy(*a, **kw):
+            seen["parallel"] = kw.get("parallel")
+            return real(*a, **kw)
+
+        with mock.patch.object(_agent, "run_loop", spy):
+            rc, _ = self._run(
+                _code_args(task="do x", root=self.root, no_plan=True, no_verify=True,
+                           auto=True),
+                [FakeToolCompletion("did it")], config=doc)
+        self.assertEqual(rc, 0)
+        self.assertIs(seen["parallel"], True)
 
     def test_spawn_max_spend_still_threads_under_planner(self):
         captured = {}
@@ -418,6 +511,77 @@ class TestPlannerEndToEnd(_WiringBase):
         self.assertEqual(planner["tasks"][0]["status"], "done")
         self.assertEqual(envelope["final"],
                          "MERGE SUMMARY: 1/1 units done; no blockers.")
+
+
+# --------------------------------------------------------------------------- #
+# #52 --parallel: concurrent dispatch executes and stays contained.
+# --------------------------------------------------------------------------- #
+class TestParallelExecution(_WiringBase):
+    def test_nested_subagent_run_loop_is_serial(self):
+        # A real run_spawn drives a nested run_loop; that nested loop must never be
+        # parallel (nesting is capped at 1 -- a worker holds no scout/spawn calls).
+        real = _agent.run_loop
+        seen = []
+
+        def spy(*a, **kw):
+            seen.append(kw.get("parallel"))
+            return real(*a, **kw)
+
+        tool = _agent.Tool("read_file", "d", {"type": "object", "properties": {}},
+                           lambda a, *, confirm=False: {"status": "ok"},
+                           paid=False, category="fs", tags=("read",))
+        fake = mock.MagicMock()
+        fake.chat.completions.create.side_effect = [FakeToolCompletion("OUTCOME: done")]
+        with mock.patch.object(sys, "stdout", io.StringIO()), \
+             mock.patch.object(sys, "stderr", io.StringIO()), \
+             mock.patch.object(_agent, "run_loop", spy):
+            out = _agent.run_spawn(fake, "m", "do it", [tool], {}, max_tool_calls=3)
+        self.assertEqual(out["status"], "ok")
+        self.assertTrue(seen)
+        self.assertFalse(seen[-1])   # nested run_loop was NOT parallel
+
+    def test_two_independent_spawns_run_concurrently(self):
+        # End-to-end `venice code --planner --parallel --auto --json`: the planner emits
+        # TWO venice_spawn calls in ONE turn; run_spawn is stubbed to sleep + timestamp
+        # so we can prove the two dispatches OVERLAP in wall-clock (serial would not),
+        # while the real code._run path wires parallel through and rolls the two
+        # dispatches into the --json envelope.
+        spans = []
+        lock = threading.Lock()
+
+        def slow_spawn(oai, model, task, tools, base_kwargs, *, max_tool_calls,
+                       focus=None, role=None):
+            t0 = time.monotonic()
+            time.sleep(0.05)
+            t1 = time.monotonic()
+            with lock:
+                spans.append((t0, t1))
+            return {"status": "ok", "report": "OUTCOME: done", "tool_calls": 1,
+                    "truncated": False, "fields": {"OUTCOME": "done"}}
+
+        seq = [
+            FakeToolCompletion(tool_calls=[
+                _FnCall("c1", "venice_spawn",
+                        json.dumps({"task": "unit alpha", "role": "code"})),
+                _FnCall("c2", "venice_spawn",
+                        json.dumps({"task": "unit beta", "role": "code"})),
+            ]),
+            FakeToolCompletion("MERGE SUMMARY: 2/2 units done; no blockers."),
+        ]
+        stdout = io.StringIO()
+        with mock.patch.object(_agent, "run_spawn", slow_spawn):
+            rc, _ = self._run(
+                _code_args(task="build it", root=self.root, no_plan=True, auto=True,
+                           planner=True, parallel=True, json=True),
+                seq, stdout=stdout)
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(spans), 2)                       # both dispatched
+        (a0, a1), (b0, b1) = spans
+        self.assertLess(max(a0, b0), min(a1, b1))             # intervals OVERLAP
+        envelope = json.loads(stdout.getvalue())
+        self.assertEqual(envelope["planner"]["totals"]["spawns"], 2)
+        self.assertEqual(envelope["final"],
+                         "MERGE SUMMARY: 2/2 units done; no blockers.")
 
 
 if __name__ == "__main__":

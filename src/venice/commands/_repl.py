@@ -363,6 +363,7 @@ def _do_turn(oai, openai, chat, text, messages, gen_kwargs, state, args) -> None
                     budget=budget,
                     ledger=ledger,
                     steer_drain=steer_drain,
+                    parallel=bool(getattr(args, "parallel", None)),  # #52
                 )
         else:
             reply, usage = _stream_turn(oai, chat, state["model"], messages, gen_kwargs)

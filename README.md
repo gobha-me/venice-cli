@@ -1259,6 +1259,7 @@ it unrestricted (unchanged behavior).
 | `--spawn` | expose `venice_spawn`: delegate a bounded **write/paid** task to a disposable **worker** subagent with a fresh context and a role-scoped subset of your tools; edit churn stays quarantined and it returns a structured report to merge (see [Worker subagent](#worker-subagent---spawn)) |
 | `--spawn-max-spend USD` | per-worker USD cap on an `asset` worker's cumulative estimated media spend (default **$2.00**; `<= 0` disables); config `defaults.code.spawn_max_spend` |
 | `--planner` | planner harness: implies `--scout --spawn --memory`, mandates the decompose → dispatch → track → **merge** protocol, and adds `venice_merge` — a consolidated rollup of every dispatch (see [Planner harness](#planner-harness---planner)) |
+| `--parallel` | dispatch **independent** `venice_scout`/`venice_spawn` subagents **concurrently** (bounded pool) instead of one at a time, so a planner's independent units overlap in wall-clock; opt-in, serial otherwise; config `defaults.code.parallel` (see [Parallel dispatch](#parallel-dispatch---parallel)) |
 | `--web-search` / `--web-search-model MODEL` | expose `venice_web_search` so the agent can **discover** documentation on the web (answer + cited URLs); pairs with `--browser` to then read a cited page under the `browser.*` policy (see [Web search](#web-search---web-search)) |
 | `--auto-compact` | summarize older history once the prompt crosses `--compact-threshold` tokens (default 100 000), keeping the last `--compact-keep-turns` turns (default 10); long runs stay in-context |
 | `-i`, `--json`, `--model`, `--system` | interactive REPL · JSON envelope · model · extra system instructions |
@@ -1349,12 +1350,34 @@ together with the [task checklist](#memory--tasks---memory) and **structural war
 a `task_id` that matches no task). The planner is told to resolve those warnings and end
 with a `MERGE SUMMARY:` section. With `--json`, the envelope carries the same rollup
 under `planner` even if the model skipped the merge call. Workers can never hold
-`venice_merge` (merging is the planner's job), and dispatch is **serial** — parallel
-dispatch is deliberately out of scope for now.
+`venice_merge` (merging is the planner's job). Dispatch is **serial by default**; add
+[`--parallel`](#parallel-dispatch---parallel) to let independent units overlap.
 
 ```bash
 venice code --planner --auto --json "Split the CSV importer into reader/validator/writer \
 modules with tests. Decompose into units, dispatch a worker per unit, and merge."
+```
+
+#### Parallel dispatch (`--parallel`)
+
+By default a planner dispatches one subagent at a time, so three independent units run
+back-to-back — the wall-clock is the **sum** of their nested loops. `--parallel` lets the
+model emit several `venice_scout`/`venice_spawn` calls in a **single turn** and runs them
+**concurrently** on a bounded pool (up to 4 at once), so independent units overlap and the
+wall-clock drops to roughly the **slowest single unit**. It is **opt-in** (serial
+otherwise) and only affects the two subagent tools — every other tool still runs serially,
+and results are stitched back in the model's original order so the transcript is
+deterministic.
+
+The prompt overlay tells the planner to dispatch units together **only when they are truly
+independent** (no unit needs another's output and no two touch the same files); dependent
+units stay serial. Best paired with `--planner` (it is inert without a subagent rail).
+Config: `defaults.code.parallel`.
+
+```bash
+venice code --planner --parallel --auto "Add unit tests for the parser, the formatter, \
+and the CLI — three independent modules. Decompose, dispatch the independent units \
+together, and merge."
 ```
 
 ## MCP server
