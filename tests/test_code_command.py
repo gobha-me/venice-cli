@@ -567,5 +567,103 @@ class TestCodeCommand(unittest.TestCase):
         self.assertEqual(captured["session_id"], sess.id)
 
 
+class TestOneShotSteering(unittest.TestCase):
+    """#78: one-shot `venice code` runs persist a steerable session + drain steers.
+
+    Standalone harness (not a `TestCodeCommand` subclass, to avoid re-running its
+    whole suite under this name).
+    """
+
+    def setUp(self):
+        _cfg = mock.patch(
+            "venice.userconfig.load_config",
+            lambda *a, **k: {"version": 1, "mcpServers": {}, "defaults": {}},
+        )
+        _cfg.start()
+        self.addCleanup(_cfg.stop)
+        self.tmp = tempfile.mkdtemp()
+        self.root = os.path.realpath(self.tmp)
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, ignore_errors=True))
+
+    def _run(self, args, seq):
+        from venice.commands import code
+        fake, calls = _fake_openai_seq(seq)
+        stdin = mock.MagicMock()
+        stdin.isatty.return_value = False  # one-shot, non-interactive
+        self._sess_dir = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(self._sess_dir, ignore_errors=True))
+        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake",
+                                          "VENICE_SESSIONS_DIR": self._sess_dir}), \
+             mock.patch("venice.client.urllib.request.urlopen", _urlopen_ok()), \
+             mock.patch("openai.OpenAI", return_value=fake), \
+             mock.patch.object(sys, "stdin", stdin), \
+             mock.patch.object(sys, "stdout", io.StringIO()), \
+             mock.patch.object(sys, "stderr", io.StringIO()):
+            rc = code._run(args)
+        return rc, calls
+
+    def _sessions(self):
+        """The persisted session files in this run's redirected zone (post-run)."""
+        import glob
+        return sorted(glob.glob(os.path.join(self._sess_dir, "*.json")))
+
+    def test_auto_run_persists_a_code_session(self):
+        seq = [
+            FakeToolCompletion("plan: write hello"),
+            FakeToolCompletion("done -- nothing to do"),
+            FakeToolCompletion("- works: MET\nACCEPTANCE: PASS"),
+        ]
+        rc, calls = self._run(_code_args(task="do x", root=self.root, auto=True), seq)
+        self.assertEqual(rc, 0)
+        files = self._sessions()
+        self.assertEqual(len(files), 1)                 # one-shot now leaves a session
+        with open(files[0]) as f:
+            doc = json.loads(f.read())
+        self.assertEqual(doc["command"], "code")
+        self.assertEqual(doc["root"], self.root)
+        # the transcript was persisted (system + user task + assistant turns)
+        self.assertTrue(any(m.get("role") == "assistant" for m in doc["messages"]))
+
+    def test_ephemeral_run_persists_nothing(self):
+        seq = [
+            FakeToolCompletion("plan"),
+            FakeToolCompletion("done"),
+            FakeToolCompletion("ACCEPTANCE: PASS"),
+        ]
+        rc, calls = self._run(
+            _code_args(task="do x", root=self.root, auto=True, ephemeral=True), seq)
+        self.assertEqual(rc, 0)
+        self.assertEqual(self._sessions(), [])          # --ephemeral opts out
+
+    def test_steer_deposited_at_execute_is_consumed(self):
+        # A steer queued the instant the run becomes steerable (its session is first
+        # saved, at Execute) must be drained at the execute loop's first checkpoint and
+        # land in the persisted transcript -- proving the end-to-end wiring.
+        from venice.commands import _session, _mailbox
+        real_save = _session.save
+
+        def _save_then_steer(sess):
+            path = real_save(sess)
+            if sess.command == "code" and not getattr(_save_then_steer, "fired", False):
+                _save_then_steer.fired = True
+                _mailbox.deposit(sess.id, "ALSO: update the changelog")
+            return path
+
+        seq = [
+            FakeToolCompletion("plan"),
+            FakeToolCompletion("done -- and I saw the steer"),  # execute final
+            FakeToolCompletion("ACCEPTANCE: PASS"),
+        ]
+        with mock.patch.object(_session, "save", _save_then_steer):
+            rc, calls = self._run(_code_args(task="do x", root=self.root, auto=True), seq)
+        self.assertEqual(rc, 0)
+        with open(self._sessions()[0]) as f:
+            doc = json.loads(f.read())
+        steers = [m for m in doc["messages"] if m.get("role") == "user"
+                  and "steering message received mid-run" in m.get("content", "")]
+        self.assertEqual(len(steers), 1)
+        self.assertIn("update the changelog", steers[0]["content"])
+
+
 if __name__ == "__main__":
     unittest.main()

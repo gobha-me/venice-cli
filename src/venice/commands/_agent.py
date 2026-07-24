@@ -1681,6 +1681,7 @@ def run_loop(
     json_out: bool,
     budget: Optional[_compact.Budget] = None,
     ledger: Optional[CostLedger] = None,
+    steer_drain: Optional[Callable[[], List[str]]] = None,
 ) -> int:
     """Drive the function-calling loop until the model stops (or the cap is hit).
 
@@ -1704,6 +1705,13 @@ def run_loop(
     forces a final answer (the model wraps up with the history it has). The
     gate is post-response (chat has no pre-call quote), so it bounds *further*
     spend rather than preempting a turn already in flight.
+
+    `steer_drain` (issue #78) enables mid-run steering: a callable returning any
+    queued steering messages (from the session's file mailbox). It's polled at the
+    top of each turn -- the natural checkpoint, after the previous turn's tool
+    results were all appended -- and each message is appended as a tagged user turn
+    so the model consumes it exactly as if the operator had typed it. Draining does
+    NOT reset the spend/tool-call budgets (a steer is additive input, not a reset).
     """
     oai_tools = to_openai_tools(tools)
     dispatch = dispatch_map(tools)
@@ -1731,6 +1739,16 @@ def run_loop(
         return _emit_final(resp, json_out)
 
     while True:
+        # Mid-run steering (#78): drain any queued steers at the checkpoint boundary
+        # (all prior tool results are appended, so a user turn here is contract-valid)
+        # and consume them as tagged user turns before the next model call. Placed
+        # before the spend gate so even a gate-forced final answer sees the steer.
+        if steer_drain is not None:
+            for _steer in steer_drain():
+                messages.append({
+                    "role": "user",
+                    "content": "[steering message received mid-run]\n" + _steer,
+                })
         # Spend gate (#66): don't start a new paid turn once the cap is hit.
         if ledger is not None and ledger.over():
             return _force_final(

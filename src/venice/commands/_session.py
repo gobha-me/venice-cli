@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -304,15 +305,22 @@ def most_recent(command: str) -> Optional[Session]:
 
 
 def delete(session_id: str) -> bool:
-    """Remove ``<zone>/<id>.json``; True if it existed, False if not."""
-    path = _resolve_zone_path(session_id)
+    """Remove ``<zone>/<id>.json`` and its ``<zone>/<id>/`` sidecar dir (the #78
+    steering mailbox + any future per-session state); True if either existed."""
+    path = _resolve_zone_path(session_id)  # validates the id before we build the sidecar
+    existed = False
     try:
         path.unlink()
-        return True
+        existed = True
     except FileNotFoundError:
-        return False
+        pass
     except OSError as e:
         raise SessionError(f"cannot delete session {session_id!r}: {e}")
+    sidecar = _sessions_dir() / session_id  # mailbox lives at <id>/mailbox/ (#78)
+    if sidecar.is_dir():
+        shutil.rmtree(sidecar, ignore_errors=True)
+        existed = True
+    return existed
 
 
 def resolve_from_args(args, command: str) -> Optional[Session]:
