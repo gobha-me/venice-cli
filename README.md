@@ -1170,6 +1170,7 @@ it unrestricted (unchanged behavior).
 | `--scout` | expose `venice_scout`: delegate a read-only investigation to a disposable subagent with a fresh context; keeps exploration out of the main context (see [Scout subagent](#scout-subagent---scout)) |
 | `--spawn` | expose `venice_spawn`: delegate a bounded **write/paid** task to a disposable **worker** subagent with a fresh context and a role-scoped subset of your tools; edit churn stays quarantined and it returns a structured report to merge (see [Worker subagent](#worker-subagent---spawn)) |
 | `--spawn-max-spend USD` | per-worker USD cap on an `asset` worker's cumulative estimated media spend (default **$2.00**; `<= 0` disables); config `defaults.code.spawn_max_spend` |
+| `--planner` | planner harness: implies `--scout --spawn --memory`, mandates the decompose → dispatch → track → **merge** protocol, and adds `venice_merge` — a consolidated rollup of every dispatch (see [Planner harness](#planner-harness---planner)) |
 | `--auto-compact` | summarize older history once the prompt crosses `--compact-threshold` tokens (default 100 000), keeping the last `--compact-keep-turns` turns (default 10); long runs stay in-context |
 | `-i`, `--json`, `--model`, `--system` | interactive REPL · JSON envelope · model · extra system instructions |
 | `--persona NAME` | load `~/.config/venice/personas/NAME.md` as the system prompt at launch (`/persona` in the REPL) |
@@ -1181,7 +1182,7 @@ the project root, and paid calls are capped per call by `$VENICE_MCP_MAX_SPEND` 
 model and a sane `--max-tool-calls` when running unattended.
 
 Per-flag config defaults live under `defaults.code.*` (e.g. `model`, `root`, `auto`,
-`assets`, `scout`, `spawn`, `spawn_max_spend`, `max_tool_calls`).
+`assets`, `scout`, `spawn`, `spawn_max_spend`, `planner`, `max_tool_calls`).
 
 #### Scout subagent (`--scout`)
 
@@ -1241,6 +1242,30 @@ estimated **media** spend is capped in dollars by `--spawn-max-spend` (default *
 ```bash
 venice code --spawn --auto "Add a /health endpoint and a test for it. Spawn a code worker \
 to implement and test it, then review its report before finishing."
+```
+
+#### Planner harness (`--planner`)
+
+`--planner` turns the pieces above into one coherent workflow. It **implies
+`--scout --spawn --memory`** and adds a protocol to the system prompt: **decompose** the
+task into small self-contained units (`task_add` each one first), **dispatch** them
+serially (`task_update` in progress → optional `venice_scout` → `venice_spawn` with the
+unit's `task_id` → `task_update` done), then **merge**.
+
+Merge is first-class, not prose: the harness records every launched scout/spawn dispatch
+— its parsed report `fields`, `task_id` link, tool calls, spend, and whether it errored
+or was truncated — and exposes **`venice_merge`**, a free tool that rolls all of it up
+together with the [task checklist](#memory--tasks---memory) and **structural warnings**
+(a task not done or never dispatched, a dispatch that errored or hit its tool-call cap,
+a `task_id` that matches no task). The planner is told to resolve those warnings and end
+with a `MERGE SUMMARY:` section. With `--json`, the envelope carries the same rollup
+under `planner` even if the model skipped the merge call. Workers can never hold
+`venice_merge` (merging is the planner's job), and dispatch is **serial** — parallel
+dispatch is deliberately out of scope for now.
+
+```bash
+venice code --planner --auto --json "Split the CSV importer into reader/validator/writer \
+modules with tests. Decompose into units, dispatch a worker per unit, and merge."
 ```
 
 ## MCP server
