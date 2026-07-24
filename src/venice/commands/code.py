@@ -300,6 +300,21 @@ def register(subparsers) -> None:
         "Config: defaults.code.planner (#52).",
     )
     grp.add_argument(
+        "--web-search", action="store_true", default=None, dest="web_search",
+        help="Expose venice_web_search: DISCOVER documentation on the web (a Venice "
+        "web-search completion returning an answer + cited URLs). Pairs with --browser "
+        "to then fetch a cited page under the browser.* URL policy. The planner and (with "
+        "--scout) a read-only 'docs scout' can use it; spawn WORKERS cannot (injection "
+        "blast radius). Billed; bounded by the tool-call budget. Config: "
+        "defaults.code.web_search (#77).",
+    )
+    grp.add_argument(
+        "--web-search-model", default=None, dest="web_search_model", metavar="MODEL",
+        help="Model for --web-search (must advertise supportsWebSearch). Default: the "
+        "coding --model if capable, else the first web-search-capable model in the "
+        "catalog. Config: defaults.code.web_search_model (#77).",
+    )
+    grp.add_argument(
         "--auto-compact", action="store_true", default=None, dest="auto_compact",
         help="Summarize older history once it crosses the token budget, so long "
         "runs stay within the context window (#48; costs a summarization call).",
@@ -569,9 +584,19 @@ def _run(args) -> int:
     # #52 planner slice: the session's shared dispatch record list. scout/spawn append
     # every launched dispatch to it; venice_merge (and the --json envelope) roll it up.
     dispatches = [] if planner else None
+    # #77: opt-in web-discovery rail. Built once (root-independent) and shared between the
+    # parent tool list and the scout's read-only inner set (a "docs scout"); workers never
+    # get it (category "web" is in no spawn role). `models` is in scope from the guard above.
+    ws_tool = None
+    if bool(getattr(args, "web_search", None)):
+        ws_tool = _code.web_search_tool(
+            oai, model, models=models,
+            search_model=getattr(args, "web_search_model", None),
+        )
     if bool(getattr(args, "scout", None)):  # #52: opt-in read-only scout subagent
         tools.append(_code.scout_tool(oai, model, root, client, gen_kwargs,
-                                      include_search=True, dispatches=dispatches))
+                                      include_search=True, web_tool=ws_tool,
+                                      dispatches=dispatches))
     if bool(getattr(args, "spawn", None)):  # #52 slice 2: write-capable worker subagent
         # Passes the live `tools` list: the worker draws a role-scoped subset of these
         # (the agent category -- scout/spawn -- is filtered out, so no nested subagents).
@@ -579,6 +604,8 @@ def _run(args) -> int:
         tools.append(_code.spawn_tool(oai, model, gen_kwargs, tools,
                                       max_spend=getattr(args, "spawn_max_spend", None),
                                       dispatches=dispatches))
+    if ws_tool is not None:  # #77: parent (planner included) gets web discovery directly
+        tools.append(ws_tool)
     if planner:
         tools.append(_code.merge_tool(dispatches))
     system = PROFILE.build_system(args, root, tools)

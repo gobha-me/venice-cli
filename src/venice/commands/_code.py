@@ -1035,6 +1035,7 @@ def read_only_tools(root: str, client=None, *, include_search: bool = False
 
 def scout_tool(oai, model, root: str, client, base_kwargs, *,
                include_search: bool = True,
+               web_tool: Optional[_agent.Tool] = None,
                default_max_tool_calls: int = _SCOUT_MAX_TOOL_CALLS,
                hard_cap: int = _SCOUT_HARD_CAP,
                dispatches: Optional[list] = None) -> _agent.Tool:
@@ -1049,6 +1050,11 @@ def scout_tool(oai, model, root: str, client, base_kwargs, *,
     `paid=False` mirrors `venice_chat`: a bounded nested model call, not a media
     purchase. The confirm/spend gate exists to guard side effects, and a read-only
     scout has none; its cost is bounded by `max_tool_calls`.
+
+    `web_tool`, when given (the #77 "docs scout": `venice code --web-search --scout`), is a
+    pre-built `venice_web_search` Tool appended to the scout's read-only inner set so it can
+    DISCOVER documentation as well as read the tree. It must be `paid=False` (it is), else
+    `_agent.run_scout` refuses it.
 
     `dispatches`, when given (the `--planner` harness, #52), is the session's shared
     dispatch record list: every launched scout -- including one that errored -- is
@@ -1067,6 +1073,8 @@ def scout_tool(oai, model, root: str, client, base_kwargs, *,
         n = default_max_tool_calls if not isinstance(req, int) or req <= 0 else req
         n = max(1, min(int(n), hard_cap))
         inner = read_only_tools(root, client, include_search=include_search)
+        if web_tool is not None:
+            inner.append(web_tool)  # #77 "docs scout": read-only + web discovery
         try:
             out = _agent.run_scout(
                 oai, model, task, inner, base_kwargs,
@@ -1091,6 +1099,57 @@ def scout_tool(oai, model, root: str, client, base_kwargs, *,
         "scout cannot edit files or run commands.",
         _SCOUT_SCHEMA, invoke, paid=False,
         category="agent", tags=("read", "spawn"),
+    )
+
+
+def web_search_tool(oai, model: str, *, models=None, search_model=None,
+                    mode: str = "on") -> _agent.Tool:
+    """Build the `venice_web_search` rail Tool (#77): DISCOVER docs on the web.
+
+    Makes one Venice web-search completion (via `_agent.run_web_search`) against a
+    `supportsWebSearch` model and returns the answer plus the cited URLs. The agent
+    follows a citation with `web_fetch` (the `--browser` rail, #71), which keeps every
+    fetched URL under the operator's `browser.*` policy -- search discovers, the browser
+    policy governs what gets read.
+
+    `paid=False` mirrors `venice_chat` (a bounded, billed sub-completion, not a media
+    purchase): it MUST be free so a read-only SCOUT can carry it (`_agent.run_scout`
+    rejects any paid tool). Cost is surfaced as best-effort `cost_estimate_usd` provenance
+    and bounded by the caller's tool-call budget. Category `web` (shared with the browser
+    rails) keeps it out of `_REGISTRY` AND out of every spawn WORKER's grant -- neither the
+    `code` nor `asset` role category set includes `web`, so the blast-radius filter drops
+    it structurally (the injection concern from #52: a worker following instructions
+    injected via search results is the nightmare case).
+
+    Model choice is operator-controlled (`search_model` / the coding `model`), resolved
+    once here and never model-facing, so the model can't escalate to a costlier model.
+    """
+    resolved = _agent.resolve_web_search_model(models, search_model, model)
+
+    def invoke(arguments, *, confirm: bool = False):
+        query = (_clean(arguments).get("query") or "").strip()
+        if not query:
+            return _err("web_search requires a non-empty 'query'")
+        if not resolved:
+            return _err(
+                "no web-search-capable model available; pass --web-search-model (or "
+                "defaults.code.web_search_model) naming a model that advertises "
+                "supportsWebSearch"
+            )
+        try:
+            return _agent.run_web_search(oai, resolved, query, mode=mode, models=models)
+        except Exception as e:  # incl. openai.OpenAIError from the completion
+            return _err(f"web_search failed: {e}")
+
+    return _agent.Tool(
+        _agent.WEB_SEARCH_TOOL_NAME,
+        "Search the web for documentation or answers and get back a short summary plus "
+        "the source URLs it cited. Use it to DISCOVER pages you do not already have a URL "
+        "for (API docs, library usage, an error message). To read a cited page in full, "
+        "follow up with web_fetch (needs --browser). Read-only; cannot edit files or run "
+        "commands.",
+        _agent._WEB_SEARCH_SCHEMA, invoke, paid=False,
+        category="web", tags=("read", "network"),
     )
 
 
@@ -1185,12 +1244,16 @@ def spawn_tool(oai, model, base_kwargs, parent_tools, *,
             t for t in parent_tools
             if t.category in requested
             and t.category != "agent"       # never scout/spawn -- no nested subagents
+            and t.category != "web"          # #77: never web_search/browser -- a worker
+                                             # following injected instructions from a page
+                                             # is the nightmare case (deny-by-default)
             and "root" not in t.tags         # never attach_root -- can't widen roots
         ]
         if not granted:
             available = sorted({
                 t.category for t in parent_tools
-                if t.category and t.category != "agent" and "root" not in t.tags
+                if t.category and t.category not in ("agent", "web")
+                and "root" not in t.tags
             })
             return _err(
                 f"spawn: no tools available for role '{role}' (requested categories "
