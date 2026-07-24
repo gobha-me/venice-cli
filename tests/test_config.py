@@ -169,6 +169,25 @@ class TestApplyDefaults(_Base):
         uc.apply_defaults(args, "code", doc)
         self.assertEqual(args.spawn_max_spend, 3.0)
 
+    def test_apply_fills_code_parallel(self):
+        # #52: defaults.code.parallel (_as_bool) backs --parallel; explicit wins.
+        doc = {"defaults": {"code": {"parallel": True}}}
+        args = argparse.Namespace(parallel=None, model=None, system=None)
+        uc.apply_defaults(args, "code", doc)
+        self.assertIs(args.parallel, True)
+        args2 = argparse.Namespace(parallel=False, model=None, system=None)
+        uc.apply_defaults(args2, "code", doc)
+        self.assertIs(args2.parallel, False)  # explicit wins
+
+    def test_code_parser_has_parallel_dest_config_fills_it(self):
+        parser = _build_parser(code)
+        args = parser.parse_args(["code", "do x"])
+        self.assertTrue(hasattr(args, "parallel"))
+        self.assertIsNone(args.parallel)
+        doc = {"defaults": {"code": {"parallel": True}}}
+        uc.apply_defaults(args, "code", doc)
+        self.assertIs(args.parallel, True)
+
     def test_apply_fills_code_web_search(self):
         # #77: defaults.code.web_search (_as_bool) backs --web-search; explicit wins.
         doc = {"defaults": {"code": {"web_search": True}}}

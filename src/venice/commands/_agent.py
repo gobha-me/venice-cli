@@ -30,6 +30,7 @@ import itertools
 import json
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Callable, Dict, List, NamedTuple, Optional, Tuple
 
@@ -1658,6 +1659,94 @@ def _run_one_call(tc, dispatch: Dict[str, Tool], gate: dict) -> dict:
     return _resolve_spend(tool, arguments, result, gate)
 
 
+def _dispatch_parallel(
+    tool_calls,
+    dispatch: Dict[str, Tool],
+    gate: dict,
+    messages: List[dict],
+    *,
+    calls_made: int,
+    max_tool_calls: int,
+    unlimited: bool,
+    show: bool,
+) -> int:
+    """Run one assistant turn's tool calls with subagent dispatches executed concurrently.
+
+    The batched counterpart of :func:`run_loop`'s serial loop, used only under
+    ``--parallel`` (#52). Calls in :data:`_PARALLELIZABLE` (``venice_scout``/
+    ``venice_spawn``) run on a bounded thread pool; every other call runs serially. ALL
+    loop bookkeeping stays here on the MAIN thread -- the pool workers only run the
+    isolated nested ``tool.invoke`` (via :func:`_run_one_call`, which turns any exception
+    into an error dict, so a worker never raises and can't poison the pool). Results are
+    appended to ``messages`` in ORIGINAL ``tool_calls`` order (the OpenAI message
+    contract: each ``tool`` message answers its assistant ``tool_calls`` entry), and the
+    tool-call budget is honored exactly as the serial path does. Returns the updated
+    ``calls_made``.
+    """
+    n = len(tool_calls)
+    # Budget allotment up front: the first `slots` calls (original order) run; the rest
+    # are reported not-executed WITHOUT running -- identical outcome to the serial loop.
+    slots = n if unlimited else max(0, max_tool_calls - calls_made)
+    results: List[Optional[dict]] = [None] * n
+    not_executed = {
+        "status": "error",
+        "message": "tool-call budget (--max-tool-calls) exhausted; not executed",
+    }
+    par_idx: List[int] = []
+    ser_idx: List[int] = []
+    for i, tc in enumerate(tool_calls):
+        if i >= slots:
+            results[i] = not_executed
+        elif _is_parallelizable(tc):
+            par_idx.append(i)
+        else:
+            ser_idx.append(i)
+
+    # Announce the executable batch up front, in ORIGINAL order (deterministic; avoids
+    # progress half-lines interleaving once workers start). stderr+TTY-gated -> a no-op
+    # in tests/pipes/--json.
+    for i in range(n):
+        if i < slots:
+            _progress(
+                f"· {tool_calls[i].function.name} "
+                f"{_short_args(tool_calls[i].function.arguments)}".rstrip(),
+                enabled=show,
+            )
+
+    # Parallel batch: subagent calls run concurrently on a bounded pool.
+    if par_idx:
+        workers = min(_max_parallel(), len(par_idx))
+        with ThreadPoolExecutor(
+            max_workers=workers, thread_name_prefix="venice-subagent"
+        ) as ex:
+            futs = {
+                ex.submit(_run_one_call, tool_calls[i], dispatch, gate): i
+                for i in par_idx
+            }
+            try:
+                for fut in as_completed(futs):
+                    results[futs[fut]] = fut.result()
+            except BaseException:  # incl. KeyboardInterrupt on the main thread (#79)
+                ex.shutdown(wait=False, cancel_futures=True)
+                raise
+
+    # Serial remainder, in original order (paid tools + the confirm gate stay unchanged).
+    for i in ser_idx:
+        results[i] = _run_one_call(tool_calls[i], dispatch, gate)
+
+    # Commit on the main thread: append in ORIGINAL order, advance by the executed count.
+    for i, tc in enumerate(tool_calls):
+        messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "name": tc.function.name,
+                "content": json.dumps(results[i], default=str),
+            }
+        )
+    return calls_made + min(slots, n)
+
+
 def _emit_final(resp, json_out: bool) -> int:
     if json_out:
         json.dump(resp.model_dump(), sys.stdout, indent=2, default=str)
@@ -1687,6 +1776,7 @@ def run_loop(
     budget: Optional[_compact.Budget] = None,
     ledger: Optional[CostLedger] = None,
     steer_drain: Optional[Callable[[], List[str]]] = None,
+    parallel: bool = False,
 ) -> int:
     """Drive the function-calling loop until the model stops (or the cap is hit).
 
@@ -1726,6 +1816,10 @@ def run_loop(
     # on its own (bounded in practice by the model's context window).
     unlimited = max_tool_calls is None or max_tool_calls <= 0
     show = not json_out  # progress feedback (further TTY-gated inside the helpers)
+    if parallel:
+        # Install the thread-local stdout router on the MAIN thread before any subagent
+        # worker starts, so workers only ever push/pop a target and never race on install.
+        _install_router()
 
     def _force_final(reason: str) -> int:
         print(reason, file=sys.stderr)
@@ -1786,28 +1880,37 @@ def run_loop(
 
         # Every tool_call in the turn must get a result (message-contract), even
         # ones past the budget -- those are reported not-executed rather than run.
-        for tc in tool_calls:
-            if not unlimited and calls_made >= max_tool_calls:
-                result = {
-                    "status": "error",
-                    "message": "tool-call budget (--max-tool-calls) exhausted; "
-                    "not executed",
-                }
-            else:
-                _progress(
-                    f"· {tc.function.name} {_short_args(tc.function.arguments)}".rstrip(),
-                    enabled=show,
-                )
-                result = _run_one_call(tc, dispatch, gate)
-                calls_made += 1
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "name": tc.function.name,
-                    "content": json.dumps(result, default=str),
-                }
+        if parallel and any(_is_parallelizable(tc) for tc in tool_calls):
+            # #52: run independent subagent dispatches concurrently. All bookkeeping
+            # (result append in original order, budget) stays on the main thread.
+            calls_made = _dispatch_parallel(
+                tool_calls, dispatch, gate, messages,
+                calls_made=calls_made, max_tool_calls=max_tool_calls,
+                unlimited=unlimited, show=show,
             )
+        else:
+            for tc in tool_calls:
+                if not unlimited and calls_made >= max_tool_calls:
+                    result = {
+                        "status": "error",
+                        "message": "tool-call budget (--max-tool-calls) exhausted; "
+                        "not executed",
+                    }
+                else:
+                    _progress(
+                        f"· {tc.function.name} {_short_args(tc.function.arguments)}".rstrip(),
+                        enabled=show,
+                    )
+                    result = _run_one_call(tc, dispatch, gate)
+                    calls_made += 1
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "name": tc.function.name,
+                        "content": json.dumps(result, default=str),
+                    }
+                )
 
         if not unlimited and calls_made >= max_tool_calls:
             # The forced-final is the turn a long, over-budget run most needs
@@ -1881,21 +1984,90 @@ SCOUT_SECTIONS = (
 )
 
 
+class _StdoutRouter:
+    """Process-global ``sys.stdout`` proxy that routes writes to a per-thread target.
+
+    Installed once (idempotently) as ``sys.stdout``. Each thread may push an in-memory
+    target via :func:`_capture_stdout`; that thread's writes/attribute lookups route to
+    it, while a thread with no target falls through to the real stdout captured at
+    install time -- so an idle router is byte-for-byte transparent.
+
+    This replaces the old global-swap capture (``old = sys.stdout; sys.stdout = buf``),
+    which was not thread-safe: under ``--parallel`` (#52) several subagent threads each
+    run a nested loop whose printed answer is firewalled by :func:`_capture_stdout`, and
+    a global swap would interleave their output and corrupt the LIFO save/restore. Here
+    each thread's target lives in a :class:`threading.local`, so concurrent captures
+    never collide and the push/pop is per-thread nested-safe. The main-thread ``--json``
+    capture in ``code`` keeps working unchanged (it pushes a target, reads it back, and
+    the post-capture ``json.dump`` -- with no target -- routes to the real stdout).
+    """
+
+    def __init__(self, base):
+        self._base = base
+        self._local = threading.local()
+
+    def _target(self):
+        return getattr(self._local, "target", None) or self._base
+
+    def write(self, s):
+        return self._target().write(s)
+
+    def flush(self):
+        return self._target().flush()
+
+    def writelines(self, lines):
+        return self._target().writelines(lines)
+
+    def isatty(self):
+        return self._target().isatty()
+
+    def __getattr__(self, name):
+        # encoding / errors / buffer / fileno / writable / newlines / ... -- delegate to
+        # the active target. ``_base``/``_local`` live in ``__dict__`` so this never
+        # recurses on them.
+        return getattr(self._target(), name)
+
+    def _push(self, buf):
+        prev = getattr(self._local, "target", None)
+        self._local.target = buf
+        return prev
+
+    def _pop(self, prev):
+        self._local.target = prev
+
+
+_ROUTER_LOCK = threading.Lock()
+
+
+def _install_router():
+    """Idempotently wrap ``sys.stdout`` in a :class:`_StdoutRouter`; return the router.
+
+    Safe to call from any thread and any number of times -- the lock guards the one-time
+    wrap so a concurrent first-install can't double-wrap.
+    """
+    with _ROUTER_LOCK:
+        if not isinstance(sys.stdout, _StdoutRouter):
+            sys.stdout = _StdoutRouter(sys.stdout)
+        return sys.stdout
+
+
 @contextlib.contextmanager
 def _capture_stdout():
-    """Redirect ``sys.stdout`` to an in-memory buffer for the duration of the block.
+    """Route this thread's ``sys.stdout`` to an in-memory buffer for the block.
 
-    Used by ``code`` (``--json`` capture) and by :func:`run_scout` (to firewall a
-    subagent's printed answer out of the planner's transcript). Restores the prior
-    stdout unconditionally.
+    Used by ``code`` (``--json`` capture) and by :func:`run_scout`/:func:`run_spawn` (to
+    firewall a subagent's printed answer out of the planner's transcript). Thread-safe:
+    installs the shared router if needed, then pushes/pops a per-thread target (nested-
+    safe, LIFO) so concurrent subagent captures never collide. The router is never
+    uninstalled -- it is transparent when no target is pushed.
     """
-    old = sys.stdout
+    router = _install_router()
     buf = io.StringIO()
-    sys.stdout = buf
+    prev = router._push(buf)
     try:
         yield buf
     finally:
-        sys.stdout = old
+        router._pop(prev)
 
 
 def _run_disposable(
@@ -2075,6 +2247,28 @@ SPAWN_TOOL_NAME = "venice_spawn"
 #: importing ``_code`` (which owns the executable Tool, built over the session's
 #: dispatch record list). A worker must never merge -- merging is the planner's job.
 MERGE_TOOL_NAME = "venice_merge"
+
+#: Tool names that :func:`run_loop` may dispatch CONCURRENTLY under ``--parallel`` (#52).
+#: Only the two disposable, fresh-context, side-effect-isolated subagent calls qualify --
+#: ``venice_merge`` is deliberately EXCLUDED (it reads the shared ``dispatches`` list, and
+#: a name-based allowlist keeps any future ``category="agent"`` tool serial until opted in).
+_PARALLELIZABLE = frozenset({SCOUT_TOOL_NAME, SPAWN_TOOL_NAME})
+
+#: Upper bound on subagents dispatched concurrently in one turn. A small constant (not
+#: ``ThreadPoolExecutor``'s cpu-based default) bounds simultaneous model connections; the
+#: per-turn worker count is ``min(_MAX_PARALLEL, calls-in-the-batch)``. A ``--max-parallel``
+#: knob is a deferred nice-to-have.
+_MAX_PARALLEL = 4
+
+
+def _is_parallelizable(tc) -> bool:
+    """True if this tool call is a subagent dispatch safe to run concurrently."""
+    return tc.function.name in _PARALLELIZABLE
+
+
+def _max_parallel() -> int:
+    return _MAX_PARALLEL
+
 
 SPAWN_SYSTEM = (
     "You are a WORKER subagent: a disposable, role-scoped agent spun up to carry out "

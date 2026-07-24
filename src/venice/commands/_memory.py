@@ -18,12 +18,15 @@ store reimplements). Recall is **plain substring** over name+description+body --
 new deps, always works offline (semantic recall via the ``.venice`` index is a
 deferred enhancement).
 
-Concurrency is **last-writer-wins** on the whole file (like ``secrets.json`` /
-``sessions`` / the index): each mutation reads the doc, edits its in-memory copy, and
-atomically rewrites it. Safe for a single agent; when #52 lets parallel subagents share
-one project store, two simultaneous ``memory_write``/``task_add`` calls can drop one
-side's change. If that becomes real, add per-file locking (or per-entry files) here --
-callers need not change.
+Concurrency: each mutation reads the doc, edits its in-memory copy, and atomically
+rewrites it (read-modify-write). Within one process the four mutators hold a module
+``_STORE_LOCK`` across that RMW, so #52 ``--parallel`` subagents sharing one project
+store can't drop each other's change (added when parallel dispatch shipped; today the
+role-scoped workers get no memory/task tools, so it's forward-looking insurance). Reads
+stay lock-free -- the atomic ``os.replace`` in ``_save`` means a reader never sees a torn
+file. The lock is **in-process only**: two separate ``venice`` processes writing the same
+store remain last-writer-wins (like ``secrets.json`` / ``sessions`` / the index) -- guard
+that with per-entry files or an OS lock if it ever becomes real; callers need not change.
 
 Hygiene (CLAUDE.md): an entry NAME is validated like a persona/secret name (no
 traversal) and refused if secret-shaped (``is_secret_path``) so the store can't be
@@ -38,6 +41,7 @@ import json
 import os
 import re
 import sys
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -55,6 +59,11 @@ _MAX_NAME_LEN = 128
 _MAX_TASK_TEXT_CHARS = 2048
 _PREVIEW_CHARS = 200
 _NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")  # mirrors auth._NAME_RE
+
+# #52 --parallel: serialize each read-modify-write mutation so concurrent in-process
+# subagents can't clobber one another's change (see the module docstring). One module
+# lock is enough -- mutation frequency is trivially low. In-process only.
+_STORE_LOCK = threading.Lock()
 
 
 class MemStoreError(Exception):
@@ -266,20 +275,24 @@ def write_entry(name, content, *, scope: str = "project", type=None,
         raise MemStoreError(
             f"memory content too long ({len(content)} chars; max {MAX_CONTENT_CHARS})")
     path = _memory_file(scope, start=start)
-    doc = _load(path, kind="memory", strict=True)
-    entries: Dict[str, dict] = doc["entries"]
-    now = _now_iso()
-    prev = entries.get(name)
-    created = prev["created"] if isinstance(prev, dict) and prev.get("created") else now
-    entries[name] = {
-        "content": content,
-        "type": (str(type).strip() if type else "note"),
-        "description": (str(description).strip() if description else ""),
-        "created": created,
-        "updated": now,
-    }
-    _save(path, doc)
-    return _meta(name, scope, entries[name])
+    with _STORE_LOCK:  # serialize the read-modify-write (#52 --parallel)
+        doc = _load(path, kind="memory", strict=True)
+        entries: Dict[str, dict] = doc["entries"]
+        now = _now_iso()
+        prev = entries.get(name)
+        created = (
+            prev["created"] if isinstance(prev, dict) and prev.get("created") else now
+        )
+        entries[name] = {
+            "content": content,
+            "type": (str(type).strip() if type else "note"),
+            "description": (str(description).strip() if description else ""),
+            "created": created,
+            "updated": now,
+        }
+        _save(path, doc)
+        meta = _meta(name, scope, entries[name])
+    return meta
 
 
 def read_entry(name, *, scope: Optional[str] = None,
@@ -340,11 +353,12 @@ def delete_entry(name, *, scope: str = "project",
     name = _valid_name(name)
     scope = _check_scope(scope)
     path = _memory_file(scope, start=start)
-    doc = _load(path, kind="memory", strict=True)
-    if name in doc["entries"]:
-        del doc["entries"][name]
-        _save(path, doc)
-        return True
+    with _STORE_LOCK:  # serialize the read-modify-write (#52 --parallel)
+        doc = _load(path, kind="memory", strict=True)
+        if name in doc["entries"]:
+            del doc["entries"][name]
+            _save(path, doc)
+            return True
     return False
 
 
@@ -371,19 +385,20 @@ def add_task(text, *, start: Optional[Path] = None) -> dict:
     """Append a new `pending` task. Returns the created task."""
     text = _check_text(text)
     path = _tasks_file(start=start)
-    doc = _load(path, kind="tasks", strict=True)
-    tasks: List[dict] = doc["tasks"]
-    next_id = 1
-    for t in tasks:
-        try:
-            next_id = max(next_id, int(t.get("id", 0)) + 1)
-        except (TypeError, ValueError):
-            pass
-    now = _now_iso()
-    task = {"id": str(next_id), "text": text, "status": "pending",
-            "created": now, "updated": now}
-    tasks.append(task)
-    _save(path, doc)
+    with _STORE_LOCK:  # serialize the read-modify-write (#52 --parallel; also next_id)
+        doc = _load(path, kind="tasks", strict=True)
+        tasks: List[dict] = doc["tasks"]
+        next_id = 1
+        for t in tasks:
+            try:
+                next_id = max(next_id, int(t.get("id", 0)) + 1)
+            except (TypeError, ValueError):
+                pass
+        now = _now_iso()
+        task = {"id": str(next_id), "text": text, "status": "pending",
+                "created": now, "updated": now}
+        tasks.append(task)
+        _save(path, doc)
     return dict(task)
 
 
@@ -398,16 +413,17 @@ def update_task(task_id, *, status=None, text=None,
     if not tid:
         raise MemStoreError("task id is required")
     path = _tasks_file(start=start)
-    doc = _load(path, kind="tasks", strict=True)
-    for t in doc["tasks"]:
-        if str(t.get("id")) == tid:
-            if status is not None:
-                t["status"] = status
-            if text is not None:
-                t["text"] = _check_text(text)
-            t["updated"] = _now_iso()
-            _save(path, doc)
-            return dict(t)
+    with _STORE_LOCK:  # serialize the read-modify-write (#52 --parallel)
+        doc = _load(path, kind="tasks", strict=True)
+        for t in doc["tasks"]:
+            if str(t.get("id")) == tid:
+                if status is not None:
+                    t["status"] = status
+                if text is not None:
+                    t["text"] = _check_text(text)
+                t["updated"] = _now_iso()
+                _save(path, doc)
+                return dict(t)
     raise MemStoreError(f"no task with id {tid!r}")
 
 
