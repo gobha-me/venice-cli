@@ -169,6 +169,25 @@ class TestApplyDefaults(_Base):
         uc.apply_defaults(args, "code", doc)
         self.assertEqual(args.spawn_max_spend, 3.0)
 
+    def test_apply_fills_code_subagent_max_tokens(self):
+        # #52: defaults.code.subagent_max_tokens backs --subagent-max-tokens (int, None-only).
+        doc = {"defaults": {"code": {"subagent_max_tokens": "5000"}}}  # int-coerced
+        args = argparse.Namespace(subagent_max_tokens=None, model=None, system=None)
+        uc.apply_defaults(args, "code", doc)
+        self.assertEqual(args.subagent_max_tokens, 5000)
+        args2 = argparse.Namespace(subagent_max_tokens=200, model=None, system=None)
+        uc.apply_defaults(args2, "code", doc)
+        self.assertEqual(args2.subagent_max_tokens, 200)  # explicit wins
+
+    def test_code_parser_has_subagent_max_tokens_dest_config_fills_it(self):
+        parser = _build_parser(code)
+        args = parser.parse_args(["code", "do x"])
+        self.assertTrue(hasattr(args, "subagent_max_tokens"))
+        self.assertIsNone(args.subagent_max_tokens)        # default off
+        doc = {"defaults": {"code": {"subagent_max_tokens": 8000}}}
+        uc.apply_defaults(args, "code", doc)
+        self.assertEqual(args.subagent_max_tokens, 8000)
+
     def test_apply_fills_code_parallel(self):
         # #52: defaults.code.parallel (_as_bool) backs --parallel; explicit wins.
         doc = {"defaults": {"code": {"parallel": True}}}

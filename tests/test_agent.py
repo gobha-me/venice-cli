@@ -306,6 +306,47 @@ class TestCostLedger(unittest.TestCase):
         })
         self.assertEqual(L.reasoning_tokens, 128)
 
+    # -- per-subagent token cap (#52) --------------------------------------- #
+
+    def test_max_tokens_defaults_off_and_normalizes_nonpositive(self):
+        self.assertIsNone(_agent.CostLedger().max_tokens)          # default off
+        self.assertIsNone(_agent.CostLedger(max_tokens=0).max_tokens)   # <=0 -> None
+        self.assertIsNone(_agent.CostLedger(max_tokens=-5).max_tokens)
+        self.assertEqual(_agent.CostLedger(max_tokens=100).max_tokens, 100)
+
+    def test_over_tokens_counts_prompt_plus_completion_unpriced(self):
+        # No bind_pricing: token counting needs no catalog, so the cap works unpriced.
+        L = _agent.CostLedger(max_tokens=100)
+        L.record({"prompt_tokens": 60, "completion_tokens": 39})   # 99 < 100
+        self.assertFalse(L.over_tokens())
+        L.record({"prompt_tokens": 1, "completion_tokens": 0})     # 100 >= 100
+        self.assertTrue(L.over_tokens())
+        self.assertTrue(L.unpriced)                                # never priced
+
+    def test_token_cap_independent_of_spend_cap(self):
+        # A token-capped ledger with NO max_spend never trips the USD gate, even as
+        # tokens blow past the cap -- pins that over() stays USD-only.
+        L = _agent.CostLedger(max_tokens=50)
+        L.record({"prompt_tokens": 10**6, "completion_tokens": 10**6})
+        self.assertTrue(L.over_tokens())
+        self.assertFalse(L.over())
+        # And the converse: a USD-only ledger never trips the token gate.
+        L2 = _agent.CostLedger(max_spend=0.001)
+        L2.bind_pricing({"input": {"usd": 1.0}, "output": {"usd": 1.0}})
+        L2.record({"prompt_tokens": 2000, "completion_tokens": 0})
+        self.assertTrue(L2.over())
+        self.assertFalse(L2.over_tokens())
+
+    def test_token_cap_not_persisted(self):
+        # Caps are re-derived at construction (mirrors max_spend), so a snapshot omits
+        # max_tokens and a restore never resurrects a ceiling.
+        L = _agent.CostLedger(max_tokens=100)
+        self.assertNotIn("max_tokens", L.to_dict())
+        L2 = _agent.CostLedger()
+        L2.restore({"max_tokens": 100, "prompt_tokens": 10})
+        self.assertIsNone(L2.max_tokens)
+        self.assertEqual(L2.prompt_tokens, 10)
+
     # -- usage_report + always-on ledger (#75) ------------------------------ #
 
     def test_usage_report_shows_cache_split_and_cost(self):
@@ -409,6 +450,48 @@ class TestRunLoopSpendGate(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(len(calls), 1)  # unpriced -> counted, not gated
         self.assertEqual(ledger.prompt_tokens, 5000)
+
+    def test_token_gate_forces_final_unpriced(self):
+        # #52: turn 1 calls a tool AND its usage crosses the token cap; the next
+        # iteration forces a final answer. Unpriced ledger -> proves the token gate
+        # is independent of the (USD) spend gate.
+        usage = {"prompt_tokens": 900, "completion_tokens": 200}   # 1100 >= 1000
+        seq = [
+            FakeToolCompletion(tool_calls=[_FnCall("c1", "t", "{}")], usage=usage),
+            FakeToolCompletion("wrapped up"),  # the forced-final turn
+        ]
+        fake, calls = _fake_oai(seq)
+        ledger = _agent.CostLedger(max_tokens=1000)  # no pricing bound
+        with mock.patch.object(sys, "stdout", io.StringIO()), \
+             mock.patch.object(sys, "stderr", io.StringIO()):
+            rc = _agent.run_loop(
+                fake, "m", [{"role": "user", "content": "go"}], {},
+                [self._tool()], max_tool_calls=0, yes=True, json_out=False,
+                ledger=ledger,
+            )
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 2)                      # turn 1 + forced final
+        self.assertEqual(calls[-1]["tool_choice"], "none")   # forced, no tools
+        self.assertTrue(ledger.over_tokens())
+        self.assertFalse(ledger.over())                      # USD gate never fired
+
+    def test_no_token_cap_means_no_token_gate(self):
+        # A ledger with max_tokens=None (the parent chat/REPL case) never token-gates,
+        # even under huge usage -> the new gate is a no-op for chat.
+        usage = {"prompt_tokens": 10**9, "completion_tokens": 10**9}
+        seq = [FakeToolCompletion("done", usage=usage)]
+        fake, calls = _fake_oai(seq)
+        ledger = _agent.CostLedger(max_spend=0.5)  # USD cap set, token cap NOT
+        ledger.bind_pricing({"input": {"usd": 0.0}, "output": {"usd": 0.0}})  # $0
+        with mock.patch.object(sys, "stdout", io.StringIO()), \
+             mock.patch.object(sys, "stderr", io.StringIO()):
+            rc = _agent.run_loop(
+                fake, "m", [{"role": "user", "content": "go"}], {},
+                [self._tool()], max_tool_calls=0, yes=True, json_out=False,
+                ledger=ledger,
+            )
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 1)  # no forced final despite billions of tokens
 
 
 class TestAutoCompact(unittest.TestCase):

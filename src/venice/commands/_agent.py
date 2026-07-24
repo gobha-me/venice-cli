@@ -221,10 +221,15 @@ class CostLedger:
     (degrade gracefully rather than hard-block on a missing price).
     """
 
-    def __init__(self, max_spend: Optional[float] = None):
+    def __init__(self, max_spend: Optional[float] = None,
+                 max_tokens: Optional[int] = None):
         # A non-positive cap means "uncapped" (mirrors --max-tool-calls 0).
         cap = float(max_spend) if max_spend is not None else None
         self.max_spend = cap if (cap is not None and cap > 0) else None
+        # #52: an orthogonal cumulative *token* ceiling (prompt+completion), used by
+        # per-subagent runs (`--subagent-max-tokens`). Same non-positive->None rule.
+        tcap = int(max_tokens) if max_tokens is not None else None
+        self.max_tokens = tcap if (tcap is not None and tcap > 0) else None
         self.total = 0.0
         self.prompt_tokens = 0
         self.completion_tokens = 0
@@ -347,6 +352,19 @@ class CostLedger:
     def over(self) -> bool:
         """True when accumulated spend has reached/exceeded the cap."""
         return self.max_spend is not None and self.total >= self.max_spend
+
+    def over_tokens(self) -> bool:
+        """True when cumulative prompt+completion tokens reached/exceeded the cap.
+
+        Orthogonal to :meth:`over` (which is USD-only): a per-subagent run is capped on
+        tokens, not dollars (its LLM turns aren't charged against an external account by
+        this mechanism -- see `_code.spawn_tool`/`scout_tool`). Counts raw tokens,
+        cache-agnostic (both cache buckets are subsets of `prompt_tokens`).
+        """
+        return (
+            self.max_tokens is not None
+            and (self.prompt_tokens + self.completion_tokens) >= self.max_tokens
+        )
 
     def summary(self) -> str:
         """A one-line human-readable total (for stderr / --json)."""
@@ -1853,6 +1871,15 @@ def run_loop(
             return _force_final(
                 f"chat: reached --max-spend ({ledger.summary()}); "
                 "requesting a final answer"
+            )
+        # Token gate (#52): a per-subagent cumulative-token ceiling, orthogonal to the USD
+        # cap above. Only ever set on a disposable subagent ledger (the parent chat/REPL
+        # ledger has max_tokens=None -> inert here). Post-turn like the spend gate, so it
+        # bounds the *next* turn -- the crossing turn + this forced final both complete.
+        if ledger is not None and ledger.over_tokens():
+            return _force_final(
+                f"code: worker reached token cap {ledger.max_tokens:,} "
+                f"({ledger.summary()}); wrapping up"
             )
         _compact.maybe_compact(
             oai, model, messages, budget, base_kwargs,

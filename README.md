@@ -1258,6 +1258,7 @@ it unrestricted (unchanged behavior).
 | `--scout` | expose `venice_scout`: delegate a read-only investigation to a disposable subagent with a fresh context; keeps exploration out of the main context (see [Scout subagent](#scout-subagent---scout)) |
 | `--spawn` | expose `venice_spawn`: delegate a bounded **write/paid** task to a disposable **worker** subagent with a fresh context and a role-scoped subset of your tools; edit churn stays quarantined and it returns a structured report to merge (see [Worker subagent](#worker-subagent---spawn)) |
 | `--spawn-max-spend USD` | per-worker USD cap on an `asset` worker's cumulative estimated media spend (default **$2.00**; `<= 0` disables); config `defaults.code.spawn_max_spend` |
+| `--subagent-max-tokens N` | per-subagent cap on the cumulative prompt+completion **tokens** a `venice_scout` **or** `venice_spawn` subagent spends across its turns (default **off**; `<= 0` disables); once crossed the subagent is asked to wrap up and its report carries the token count. A cumulative-usage ceiling, **not** a context-window size limit, and distinct from `--max-tokens` (per-turn output); config `defaults.code.subagent_max_tokens` |
 | `--planner` | planner harness: implies `--scout --spawn --memory`, mandates the decompose → dispatch → track → **merge** protocol, and adds `venice_merge` — a consolidated rollup of every dispatch (see [Planner harness](#planner-harness---planner)) |
 | `--parallel` | dispatch **independent** `venice_scout`/`venice_spawn` subagents **concurrently** (bounded pool) instead of one at a time, so a planner's independent units overlap in wall-clock; opt-in, serial otherwise; config `defaults.code.parallel` (see [Parallel dispatch](#parallel-dispatch---parallel)) |
 | `--web-search` / `--web-search-model MODEL` | expose `venice_web_search` so the agent can **discover** documentation on the web (answer + cited URLs); pairs with `--browser` to then read a cited page under the `browser.*` policy (see [Web search](#web-search---web-search)) |
@@ -1272,7 +1273,8 @@ the project root, and paid calls are capped per call by `$VENICE_MCP_MAX_SPEND` 
 model and a sane `--max-tool-calls` when running unattended.
 
 Per-flag config defaults live under `defaults.code.*` (e.g. `model`, `root`, `auto`,
-`assets`, `scout`, `spawn`, `spawn_max_spend`, `planner`, `max_tool_calls`).
+`assets`, `scout`, `spawn`, `spawn_max_spend`, `subagent_max_tokens`, `planner`,
+`max_tool_calls`).
 
 #### Scout subagent (`--scout`)
 
@@ -1328,6 +1330,16 @@ scouts/spawns, a worker does neither). Each run is bounded by a tool-call budget
 estimated **media** spend is capped in dollars by `--spawn-max-spend` (default **$2.00**,
 `<= 0` disables; config `defaults.code.spawn_max_spend`); the report then also carries
 `spent_usd`/`spend_cap_usd`.
+
+Independently, `--subagent-max-tokens N` caps the cumulative **prompt+completion tokens**
+a subagent spends across its turns (default off) — this applies to **both** the scout and
+the worker, since token burn is universal to both, whereas the dollar cap above is
+spawn-only (only a worker holds paid tools). Once the ceiling is crossed the subagent is
+asked for a final answer and wraps up (the crossing turn completes, so the count can
+slightly exceed the cap — like the spend cap); every report carries `tokens`/`token_cap`,
+and under `--planner` the merge rollup sums `totals.tokens` and warns when a subagent hit
+its cap. It's a cumulative-usage ceiling, **not** a context-window size limit, and is
+distinct from `--max-tokens` (per-turn output). Config: `defaults.code.subagent_max_tokens`.
 
 ```bash
 venice code --spawn --auto "Add a /health endpoint and a test for it. Spawn a code worker \

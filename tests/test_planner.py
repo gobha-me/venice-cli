@@ -59,11 +59,12 @@ _WREPORT = (
 
 
 def _rec(seq=1, kind="spawn", role="code", task_id=None, status="ok",
-         fields=None, truncated=False, spent=None):
+         fields=None, truncated=False, spent=None, tokens=None, token_cap=None):
     return {
         "seq": seq, "kind": kind, "role": role, "task_id": task_id,
         "task": "t", "status": status, "fields": fields,
         "tool_calls": 1, "truncated": truncated, "spent_usd": spent,
+        "tokens": tokens, "token_cap": token_cap,
     }
 
 
@@ -89,7 +90,7 @@ class TestMergeSummary(_ProjBase):
     def test_empty_ledger_is_ok_with_a_warning(self):
         out = _code.merge_summary([])
         self.assertEqual(out["totals"], {"dispatches": 0, "spawns": 0, "scouts": 0,
-                                         "errors": 0, "spent_usd": 0.0})
+                                         "errors": 0, "spent_usd": 0.0, "tokens": 0})
         self.assertEqual(out["dispatches"], [])
         self.assertEqual(out["tasks"], [])
         self.assertTrue(any("no dispatches" in w for w in out["warnings"]))
@@ -107,6 +108,22 @@ class TestMergeSummary(_ProjBase):
         self.assertAlmostEqual(out["totals"]["spent_usd"], 1.25)
         self.assertIs(out["dispatches"][0]["fields"], f1)  # verbatim, not re-parsed
         self.assertIs(out["dispatches"][1]["fields"], f2)
+
+    def test_tokens_are_summed_across_dispatches(self):
+        recs = [_rec(1, "spawn", "code", tokens=1000),
+                _rec(2, "scout", None, tokens=500),
+                _rec(3, "spawn", "code", tokens=None)]   # unreported -> skipped, not error
+        out = _code.merge_summary(recs)
+        self.assertEqual(out["totals"]["tokens"], 1500)
+
+    def test_token_cap_hit_warns_only_when_reached(self):
+        # >= cap warns; under cap silent; no cap (None) silent even at high usage.
+        hit = _code.merge_summary([_rec(1, "spawn", "code", tokens=1000, token_cap=1000)])
+        self.assertTrue(any("token cap" in w for w in hit["warnings"]))
+        under = _code.merge_summary([_rec(1, "spawn", "code", tokens=999, token_cap=1000)])
+        self.assertFalse(any("token cap" in w for w in under["warnings"]))
+        uncapped = _code.merge_summary([_rec(1, "spawn", "code", tokens=10**6)])
+        self.assertFalse(any("token cap" in w for w in uncapped["warnings"]))
 
     def test_done_and_linked_task_yields_no_warnings(self):
         t = _memory.add_task("create new.py")
@@ -249,6 +266,86 @@ class TestDispatchRecording(_ProjBase):
 
 
 # --------------------------------------------------------------------------- #
+# Per-subagent token cap (#52): the factory builds a per-invoke ledger, threads it
+# into run_spawn/run_scout, and reports tokens/token_cap on the handoff.
+# --------------------------------------------------------------------------- #
+class TestSubagentTokenCap(_ProjBase):
+    @staticmethod
+    def _run_that_spends(pt, ct):
+        def _run(oai, model, task, tools, base_kwargs, *, max_tool_calls,
+                 ledger=None, **kw):
+            if ledger is not None:                     # the factory always supplies one
+                ledger.record({"prompt_tokens": pt, "completion_tokens": ct})
+            return {"status": "ok", "report": "r", "tool_calls": 1,
+                    "truncated": False, "fields": {"OUTCOME": "done"}}
+        return _run
+
+    @staticmethod
+    def _paid():
+        return _agent.Tool("write_file", "d", {"type": "object", "properties": {}},
+                           lambda a, *, confirm=False: {"status": "ok"},
+                           paid=True, category="fs", tags=("write",))
+
+    def test_spawn_reports_tokens_uncapped_by_default(self):
+        with mock.patch.object(_agent, "run_spawn", self._run_that_spends(700, 130)):
+            out = _code.spawn_tool(None, "m", {}, [self._paid()]).invoke(
+                {"task": "unit a", "role": "code"})
+        self.assertEqual(out["tokens"], 830)           # prompt + completion
+        self.assertIsNone(out["token_cap"])            # default off
+
+    def test_spawn_passes_the_cap_into_the_ledger(self):
+        captured = {}
+
+        def _run(oai, model, task, tools, base_kwargs, *, max_tool_calls,
+                 ledger=None, **kw):
+            captured["cap"] = ledger.max_tokens
+            ledger.record({"prompt_tokens": 10, "completion_tokens": 5})
+            return {"status": "ok", "report": "r", "tool_calls": 1, "truncated": False}
+
+        with mock.patch.object(_agent, "run_spawn", _run):
+            out = _code.spawn_tool(None, "m", {}, [self._paid()],
+                                   max_tokens=500).invoke({"task": "a", "role": "code"})
+        self.assertEqual(captured["cap"], 500)         # threaded into run_loop's gate
+        self.assertEqual(out["tokens"], 15)
+        self.assertEqual(out["token_cap"], 500)
+
+    def test_scout_is_metered_too(self):
+        # Scope proof: the cap applies to the READ-ONLY scout as well, not just spawn.
+        with mock.patch.object(_agent, "run_scout", self._run_that_spends(300, 40)):
+            out = _code.scout_tool(None, "m", self.root, None, {},
+                                   max_tokens=250).invoke({"task": "where is f?"})
+        self.assertEqual(out["tokens"], 340)
+        self.assertEqual(out["token_cap"], 250)
+
+    def test_tokens_land_in_the_dispatch_record(self):
+        led = []
+        with mock.patch.object(_agent, "run_spawn", self._run_that_spends(1000, 200)):
+            _code.spawn_tool(None, "m", {}, [self._paid()], max_tokens=1000,
+                             dispatches=led).invoke({"task": "a", "role": "code"})
+        self.assertEqual((led[0]["tokens"], led[0]["token_cap"]), (1200, 1000))
+
+    def test_real_nested_worker_is_token_gated_end_to_end(self):
+        # No run_spawn mock: the factory builds the ledger and run_spawn ->
+        # _run_disposable -> run_loop all run for real. Turn 1 calls a (paid write) tool
+        # whose usage crosses the cap; run_loop's token gate then forces the final answer.
+        seq = [
+            FakeToolCompletion(tool_calls=[_FnCall("c1", "write_file", "{}")],
+                               usage={"prompt_tokens": 900, "completion_tokens": 200}),
+            FakeToolCompletion("OUTCOME: wrapped up early (token cap)."),  # forced final
+        ]
+        fake, calls = _fake_openai_seq(seq)
+        with mock.patch.object(sys, "stderr", io.StringIO()):
+            out = _code.spawn_tool(fake, "m", {}, [self._paid()],
+                                   max_tokens=1000).invoke(
+                {"task": "do a big refactor", "role": "code"})
+        self.assertEqual(out["status"], "ok")
+        self.assertEqual(len(calls), 2)                       # turn 1 + forced final
+        self.assertEqual(calls[-1]["tool_choice"], "none")    # the token gate forced it
+        self.assertGreaterEqual(out["tokens"], 1000)          # crossed the cap
+        self.assertEqual(out["token_cap"], 1000)
+
+
+# --------------------------------------------------------------------------- #
 # merge_tool: shape + containment.
 # --------------------------------------------------------------------------- #
 class TestMergeTool(_ProjBase):
@@ -303,7 +400,8 @@ def _code_args(**ov):
         max_tokens=None, json=False, auto=None, manual=None, yes=None,
         plan_only=False, no_plan=False, no_verify=False, max_tool_calls=None,
         exec_timeout=None, interactive=False, resume=None, assets=None,
-        scout=None, spawn=None, spawn_max_spend=None, planner=None, memory=None,
+        scout=None, spawn=None, spawn_max_spend=None, subagent_max_tokens=None,
+        planner=None, memory=None,
         parallel=None,
         auto_compact=None, compact_threshold=None, compact_keep_turns=None,
         session_max_spend=None, cont=None, ephemeral=None,
@@ -457,6 +555,31 @@ class TestPlannerWiring(_WiringBase):
         self.assertEqual(captured["max_spend"], 1.5)
         self.assertEqual(captured["dispatches"], [])   # the shared list, wired in
 
+    def test_subagent_max_tokens_reaches_both_factories(self):
+        # Full-CLI wiring: args.subagent_max_tokens -> code._run -> BOTH scout_tool and
+        # spawn_tool (the cap is per-subagent, not spawn-only).
+        seen = {}
+        real_spawn, real_scout = _code.spawn_tool, _code.scout_tool
+
+        def spawn_spy(*a, **kw):
+            seen["spawn"] = kw.get("max_tokens")
+            return real_spawn(*a, **kw)
+
+        def scout_spy(*a, **kw):
+            seen["scout"] = kw.get("max_tokens")
+            return real_scout(*a, **kw)
+
+        with mock.patch.object(_code, "spawn_tool", spawn_spy), \
+             mock.patch.object(_code, "scout_tool", scout_spy):
+            rc, _ = self._run(
+                _code_args(task="do x", root=self.root, no_plan=True, no_verify=True,
+                           auto=True, scout=True, spawn=True,
+                           subagent_max_tokens=1234),
+                [FakeToolCompletion("did it")])
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen["spawn"], 1234)
+        self.assertEqual(seen["scout"], 1234)
+
 
 class TestPlannerEndToEnd(_WiringBase):
     def test_full_protocol_round_trip_and_json_rollup(self):
@@ -506,7 +629,7 @@ class TestPlannerEndToEnd(_WiringBase):
         planner = envelope["planner"]
         self.assertEqual(planner["totals"],
                          {"dispatches": 1, "spawns": 1, "scouts": 0, "errors": 0,
-                          "spent_usd": 0.0})
+                          "spent_usd": 0.0, "tokens": 0})
         self.assertEqual(planner["warnings"], [])      # done + linked + ok
         self.assertEqual(planner["tasks"][0]["status"], "done")
         self.assertEqual(envelope["final"],
@@ -550,7 +673,7 @@ class TestParallelExecution(_WiringBase):
         lock = threading.Lock()
 
         def slow_spawn(oai, model, task, tools, base_kwargs, *, max_tool_calls,
-                       focus=None, role=None):
+                       focus=None, role=None, ledger=None):
             t0 = time.monotonic()
             time.sleep(0.05)
             t1 = time.monotonic()
