@@ -592,6 +592,47 @@ class TestRepl(unittest.TestCase):
         self.assertEqual([m["role"] for m in calls[1]["messages"]], ["user"])
         self.assertEqual(calls[1]["messages"][0]["content"], "again")
 
+    def test_ctrlc_steer_injected_midturn_commits(self):
+        # #79: on an attached tty the first Ctrl+C injects a steer at the checkpoint and
+        # the turn CONTINUES (a second Ctrl+C would hit the rollback above). The real
+        # signal/prompt machinery is in test_steer; here pause_and_steer is faked to
+        # yield an injecting drain so we prove _do_turn wires it and commits the turn.
+        import contextlib as _ctx
+        import openai
+        from venice.commands import chat, _steer
+        from tests.test_agent import _free_tool, _tty
+
+        @_ctx.contextmanager
+        def _inject(session_id, *, enabled):
+            n = {"i": 0}
+
+            def _drain():
+                n["i"] += 1
+                return ["also: add a regression test"] if n["i"] == 1 else []
+
+            yield _drain
+
+        fake = mock.MagicMock()
+        fake.chat.completions.create.side_effect = [
+            FakeToolCompletion("done -- and I saw the steer"),
+        ]
+        messages = []
+        state = {"model": "m", "tools": [_free_tool()], "tools_on": True,
+                 "yes": True, "max_tool_calls": 0, "session": None}
+        with mock.patch.object(_steer, "pause_and_steer", _inject), \
+             mock.patch.object(sys, "stdin", _tty()), \
+             mock.patch.object(sys, "stdout", io.StringIO()), \
+             mock.patch.object(sys, "stderr", io.StringIO()):
+            _repl._do_turn(fake, openai, chat, "do it", messages, {}, state,
+                           _args(interactive=True))
+        # committed, not rolled back: the final assistant turn survives...
+        self.assertTrue(any(m.get("role") == "assistant" for m in messages))
+        # ...and the injected steer is a tagged user turn in history.
+        steers = [m for m in messages if m.get("role") == "user"
+                  and "steering message received mid-run" in m.get("content", "")]
+        self.assertEqual(len(steers), 1)
+        self.assertIn("regression test", steers[0]["content"])
+
     # ------------------------------------------------------------------ #
     # #39: /models listing + bare /model listing
     # ------------------------------------------------------------------ #

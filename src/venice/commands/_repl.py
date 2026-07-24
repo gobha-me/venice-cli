@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from .. import config
-from . import _agent, _compact, _mailbox, _models, _persona, _session
+from . import _agent, _compact, _models, _persona, _session, _steer
 
 
 _PROMPT = "you> "
@@ -343,25 +343,27 @@ def _do_turn(oai, openai, chat, text, messages, gen_kwargs, state, args) -> None
         print(f"(max-spend reached: {ledger.summary()}; turn skipped)",
               file=sys.stderr)
         return
-    # Mid-run steering (#78): a running tool-loop turn drains this session's mailbox
-    # at each checkpoint. Only a persisted (non-ephemeral) session is steerable.
+    # Mid-run steering: a tool-loop turn drains this session's mailbox at each
+    # checkpoint (#78, detached). On an interactive tty, #79 also makes the first Ctrl+C
+    # pause and prompt for a steering line at the checkpoint; a second Ctrl+C (or Ctrl+C
+    # at the prompt) falls through to the abort/rollback handler below. Off a tty this is
+    # just the plain #78 mailbox drain and no signal handler is installed.
     sess = state.get("session")
-    steer_drain = (
-        (lambda sid=sess.id: _mailbox.drain(sid)) if sess is not None else None
-    )
+    sid = sess.id if sess is not None else None
     mark = len(messages)
     messages.append({"role": "user", "content": text})
     try:
         if state["tools_on"]:
-            _agent.run_loop(
-                oai, state["model"], messages, gen_kwargs, state["tools"],
-                max_tool_calls=state["max_tool_calls"],
-                yes=state["yes"],
-                json_out=False,
-                budget=budget,
-                ledger=ledger,
-                steer_drain=steer_drain,
-            )
+            with _steer.pause_and_steer(sid, enabled=sys.stdin.isatty()) as steer_drain:
+                _agent.run_loop(
+                    oai, state["model"], messages, gen_kwargs, state["tools"],
+                    max_tool_calls=state["max_tool_calls"],
+                    yes=state["yes"],
+                    json_out=False,
+                    budget=budget,
+                    ledger=ledger,
+                    steer_drain=steer_drain,
+                )
         else:
             reply, usage = _stream_turn(oai, chat, state["model"], messages, gen_kwargs)
             if budget is not None:
@@ -370,7 +372,9 @@ def _do_turn(oai, openai, chat, text, messages, gen_kwargs, state, args) -> None
                 ledger.record(usage)
             messages.append({"role": "assistant", "content": reply})
     except KeyboardInterrupt:
-        # Ctrl-C aborts just this turn -- roll it back and keep the session.
+        # Ctrl-C aborts just this turn -- roll it back and keep the session. With #79's
+        # attached steering this is the *second* Ctrl+C (or Ctrl+C at the steer prompt);
+        # the first paused and prompted at the checkpoint without ending the turn.
         del messages[mark:]
         print("\n[turn aborted]", file=sys.stderr)
     except openai.OpenAIError as e:

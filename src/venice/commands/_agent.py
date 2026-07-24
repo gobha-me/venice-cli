@@ -1598,8 +1598,13 @@ def _progress(text: str, *, enabled: bool) -> None:
 def _prompt_yes() -> str:
     """Return "yes" (this call), "all" (this call + auto-accept the rest of the
     run), or "no". EOF -> "no"."""
+    # #79: under attached Ctrl+C steering a SIGINT handler is installed around the loop;
+    # restore the default handler for this confirm so Ctrl+C here aborts (as it always
+    # did) rather than arming a steer the operator can't see while waiting to answer.
+    from . import _steer
     try:
-        ans = input("Proceed? [y]es / [a]ll (accept rest) / [N]o ").strip().lower()
+        with _steer.default_sigint():
+            ans = input("Proceed? [y]es / [a]ll (accept rest) / [N]o ").strip().lower()
     except EOFError:
         return "no"
     if ans in ("a", "all"):

@@ -40,7 +40,7 @@ from typing import List, Optional
 
 from .. import auth, config, userconfig
 from ..client import build_client_from_auth
-from . import _agent, _code, _compact, _mailbox, _models, _openai, _repl, _session
+from . import _agent, _code, _compact, _mailbox, _models, _openai, _repl, _session, _steer
 
 _DEFAULT_MAX_TOOL_CALLS = 25
 
@@ -730,25 +730,45 @@ def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task
             print(f"code: session save failed ({e}); run will not be steerable",
                   file=sys.stderr)
             active = None
-    steer_drain = (
-        (lambda sid=active.id: _mailbox.drain(sid)) if active is not None else None
-    )
     final_text = None
     budget = _budget_for(args)
     ledger = _agent.ledger_from_args(args, models, model)  # #66 spend cap
+    # #79: attached Ctrl+C steering. On an interactive tty, wrap the loop so the first
+    # Ctrl+C pauses at the next checkpoint and prompts for a steering line (fed through
+    # the #78 drain path); a second Ctrl+C aborts. Off a tty or in --json this yields the
+    # plain #78 mailbox drain and installs no handler, so detached steering is unchanged.
+    sid = active.id if active is not None else None
+    steer_enabled = sys.stdin.isatty() and not args.json
     try:
-        if args.json:
-            with _capture_stdout() as buf:
+        with _steer.pause_and_steer(sid, enabled=steer_enabled) as steer_drain:
+            if args.json:
+                with _capture_stdout() as buf:
+                    _agent.run_loop(oai, model, messages, gen_kwargs, tools,
+                                    max_tool_calls=max_calls, yes=yes, json_out=False,
+                                    budget=budget, ledger=ledger, steer_drain=steer_drain)
+                final_text = buf.getvalue().strip()
+            else:
                 _agent.run_loop(oai, model, messages, gen_kwargs, tools,
                                 max_tool_calls=max_calls, yes=yes, json_out=False,
                                 budget=budget, ledger=ledger, steer_drain=steer_drain)
-            final_text = buf.getvalue().strip()
-        else:
-            _agent.run_loop(oai, model, messages, gen_kwargs, tools,
-                            max_tool_calls=max_calls, yes=yes, json_out=False,
-                            budget=budget, ledger=ledger, steer_drain=steer_drain)
     except openai.OpenAIError as e:
         return _openai.status_to_exit(openai, e, "code")
+    except KeyboardInterrupt:
+        # #79: abort (a 2nd Ctrl+C, or Ctrl+C at the steer prompt). Save the partial
+        # transcript so the run stays inspectable/resumable -- side effects already ran --
+        # then exit 130 (the documented Ctrl-C code) instead of an uncaught traceback.
+        print("\ncode: aborted", file=sys.stderr)
+        if active is not None:
+            if ledger is not None:
+                try:
+                    active.usage = ledger.to_dict()
+                except Exception:
+                    pass
+            try:
+                _session.save(active)
+            except OSError:
+                pass
+        return 130
 
     # --- Acceptance check ---
     verdict = None          # None = skipped; else 'pass' | 'fail' | 'unknown'
