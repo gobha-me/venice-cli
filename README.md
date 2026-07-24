@@ -841,6 +841,41 @@ venice config set browser.allow '["localhost", "*.example.com"]'
 - **Not exposed over `venice mcp-serve`** in this release (chat/code only), like
   `project_search`/`reindex`.
 
+#### Web search (`--web-search`)
+
+`--browser` can only fetch a URL the agent **already knows**. `--web-search` closes the
+other half of the loop — **discovery**. It adds one tool, `venice_web_search`, so the coding
+agent can look something up on the web when a fix needs documentation it doesn't have a link
+for (an API's docs, a library's usage, an error message).
+
+`venice_web_search(query)` makes **one** Venice web-search completion (server-side
+`enable_web_search` + `enable_web_citations`, the same feature behind `venice chat
+--web-search`) and returns a short **answer** plus the **cited URLs**. To then read a cited
+page in full, follow up with `web_fetch` — so pair `--web-search` with `--browser`, and every
+fetched URL stays under the `browser.*` allow/deny policy above. **Search discovers; the
+browser policy still governs what gets read.**
+
+```sh
+# discover + read: search finds the doc, the browser fetches it (under browser.* policy)
+venice code --web-search --browser --auto \
+  "The stripe SDK call is failing with an idempotency error — look up the fix and apply it."
+```
+
+- **Model.** Web search needs a model advertising `supportsWebSearch`. By default the
+  coding `--model` is used when it qualifies, else the first capable model in the catalog;
+  override with `--web-search-model MODEL` (or `defaults.code.web_search_model`). No model id
+  is hard-coded — it's resolved against the live `/models` catalog.
+- **Billed, bounded.** It rides the normal completion path (same key, same billing) rather
+  than a scraper, so there's no new dependency or secret. It isn't per-call spend-gated; its
+  cost is bounded by the agent's tool-call budget, and each result carries a best-effort
+  `cost_estimate_usd`.
+- **Who gets it.** The coding agent (and a `--planner`) can use it directly; with `--scout`
+  the read-only scout becomes a **"docs scout"** (read the tree *and* search the web). Spawn
+  **workers never get it** — a worker acting on instructions injected via a search result is
+  the blast-radius case, so web tools are denied to workers by default.
+- Config: `defaults.code.web_search` (bool) / `defaults.code.web_search_model`. Not exposed
+  over `venice mcp-serve`.
+
 #### Memory & tasks (`--memory`)
 
 `--memory` gives the agent a durable place to keep notes and a checklist, so multi-step
@@ -1133,6 +1168,7 @@ complete — a loud stderr warning is printed).
 | `memory_write` / `memory_read` / `memory_search` / `memory_list` | durable notes the agent recalls across turns/sessions (two tiers: project + global) — **opt-in with `--memory`** (see [Memory & tasks](#memory--tasks---memory)) | no |
 | `task_add` / `task_update` / `task_list` | a project-only checklist the agent tracks (`pending`/`in_progress`/`done`) — **opt-in with `--memory`** | no |
 | `venice_scout` | delegate a read-only investigation to a disposable subagent with a fresh context; returns a structured report so exploration doesn't pollute the main context — **opt-in with `--scout`** (see [Scout subagent](#scout-subagent---scout)) | no |
+| `venice_web_search` | search the web to **discover** documentation you don't have a URL for; returns a short answer + cited URLs (billed, but bounded by the tool-call budget) — **opt-in with `--web-search`** (see [Web search](#web-search---web-search)) | no |
 
 **Safety.** Every filesystem path is resolved and confined to the **writable roots** —
 the startup root (default: cwd, or `--root` / `$VENICE_CODE_ROOT`) plus any added with
@@ -1171,6 +1207,7 @@ it unrestricted (unchanged behavior).
 | `--spawn` | expose `venice_spawn`: delegate a bounded **write/paid** task to a disposable **worker** subagent with a fresh context and a role-scoped subset of your tools; edit churn stays quarantined and it returns a structured report to merge (see [Worker subagent](#worker-subagent---spawn)) |
 | `--spawn-max-spend USD` | per-worker USD cap on an `asset` worker's cumulative estimated media spend (default **$2.00**; `<= 0` disables); config `defaults.code.spawn_max_spend` |
 | `--planner` | planner harness: implies `--scout --spawn --memory`, mandates the decompose → dispatch → track → **merge** protocol, and adds `venice_merge` — a consolidated rollup of every dispatch (see [Planner harness](#planner-harness---planner)) |
+| `--web-search` / `--web-search-model MODEL` | expose `venice_web_search` so the agent can **discover** documentation on the web (answer + cited URLs); pairs with `--browser` to then read a cited page under the `browser.*` policy (see [Web search](#web-search---web-search)) |
 | `--auto-compact` | summarize older history once the prompt crosses `--compact-threshold` tokens (default 100 000), keeping the last `--compact-keep-turns` turns (default 10); long runs stay in-context |
 | `-i`, `--json`, `--model`, `--system` | interactive REPL · JSON envelope · model · extra system instructions |
 | `--persona NAME` | load `~/.config/venice/personas/NAME.md` as the system prompt at launch (`/persona` in the REPL) |

@@ -285,6 +285,7 @@ def _code_args(**ov):
         scout=None, spawn=None, spawn_max_spend=None, planner=None, memory=None,
         auto_compact=None, compact_threshold=None, compact_keep_turns=None,
         session_max_spend=None, cont=None, ephemeral=None,
+        web_search=None, web_search_model=None,
     )
     base.update(ov)
     return argparse.Namespace(**base)

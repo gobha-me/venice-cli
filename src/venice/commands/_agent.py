@@ -451,6 +451,132 @@ def dispatch_map(tools: List[Tool]) -> Dict[str, Tool]:
 
 
 # --------------------------------------------------------------------------- #
+# Web search (#77): one server-side Venice completion with `enable_web_search`, so
+# the coding agent / scout can DISCOVER documentation -- not just fetch a URL it
+# already knows (the `--browser` rail, #71). Rides the normal completion path (same
+# key, same billing), so the per-agent tool-call budget bounds it. The `venice_web_search`
+# rail Tool wrapper + `supportsWebSearch` model resolution live in `_code`; this module
+# owns only the profile-agnostic completion helper.
+# --------------------------------------------------------------------------- #
+def _obj_to_dict(value) -> Optional[dict]:
+    """A plain dict from a Venice SDK object (`model_dump`) or an already-dict value."""
+    if value is None:
+        return None
+    if hasattr(value, "model_dump"):
+        try:
+            return value.model_dump()
+        except Exception:
+            return None
+    return value if isinstance(value, dict) else None
+
+
+def _web_citations(venice_params) -> List[dict]:
+    """Normalize `venice_parameters.web_search_citations` to `[{title,url[,date]}]`.
+
+    Mirrors `chat._print_citations`: reads `title`/`url`/`date` (the API also carries
+    `content`, dropped here to keep the handoff compact). URL-less items are skipped.
+    """
+    vp = _obj_to_dict(venice_params) or {}
+    raw = vp.get("web_search_citations")
+    if not isinstance(raw, list):
+        return []
+    cites: List[dict] = []
+    for c in raw:
+        cd = _obj_to_dict(c) or {}
+        url = cd.get("url")
+        if not url:
+            continue
+        cite = {"title": cd.get("title", ""), "url": url}
+        if cd.get("date"):
+            cite["date"] = cd["date"]
+        cites.append(cite)
+    return cites
+
+
+def run_web_search(oai, model: str, query: str, *, mode: str = "on",
+                   models=None) -> dict:
+    """Make ONE Venice web-search completion and return its answer + citations (#77).
+
+    Rides `/chat/completions` with `venice_parameters.enable_web_search` (`mode`: "on"
+    forces search, "auto" leaves it to the model) + `enable_web_citations`, exactly as
+    `venice chat --web-search` does. Returns
+    `{"status":"ok","answer","citations":[{title,url[,date]}],"cost_estimate_usd","model"}`.
+    `cost_estimate_usd` is a best-effort post-response estimate from the server `usage`
+    block priced against the catalog (`None` when pricing is unknown -- web search is
+    billed but rides the completion path, so the per-agent tool-call budget bounds it; no
+    separate cap in v1). `openai.OpenAIError` propagates -- the Tool wrapper turns it into
+    an error envelope.
+    """
+    query = (query or "").strip()
+    if not query:
+        return {"status": "error", "message": "web_search requires a non-empty 'query'"}
+    resp = oai.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": query}],
+        extra_body={
+            "venice_parameters": {
+                "enable_web_search": mode,
+                "enable_web_citations": True,
+            }
+        },
+    )
+    choices = getattr(resp, "choices", None) or []
+    msg = getattr(choices[0], "message", None) if choices else None
+    answer = (getattr(msg, "content", None) or "").strip() if msg is not None else ""
+    citations = _web_citations(getattr(resp, "venice_parameters", None))
+    led = _build_ledger(None, models, model)
+    cost = led.record(getattr(resp, "usage", None))
+    # Best-effort: report None (unknown) -- not $0.00 -- when we can't estimate, i.e. the
+    # model price is unknown OR the response carried no usage tokens. A billed feature that
+    # reports 0.0 reads as "free", which is worse than an honest "unknown".
+    known = not led.unpriced and (led.prompt_tokens or led.completion_tokens)
+    return {
+        "status": "ok",
+        "answer": answer,
+        "citations": citations,
+        "cost_estimate_usd": cost if known else None,
+        "model": model,
+    }
+
+
+#: The `venice_web_search` rail tool name (#77). Named here beside the completion helper
+#: and the SCOUT/SPAWN/MERGE names so the guards share one source of truth.
+WEB_SEARCH_TOOL_NAME = "venice_web_search"
+
+
+def supports_web_search(models, model_id) -> Optional[bool]:
+    """Whether `model_id` advertises web search in the catalog (#77).
+
+    True/False when the model is found and carries `supportsWebSearch`; None when it
+    can't be determined (no catalog, model absent, or the field missing) -- treated as
+    "unknown, attempt anyway", mirroring :func:`supports_function_calling`.
+    """
+    return _models.supports_capability(models, model_id, "supportsWebSearch")
+
+
+def resolve_web_search_model(models, search_model, coding_model) -> Optional[str]:
+    """Pick the model for a web-search completion (#77) -- no hardcoded id.
+
+    Precedence: an explicit operator override (`--web-search-model` / config) is trusted
+    as-is; else the coding model when it advertises `supportsWebSearch` (or the capability
+    can't be determined -- attempt anyway); else the first catalog model that advertises
+    it; else None (the caller surfaces an actionable error). Grounding the default in the
+    live `/models` catalog avoids guessing a model id that may not exist.
+    """
+    if search_model:
+        return search_model
+    if supports_web_search(models, coding_model) is not False:
+        return coding_model
+    for m in models or []:
+        if not isinstance(m, dict):
+            continue
+        mid = m.get("id")
+        if mid and supports_web_search(models, mid) is True:
+            return mid
+    return None
+
+
+# --------------------------------------------------------------------------- #
 # JSON schemas for the built-in tools
 #
 # These mirror the parameter surface `venice mcp-serve` exposes (see
@@ -587,6 +713,20 @@ _CHAT_SCHEMA = _obj(
         "character": _p("string", "A Venice character Public ID slug."),
     },
     required=["message"],
+)
+
+#: The `venice_web_search` rail schema (#77). Deliberately minimal -- just the query.
+#: The search mode and model are operator-controlled (flag/config), not model-facing, so
+#: the model can't force search off or pick an arbitrary (possibly costly) model.
+_WEB_SEARCH_SCHEMA = _obj(
+    {
+        "query": _p(
+            "string",
+            "What to look up on the web -- a question or search phrase. Returns a "
+            "short answer plus the source URLs it cited.",
+        ),
+    },
+    required=["query"],
 )
 
 _SEARCH_SCHEMA = _obj(

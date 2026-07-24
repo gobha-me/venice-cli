@@ -169,6 +169,30 @@ class TestApplyDefaults(_Base):
         uc.apply_defaults(args, "code", doc)
         self.assertEqual(args.spawn_max_spend, 3.0)
 
+    def test_apply_fills_code_web_search(self):
+        # #77: defaults.code.web_search (_as_bool) backs --web-search; explicit wins.
+        doc = {"defaults": {"code": {"web_search": True}}}
+        args = argparse.Namespace(web_search=None, model=None, system=None)
+        uc.apply_defaults(args, "code", doc)
+        self.assertIs(args.web_search, True)
+        args2 = argparse.Namespace(web_search=False, model=None, system=None)
+        uc.apply_defaults(args2, "code", doc)
+        self.assertIs(args2.web_search, False)  # explicit wins
+
+    def test_code_parser_has_web_search_dests_config_fills_them(self):
+        # #77: guard both config keys against the real parser's dests.
+        parser = _build_parser(code)
+        args = parser.parse_args(["code", "do x"])
+        self.assertTrue(hasattr(args, "web_search"))
+        self.assertIsNone(args.web_search)
+        self.assertTrue(hasattr(args, "web_search_model"))
+        self.assertIsNone(args.web_search_model)
+        doc = {"defaults": {"code": {"web_search": True,
+                                     "web_search_model": "web-model-x"}}}
+        uc.apply_defaults(args, "code", doc)
+        self.assertIs(args.web_search, True)
+        self.assertEqual(args.web_search_model, "web-model-x")
+
     def test_apply_global_output_dir_expands_user(self):
         doc = {"defaults": {"output_dir": "~/venice-out", "max_spend": 0.5, "yes": True}}
         args = argparse.Namespace(output=None, max_spend=None, yes=None)
