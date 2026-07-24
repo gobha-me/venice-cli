@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from .. import config
-from . import _agent, _compact, _models, _persona, _session
+from . import _agent, _compact, _mailbox, _models, _persona, _session
 
 
 _PROMPT = "you> "
@@ -343,6 +343,12 @@ def _do_turn(oai, openai, chat, text, messages, gen_kwargs, state, args) -> None
         print(f"(max-spend reached: {ledger.summary()}; turn skipped)",
               file=sys.stderr)
         return
+    # Mid-run steering (#78): a running tool-loop turn drains this session's mailbox
+    # at each checkpoint. Only a persisted (non-ephemeral) session is steerable.
+    sess = state.get("session")
+    steer_drain = (
+        (lambda sid=sess.id: _mailbox.drain(sid)) if sess is not None else None
+    )
     mark = len(messages)
     messages.append({"role": "user", "content": text})
     try:
@@ -354,6 +360,7 @@ def _do_turn(oai, openai, chat, text, messages, gen_kwargs, state, args) -> None
                 json_out=False,
                 budget=budget,
                 ledger=ledger,
+                steer_drain=steer_drain,
             )
         else:
             reply, usage = _stream_turn(oai, chat, state["model"], messages, gen_kwargs)

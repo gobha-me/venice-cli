@@ -40,7 +40,7 @@ from typing import List, Optional
 
 from .. import auth, config, userconfig
 from ..client import build_client_from_auth
-from . import _agent, _code, _compact, _models, _openai, _repl, _session
+from . import _agent, _code, _compact, _mailbox, _models, _openai, _repl, _session
 
 _DEFAULT_MAX_TOOL_CALLS = 25
 
@@ -631,11 +631,12 @@ def _run(args) -> int:
         )
 
     return _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task,
-                        models, dispatches=dispatches)
+                        models, dispatches=dispatches,
+                        ephemeral=bool(getattr(args, "ephemeral", None)))
 
 
 def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task,
-                 models=None, *, dispatches=None) -> int:
+                 models=None, *, dispatches=None, ephemeral=False) -> int:
     messages: List[dict] = [
         {"role": "system", "content": system},
         {"role": "user", "content": task},
@@ -710,6 +711,28 @@ def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task
         args.max_tool_calls if args.max_tool_calls is not None
         else PROFILE.default_max_tool_calls
     )
+    # Mid-run steering (#78): persist this run as a session NOW -- before the loop --
+    # so `sessions send <id|latest>` can target it while it runs, and so it's
+    # resumable/inspectable afterwards. A fresh session is always minted (never the
+    # resumed one, whose transcript we must not clobber); --ephemeral opts out and
+    # leaves the run unsteerable, matching the REPL's persist-unless-ephemeral rule.
+    active = None
+    if not ephemeral:
+        active = _session.new_session(
+            "code", label=PROFILE.label, model=model, system=system,
+            gen_kwargs=gen_kwargs, root=root, max_tool_calls=max_calls,
+            messages=messages,
+        )
+        active.messages = messages  # share the live list so saves capture the transcript
+        try:
+            _session.save(active)   # create the file so `latest` resolves during the run
+        except OSError as e:
+            print(f"code: session save failed ({e}); run will not be steerable",
+                  file=sys.stderr)
+            active = None
+    steer_drain = (
+        (lambda sid=active.id: _mailbox.drain(sid)) if active is not None else None
+    )
     final_text = None
     budget = _budget_for(args)
     ledger = _agent.ledger_from_args(args, models, model)  # #66 spend cap
@@ -718,12 +741,12 @@ def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task
             with _capture_stdout() as buf:
                 _agent.run_loop(oai, model, messages, gen_kwargs, tools,
                                 max_tool_calls=max_calls, yes=yes, json_out=False,
-                                budget=budget, ledger=ledger)
+                                budget=budget, ledger=ledger, steer_drain=steer_drain)
             final_text = buf.getvalue().strip()
         else:
             _agent.run_loop(oai, model, messages, gen_kwargs, tools,
                             max_tool_calls=max_calls, yes=yes, json_out=False,
-                            budget=budget, ledger=ledger)
+                            budget=budget, ledger=ledger, steer_drain=steer_drain)
     except openai.OpenAIError as e:
         return _openai.status_to_exit(openai, e, "code")
 
@@ -751,6 +774,28 @@ def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task
             print("code: could not parse an ACCEPTANCE verdict from the model "
                   "(work may be complete) -- exiting 10", file=sys.stderr)
 
+    # Mid-run steering (#78): a steer that landed after the loop exited (a final
+    # turn with no tool calls, or a cap-forced final) was never drained. v1 does not
+    # re-loop -- it surfaces the leftovers so they aren't silently lost, then persists
+    # the finished session so it's inspectable/resumable.
+    unprocessed = _mailbox.drain(active.id) if active is not None else []
+    if unprocessed and not args.json:
+        print(f"\ncode: {len(unprocessed)} steering message(s) arrived after the run "
+              "finished and were not processed:", file=sys.stderr)
+        for _u in unprocessed:
+            print(f"  - {_u.splitlines()[0][:200] if _u.strip() else '(empty)'}",
+                  file=sys.stderr)
+    if active is not None:
+        if ledger is not None:
+            try:
+                active.usage = ledger.to_dict()
+            except Exception:
+                pass
+        try:
+            _session.save(active)  # final transcript (+ usage) for `sessions`/`--resume`
+        except OSError:
+            pass
+
     if args.json:
         envelope = {
             "root": root, "task": task, "plan": plan_text, "mode": mode,
@@ -765,6 +810,8 @@ def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task
         if dispatches is not None:  # #52 planner slice: the rollup, structurally --
             # callers get it even if the model skipped the venice_merge call.
             envelope["planner"] = _code.merge_summary(dispatches)
+        if unprocessed:  # #78: steers that arrived post-run (not fed to the model)
+            envelope["unprocessed_steering"] = unprocessed
         json.dump(envelope, sys.stdout, indent=2, default=str)
         sys.stdout.write("\n")
 

@@ -593,10 +593,16 @@ parameters, `max-tool-calls`, the `venice code` sandbox root, and the running
 token/cost usage — so resuming restores the whole context, not just the messages.
 The API key is never written to a session.
 
+One-shot `venice code "task"` runs are sessions too (they persist unless
+`--ephemeral`), so an unattended `--auto` run is resumable, inspectable, and —
+new in this release — **steerable while it runs** (see below).
+
 ```sh
-venice sessions ls              # list saved sessions (newest first)
+venice sessions ls              # list saved sessions (newest first; flags pending steers)
+venice sessions ls --json       # same, as JSON (adds each session's pending-steer count)
 venice sessions show <id>       # settings + message summary for one session
-venice sessions rm <id>         # delete a session
+venice sessions send <id> "…"   # queue a mid-run steering message (see below)
+venice sessions rm <id>         # delete a session (and its steering mailbox)
 
 venice chat --continue          # resume the most recent chat session
 venice chat --resume <id>       # resume a specific session by id (restores settings)
@@ -607,8 +613,36 @@ Resume precedence is **explicit flag > saved session > config default**: passing
 e.g. `--model` on resume overrides the session's saved model, but omitting it
 keeps what the session used. `--resume` still accepts a plain transcript **file**
 for back-compat (it's imported into a fresh session, leaving the file untouched).
-Pass `--ephemeral` (alias `--no-save`) to run without persisting a session.
-`/save [file]` remains an explicit, separate transcript export.
+Pass `--ephemeral` (alias `--no-save`) to run without persisting a session (which
+also makes the run unsteerable). `/save [file]` remains an explicit, separate
+transcript export.
+
+#### Mid-run steering (`venice sessions send`)
+
+A running agent — especially `venice code --auto` — used to have only two
+controls: let it finish, or kill it (losing uncommitted work and metered spend).
+`venice sessions send` adds a third: **steer it without stopping it.**
+
+```sh
+venice sessions send latest "actually, prioritize the #3 regression first"
+venice sessions send 20260724T101530-ab12cd "skip the CSS, focus on the API"
+echo "long note…" | venice sessions send latest -     # read the message from stdin
+```
+
+The message is dropped into the session's file **mailbox**
+(`~/.config/venice/sessions/<id>/mailbox/`, one atomic 0600 file per message).
+At its next checkpoint — the boundary between tool calls, before the next model
+turn — the agent drains the mailbox and consumes each message as a tagged user
+turn, exactly as if you had typed it interactively. It's additive input, not a
+reset: your `--max-tool-calls` / `--session-max-spend` budgets are unchanged.
+
+`latest` targets the most recent `code` session (`sessions ls --json` shows ids +
+pending counts for scripting). Targeting is **by recency, not liveness** — there's
+no process tracking — so a message sent to a session that has already finished
+simply waits in its mailbox and is drained the next time you `--resume` it. The
+mailbox is a local, owner-only directory (0700), not a network channel: a steer
+carries the same trust as the original task. This is stdlib-only — no daemon, no
+sockets, no extra dependency.
 
 #### Personas (local system-prompt files)
 
