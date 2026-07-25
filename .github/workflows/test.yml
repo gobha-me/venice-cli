@@ -12,6 +12,9 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # The drive suite waits on a child process, so a genuine hang would
+    # otherwise burn the full default budget before reporting.
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -33,10 +36,16 @@ jobs:
       # 3.9 the `mcp` marker resolves to nothing and those wiring tests skip;
       # the pure-logic MCP tests still run. No system packages are needed:
       # ffmpeg/montage shell-outs are mocked at subprocess/shutil.which.
+      #
+      # [test] adds pexpect for the #80 drive suite, which spawns the real CLI
+      # on a pty against a loopback fake API. It skips itself when pexpect is
+      # absent, so it is installed here on every matrix leg deliberately: this
+      # is the only thing in the repo that exercises 3.9 through a real
+      # terminal, and pinning it to one version would throw that away.
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[all]"
+          pip install -e ".[all,test]"
 
       - name: Lint
         run: make lint

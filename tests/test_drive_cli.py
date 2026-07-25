@@ -151,12 +151,32 @@ class TestDriveCharge(_DriveCase):
         self.assertNotIn("/image/generate", self.api.paths)
         self.assertEqual(list(self.project.glob("*.png")), [])
 
+
+# --------------------------------------------------------------------------
+# C'. the same gates with no pty at all
+#
+# The `not sys.stdin.isatty()` arms are unreachable through a pty by definition,
+# so these drive the CLI over plain pipes instead. Deliberately NOT gated on
+# pexpect: they are real coverage and should keep running for a contributor who
+# hasn't installed the [test] extra.
+# --------------------------------------------------------------------------
+
+class TestDriveNonInteractive(_DriveCase):
     def test_image_non_interactive_requires_yes(self):
-        # No pty: exercises the `not sys.stdin.isatty()` arm, unreachable above.
         cp = self.run_cli("image", "a cat", "--name", "drive-test")
         self.assertEqual(cp.returncode, 1)
         self.assertIn("non-interactive; pass --yes to confirm the charge.", cp.stderr)
         self.assertNotIn("/image/generate", self.api.paths)
+        self.assertEqual(list(self.project.glob("*.png")), [])
+
+    @needs_openai
+    def test_code_non_interactive_refuses_without_auto(self):
+        cp = self.run_cli("code", "add a docstring", "--root", str(self.project))
+        self.assertEqual(cp.returncode, 2)
+        self.assertIn("code: refusing to run unattended without --auto", cp.stderr)
+        # Encodes the intent of the comment at code.py:696 -- it must abort
+        # *before* spending a plan turn.
+        self.assertNotIn("/chat/completions", self.api.paths)
 
 
 # --------------------------------------------------------------------------
@@ -306,15 +326,9 @@ class TestDriveCodePlanGate(_DriveCase):
             d.expect("code: plan not accepted; aborting")
             self.assertEqual(d.wait(), 1)
 
+        # Two plan turns (the original and the revision), and nothing written.
         self.assertEqual(len(self.api.bodies("/chat/completions")), 2)
-
-    def test_code_non_interactive_refuses_without_auto(self):
-        cp = self.run_cli("code", "add a docstring", "--root", str(self.project))
-        self.assertEqual(cp.returncode, 2)
-        self.assertIn("code: refusing to run unattended without --auto", cp.stderr)
-        # Encodes the intent of the comment at code.py:697 -- it must abort
-        # *before* spending a plan turn.
-        self.assertNotIn("/chat/completions", self.api.paths)
+        self.assertEqual(list(self.project.iterdir()), [])
 
 
 if __name__ == "__main__":

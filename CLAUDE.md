@@ -44,4 +44,10 @@ the only barrier here; please honor it.
 - Run `venice login` interactively (getpass hides input).
 - Run `venice sfx --dry-run "..."` to verify quoting logic.
 - Run tests: `make test`.
+- Run the pty drive suite: `make drive`. It spawns the real CLI against a
+  local fake API with `VENICE_API_KEY=test-fake-key` and `$HOME` redirected
+  to a tmpdir, so it never touches the real credentials file. One case types
+  an obviously-fake key at the `venice login` prompt and then asserts the key
+  was **not** echoed to the terminal -- that test is the guard, not a
+  violation of it.
 - Modify code, write tests, refactor.
