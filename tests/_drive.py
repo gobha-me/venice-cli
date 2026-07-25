@@ -36,6 +36,7 @@ import contextlib
 import importlib.util
 import io
 import os
+import site
 import subprocess
 import sys
 import warnings
@@ -53,6 +54,10 @@ SKIP_REASON = 'needs the test extra: pip install -e ".[test]"'
 # only thing that can exhaust it is a genuine hang, which is what we want
 # reported. No per-step tuning, and no sleep() anywhere in the harness.
 DEFAULT_TIMEOUT = 20
+
+# Reserved, never listening. Used when a test class runs without a fake server,
+# so "no base URL" can never mean "the real api.venice.ai".
+DEAD_BASE_URL = "http://127.0.0.1:1/api/v1"
 
 # readline >= 8.1 wraps every prompt in bracketed-paste escapes
 # (\x1b[?2004h ... \x1b[?2004l). Killing that at the source beats making every
@@ -73,26 +78,37 @@ def _python_path() -> str:
     * **venice itself** -- ``<repo>/src`` under ``make test``, or site-packages
       when pip-installed. Deriving it from the loaded package means the drive
       tests exercise whatever the runner is actually testing, either way.
-    * **everything else on ``sys.path``** -- because we redirect ``$HOME``, and
-      on Linux the *user* site-packages dir (``~/.local/lib/pythonX.Y/...``) is
-      derived from ``$HOME``. Without this the child silently loses anything
-      installed with ``pip install --user``, and `venice chat` dies with
-      "needs the openai package" instead of running the test.
+    * **the site-packages dirs** -- because we redirect ``$HOME``, and on Linux
+      the *user* site dir (``~/.local/lib/pythonX.Y/site-packages``) is derived
+      from ``$HOME``. Without this the child silently loses anything installed
+      with ``pip install --user``, and `venice chat` dies with "needs the openai
+      package" instead of running the test.
 
-    ``''`` entries (the cwd) are dropped: the child gets an explicit ``cwd`` and
-    must not import out of the project dir a test happens to be driving from.
+    Deliberately **not** the whole of ``sys.path``: under ``make test`` that
+    includes the repo root and ``tests/``, and PYTHONPATH precedes the stdlib on
+    the child's path -- so a future fixture named after a stdlib module
+    (``tests/queue.py``, ``tests/types.py``) would shadow it and break every
+    drive test at once with an error pointing nowhere near the cause. It would
+    also let the child satisfy imports from the repo root that a real install
+    would not have, masking the packaging regressions the CI `package` job
+    exists to catch.
     """
     spec = importlib.util.find_spec("venice")
     if spec is None or not spec.submodule_search_locations:
         raise RuntimeError("cannot locate the venice package")
     parts = [str(Path(spec.submodule_search_locations[0]).parent)]
-    for entry in sys.path:
+    candidates = []
+    if hasattr(site, "getsitepackages"):  # absent under some virtualenvs
+        candidates.extend(site.getsitepackages())
+    if hasattr(site, "getusersitepackages"):
+        candidates.append(site.getusersitepackages())
+    for entry in candidates:
         if entry and os.path.isdir(entry) and entry not in parts:
             parts.append(entry)
     return os.pathsep.join(parts)
 
 
-def build_env(home, *, base_url=None, api_key="test-fake-key", extra=None) -> dict:
+def build_env(home, *, base_url=None, api_key="test-fake-key") -> dict:
     """The child's environment, built from scratch rather than inherited.
 
     Inheriting would drag in ``http_proxy``/``ALL_PROXY`` -- both urllib and
@@ -123,15 +139,19 @@ def build_env(home, *, base_url=None, api_key="test-fake-key", extra=None) -> di
         "VISUAL": "true",
         "INPUTRC": str(home / ".inputrc"),
     }
-    if base_url:
-        env["VENICE_BASE_URL"] = base_url
+    # Always pinned, never left to fall through to config.DEFAULT_BASE_URL --
+    # otherwise a test class that runs without a fake (`server = False`) points
+    # the child at https://api.venice.ai and hermeticity holds only because the
+    # commands it drives happen not to make a call today. Port 1 is reserved and
+    # never listening, so an unexpected request fails instantly and loudly
+    # instead of quietly reaching the real API.
+    env["VENICE_BASE_URL"] = base_url or DEAD_BASE_URL
     if api_key:
         env["VENICE_API_KEY"] = api_key
     # Deliberately NOT setting VENICE_SESSIONS_DIR / VENICE_MEMORY_DIR: config.py
     # derives them from $HOME at import, so the tmp home already sandboxes them
     # -- and leaving them off lets tests assert that a session envelope really
     # landed at <HOME>/.config/venice/sessions/.
-    env.update(extra or {})
     return env
 
 
@@ -142,11 +162,18 @@ class Driver:
         self.child = child
         self._all = sent_and_read
         self._read = read_only
+        self._secrets = []
 
     # -- assertions --------------------------------------------------------
 
-    def expect(self, needle: str, timeout=None) -> None:
-        """Wait for a literal substring, or fail with the whole transcript."""
+    def expect(self, needle: str, timeout=-1) -> None:
+        """Wait for a literal substring, or fail with the whole transcript.
+
+        ``timeout=-1`` is pexpect's "use the spawn's timeout" sentinel. It must
+        not be ``None``: pexpect reads None as "block forever", which would make
+        a missing prompt hang the suite instead of producing the transcript
+        below -- defeating the harness on the exact failure it exists to report.
+        """
         import pexpect
 
         try:
@@ -160,6 +187,20 @@ class Driver:
 
     def send(self, line: str) -> None:
         self.child.sendline(line)
+
+    def send_secret(self, value: str) -> None:
+        """Type a secret, and keep it out of any failure transcript.
+
+        pexpect's ``logfile`` records sends as well as reads, so a plain
+        ``send()`` at a hidden prompt would put the value straight into the
+        AssertionError text of a failing test -- i.e. into CI logs and session
+        transcripts, which CLAUDE.md names as the actual threat model, and which
+        CONTRIBUTING.md's "never log, print, or embed the API key ... including
+        in error messages" forbids. Use this for anything typed at a getpass
+        prompt (`venice login`, `venice secret set`).
+        """
+        self._secrets.append(value)
+        self.child.sendline(value)
 
     def send_eof(self) -> None:
         self.child.sendeof()
@@ -196,8 +237,16 @@ class Driver:
 
     @property
     def transcript(self) -> str:
-        """Everything sent and read -- for failure messages."""
-        return self._all.getvalue()
+        """Everything sent and read, with registered secrets redacted.
+
+        Redaction happens here rather than at the call sites so that every
+        failure path -- expect(), wait(), and anything added later -- is covered
+        by construction.
+        """
+        text = self._all.getvalue()
+        for secret in self._secrets:
+            text = text.replace(secret, "<redacted>")
+        return text
 
     @property
     def screen(self) -> str:
@@ -211,17 +260,23 @@ class Driver:
 
 @contextlib.contextmanager
 def cli(*argv, home, base_url=None, api_key="test-fake-key", cwd=None,
-        timeout=DEFAULT_TIMEOUT, env_extra=None):
+        timeout=DEFAULT_TIMEOUT):
     """Spawn ``python -m venice <argv>`` on a pty. Yields a :class:`Driver`."""
     import pexpect
 
     all_buf, read_buf = io.StringIO(), io.StringIO()
     # Python 3.12 warns on forkpty() from a multi-threaded process, and the fake
-    # API server owns a thread. The warning is about a child that runs Python
-    # code between fork and exec while another thread holds a lock; here the only
-    # other thread is parked in select() inside serve_forever (tests spawn before
-    # driving any traffic) and pexpect execs immediately. Scoped to this call so
-    # a genuine threading warning elsewhere still surfaces.
+    # API server owns a thread. The hazard is a child that runs Python between
+    # fork and exec while another thread holds an allocator lock; in practice
+    # tests spawn before driving any traffic, so the only other thread is parked
+    # in select() inside serve_forever, and pexpect execs promptly. That is a
+    # strong likelihood, not a proof -- ThreadingHTTPServer can still be
+    # unwinding a handler thread from an earlier test in the same class. The
+    # backstop is `timeout-minutes: 15` in test.yml, so the theoretical deadlock
+    # reports as a failed job rather than hanging a runner. Revisit by moving
+    # the fake out of process (as _mcp_fake_server.py does) if it ever bites;
+    # the cost would be losing in-process request assertions.
+    # Scoped to this call so a genuine threading warning elsewhere still shows.
     with warnings.catch_warnings():
         warnings.filterwarnings(
             "ignore", message=".*multi-threaded.*forkpty.*",
@@ -230,7 +285,7 @@ def cli(*argv, home, base_url=None, api_key="test-fake-key", cwd=None,
         child = pexpect.spawn(
             sys.executable,
             ["-m", "venice", *argv],
-            env=build_env(home, base_url=base_url, api_key=api_key, extra=env_extra),
+            env=build_env(home, base_url=base_url, api_key=api_key),
             cwd=str(cwd) if cwd else None,
             timeout=timeout,
             encoding="utf-8",
@@ -252,7 +307,8 @@ def cli(*argv, home, base_url=None, api_key="test-fake-key", cwd=None,
             child.close(force=True)
 
 
-def run(*argv, home, base_url=None, api_key="test-fake-key", cwd=None, timeout=60):
+def run(*argv, home, base_url=None, api_key="test-fake-key", cwd=None,
+        timeout=DEFAULT_TIMEOUT):
     """Run the CLI with **no** pty: pipes and ``stdin=/dev/null``.
 
     The ``isatty() is False`` branches (non-interactive charge refusal, `code`

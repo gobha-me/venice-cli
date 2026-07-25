@@ -145,14 +145,14 @@ class FakeVenice:
 
     # -- scripting ---------------------------------------------------------
 
-    def reply(self, text: str, *, usage=None) -> None:
+    def reply(self, text: str) -> None:
         """Queue one chat completion whose whole content is `text`."""
-        self.reply_chunks(text, usage=usage)
+        self.reply_chunks(text)
 
-    def reply_chunks(self, *deltas: str, usage=None) -> None:
+    def reply_chunks(self, *deltas: str) -> None:
         """Queue one chat completion streamed as the given deltas."""
         with self._lock:
-            self._chat.append({"deltas": list(deltas), "usage": usage or _USAGE})
+            self._chat.append({"deltas": list(deltas), "usage": _USAGE})
 
     def _next_chat(self) -> dict:
         with self._lock:

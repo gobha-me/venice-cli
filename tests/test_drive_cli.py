@@ -194,7 +194,9 @@ class TestDriveLogin(_DriveCase):
         with self.cli("login", api_key=None) as d:
             d.expect("Paste your Venice API key")
             d.expect("API key: ")
-            d.send(typed)
+            # send_secret, not send: a failing expect below prints the
+            # transcript, and a plain send would put the typed value in it.
+            d.send_secret(typed)
             d.expect("Saved %d-char key to" % len(typed))
             d.expect("(mode 0600).")
             self.assertEqual(d.wait(), 0)
@@ -208,6 +210,8 @@ class TestDriveLogin(_DriveCase):
         # input(). A mocked getpass can never prove the *terminal* stayed quiet.
         # `screen` is reads-only -- `transcript` would contain our own send.
         self.assertNotIn(typed, d.screen)
+        # ...and the failure path can't leak it either, whatever goes red.
+        self.assertNotIn(typed, d.transcript)
 
     def test_login_ctrl_c_exits_130(self):
         with self.cli("login", api_key=None) as d:

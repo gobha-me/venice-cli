@@ -11,19 +11,42 @@ No network, no real key: the server binds 127.0.0.1 on an ephemeral port.
 """
 import importlib.util
 import json
+import os
 import unittest
+import urllib.error
 import urllib.request
+from unittest import mock
 
 from tests import _venice_fake_server as fake
 from venice.client import VeniceAPIError, VeniceClient
 
 _HAS_OPENAI = importlib.util.find_spec("openai") is not None
 
+# urllib and httpx both honor these, and neither auto-bypasses loopback. The
+# drive tests get this for free (the child's env is built from scratch), but
+# these cases call the fake from *this* process -- so without clearing them a
+# developer behind a proxy or on a VPN sees the whole fixture suite go red, and
+# on a proxy that resolves rather than refuses, loopback traffic leaves the box.
+_PROXY_VARS = {
+    v: "" for v in (
+        "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+        "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+    )
+}
 
-class TestFakeServerViaClient(unittest.TestCase):
+
+class _NoProxyCase(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch.dict(os.environ, _PROXY_VARS)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+
+class TestFakeServerViaClient(_NoProxyCase):
     """Drive the fake through VeniceClient -- the real urllib path."""
 
     def setUp(self):
+        super().setUp()
         self.api = fake.FakeVenice().start()
         self.addCleanup(self.api.stop)
         self.client = VeniceClient(api_key="test-fake-key", base_url=self.api.base_url)
@@ -78,10 +101,11 @@ class TestFakeServerViaClient(unittest.TestCase):
 
 
 @unittest.skipUnless(_HAS_OPENAI, "openai SDK not installed")
-class TestFakeServerViaOpenAI(unittest.TestCase):
+class TestFakeServerViaOpenAI(_NoProxyCase):
     """The SDK path (`venice chat`/`code`/`embed`) talks to the same fake."""
 
     def setUp(self):
+        super().setUp()
         self.api = fake.FakeVenice().start()
         self.addCleanup(self.api.stop)
         import openai
@@ -133,14 +157,16 @@ class TestFakeServerViaOpenAI(unittest.TestCase):
         self.assertEqual(out.choices[0].message.content, "UNSCRIPTED-REPLY")
 
 
-class TestFakeServerLifecycle(unittest.TestCase):
+class TestFakeServerLifecycle(_NoProxyCase):
     def test_stop_closes_the_port(self):
         api = fake.FakeVenice().start()
         url = api.base_url + "/models?type=text"
         with urllib.request.urlopen(url, timeout=5) as resp:
             self.assertEqual(resp.status, 200)
         api.stop()
-        with self.assertRaises(Exception):
+        # URLError specifically, not bare Exception: a broad assertRaises would
+        # also pass on a proxy or DNS error, i.e. for the wrong reason.
+        with self.assertRaises(urllib.error.URLError):
             urllib.request.urlopen(url, timeout=5)
 
 

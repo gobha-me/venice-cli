@@ -31,7 +31,7 @@ without pip. Don't mix the two: both own `~/.local/bin/venice`.
 ```sh
 make test    # unittest, no network, no API key required
 make lint    # compileall syntax check
-make drive   # just the pty drive suite (already included in `make test`)
+make drive   # the drive suite + its fake-API fixture (a subset of `make test`)
 ```
 
 `make test` and `make lint` must be green. Tests are hermetic: `urlopen` is

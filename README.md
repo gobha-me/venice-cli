@@ -1610,7 +1610,7 @@ The player list (`paplay` -> `aplay` -> `ffplay` -> `mpg123` -> `play`
 
 ```sh
 make test     # everything, including the drive suite
-make drive    # just the pty drive suite
+make drive    # the drive suite + its fake-API fixture
 ```
 
 Stdlib `unittest` only. Most tests mock `urlopen` (and, for `chat`, the OpenAI
@@ -1623,7 +1623,9 @@ with `pexpect`, pointed at a local fake API via `$VENICE_BASE_URL`. It asserts
 on actual terminal output, prompts, and exit codes -- including two interleaved
 multi-step dialogues (the chat REPL and the `venice code` plan gate), because
 that's where interactive breakage hides. It needs the test extra
-(`pip install -e ".[all,test]"`) and skips cleanly without it.
+(`pip install -e ".[all,test]"`); without it the pty cases skip cleanly under
+`make test`, while `make drive` tells you the dep is missing rather than
+reporting a green run of nothing.
 
 ## Uninstall
 
