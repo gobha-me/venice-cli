@@ -185,6 +185,15 @@ def _cmd_args(**overrides):
 
 class TestMasterCommand(unittest.TestCase):
     def setUp(self):
+        # `master._run` calls `userconfig.apply_defaults` since #57 Class B, so
+        # without this it would read the developer's real config.json and these
+        # tests would pass or fail depending on whose machine ran them.
+        _cfg = mock.patch(
+            "venice.userconfig.load_config",
+            lambda *a, **k: {"version": 1, "mcpServers": {}, "defaults": {}},
+        )
+        _cfg.start()
+        self.addCleanup(_cfg.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.cwd = os.getcwd()
         os.chdir(self.tmp.name)
@@ -204,6 +213,58 @@ class TestMasterCommand(unittest.TestCase):
         p.write_bytes(b"x")
         rc = master_cmd._run(_cmd_args(input=p, dry_run=True))
         self.assertEqual(rc, 0)  # prints commands, spawns no ffmpeg
+
+    def test_config_loop_reaches_master_kwargs(self):
+        """defaults.master.loop fills the tri-stated --loop (#57 Class B)."""
+        from venice.commands import master as master_cmd
+        p = Path("in.wav")
+        p.write_bytes(b"x")
+        doc = {"version": 1, "mcpServers": {},
+               "defaults": {"master": {"loop": True}}}
+        seen = {}
+
+        def _spy(inp, out, **kw):
+            seen.update(kw)
+            return 0
+
+        with mock.patch("venice.userconfig.load_config", lambda *a, **k: doc), \
+             mock.patch.object(audio_post, "master", _spy):
+            rc = master_cmd._run(_cmd_args(input=p, loop=None))
+        self.assertEqual(rc, 0)
+        self.assertIs(seen["loop"], True)
+
+    def test_explicit_no_loop_beats_config(self):
+        from venice.commands import master as master_cmd
+        p = Path("in.wav")
+        p.write_bytes(b"x")
+        doc = {"version": 1, "mcpServers": {},
+               "defaults": {"master": {"loop": True}}}
+        seen = {}
+        with mock.patch("venice.userconfig.load_config", lambda *a, **k: doc), \
+             mock.patch.object(audio_post, "master",
+                               lambda i, o, **kw: seen.update(kw) or 0):
+            master_cmd._run(_cmd_args(input=p, loop=False))  # explicit --no-loop
+        self.assertIs(seen["loop"], False)
+
+    def test_output_dir_global_resolves_into_directory(self):
+        """A `defaults.output_dir` global now reaches `master`, and it is a
+        DIRECTORY -- without the is_dir() branch ffmpeg gets a dir as its output
+        file and the command exits 5 (#57 Class B, landmine C)."""
+        from venice.commands import master as master_cmd
+        p = Path("in.wav")
+        p.write_bytes(b"x")
+        outdir = Path("renders")
+        outdir.mkdir()
+        doc = {"version": 1, "mcpServers": {},
+               "defaults": {"output_dir": str(outdir.resolve())}}
+        seen = {}
+        with mock.patch("venice.userconfig.load_config", lambda *a, **k: doc), \
+             mock.patch.object(audio_post, "master",
+                               lambda i, o, **kw: seen.update(out=o) or 0):
+            rc = master_cmd._run(_cmd_args(input=p, output=None))
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen["out"], outdir.resolve() / "in.mastered.wav")
+        self.assertFalse(seen["out"].is_dir())
 
 
 if __name__ == "__main__":

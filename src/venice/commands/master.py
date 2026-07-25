@@ -9,7 +9,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from .. import audio_post
+from .. import audio_post, userconfig
 
 
 def register(subparsers) -> None:
@@ -33,10 +33,17 @@ def register(subparsers) -> None:
 
 
 def _run(args) -> int:
+    userconfig.apply_defaults(args, "master")
     if not args.input.exists():
         print(f"master: input not found: {args.input}", file=sys.stderr)
         return 6
     out = args.output or audio_post.default_output(args.input)
+    # `--output` now also arrives from the `defaults.output_dir` global, which is a
+    # DIRECTORY. Every sibling command resolves through a dir-aware helper
+    # (_shared.resolve_output / _queue.resolve_output_path); this one didn't, and
+    # would have handed ffmpeg a directory as the output file -> exit 5. (#57)
+    if out.is_dir():
+        out = out / audio_post.default_output(args.input).name
     return audio_post.master(
         args.input, out, dry_run=args.dry_run, **audio_post.master_kwargs(args)
     )

@@ -366,6 +366,8 @@ _COMMAND_MAP = {
         # #57 Class B: tri-stated --no-cleanup/--cleanup (CLI-only -- no
         # agent tool exposes a no_cleanup parameter).
         "no_cleanup": ("no_cleanup", _as_bool),
+        "master": ("master", _as_bool),
+        "loop": ("loop", _as_bool),
     },
     "music": {
         # `lyrics` is deliberately CLI-only -- it's per-song content, not a
@@ -374,6 +376,18 @@ _COMMAND_MAP = {
         "speed": ("speed", float),
         "play": ("play", _as_bool),
         "no_cleanup": ("no_cleanup", _as_bool),  # #57 Class B
+        "master": ("master", _as_bool),
+        "loop": ("loop", _as_bool),
+    },
+    # #57 Class B: the standalone `venice master` command. Only `loop` -- the
+    # valued knobs (--lufs/--true-peak/--sample-rate/--bit-depth/
+    # --loop-crossfade) keep their hardcoded argparse defaults; relocating
+    # those is Class C. No "master" key here: master.py registers the flags
+    # with include_toggle=False, so that namespace has no `master` attr.
+    # NOTE `defaults.master` is this SECTION; the sfx/music --master toggle
+    # is the KEY defaults.sfx.master / defaults.music.master.
+    "master": {
+        "loop": ("loop", _as_bool),
     },
     "video": {
         "model": ("model", str),
