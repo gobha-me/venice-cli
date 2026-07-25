@@ -9,7 +9,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from .. import audio_post
+from .. import audio_post, userconfig
+from . import _shared
 
 
 def register(subparsers) -> None:
@@ -33,10 +34,17 @@ def register(subparsers) -> None:
 
 
 def _run(args) -> int:
+    userconfig.apply_defaults(args, "master")
     if not args.input.exists():
         print(f"master: input not found: {args.input}", file=sys.stderr)
         return 6
-    out = args.output or audio_post.default_output(args.input)
+    # `--output` can now also arrive from the `defaults.output_dir` global, which
+    # is a DIRECTORY -- so resolve through the same shared helper every sibling
+    # command uses rather than handing ffmpeg a directory as its output file
+    # (exit 5). Unlike its other callers, master's no-flag default sits next to
+    # the INPUT, not in cwd, so that path is computed first. (#57 Class B)
+    default_out = audio_post.default_output(args.input)
+    out = _shared.resolve_output(args.output or default_out, default_out.name)
     return audio_post.master(
         args.input, out, dry_run=args.dry_run, **audio_post.master_kwargs(args)
     )

@@ -263,6 +263,12 @@ _GLOBAL_MAP = {
     "output_dir": ("output", _as_path),
     "max_spend": ("max_spend", float),
     "yes": ("yes", _as_bool),
+    # #57 Class B: `--no-balance`/`--balance` is tri-state (default None) on all
+    # eight spend-incurring commands. A global rather than eight sections -- the
+    # `hasattr` guard in `apply_defaults` skips commands that don't declare it,
+    # and `resolve_default` still lets `defaults.<cmd>.no_balance` override this.
+    # Deliberately NOT in `_COMMAND_MAP`: no agent tool prints a balance.
+    "no_balance": ("no_balance", _as_bool),
 }
 _COMMAND_MAP = {
     "chat": {
@@ -344,6 +350,10 @@ _COMMAND_MAP = {
         "style_preset": ("style_preset", str),
     },
     "image_edit": {
+        # #57 Class B: tri-stated --safe-mode/--no-safe-mode, matching
+        # defaults.image.safe_mode (the dest was renamed off `no_safe_mode` so
+        # the two image commands read alike here and on the tool surfaces).
+        "safe_mode": ("safe_mode", _as_bool),
         "model": ("model", str),
         "aspect_ratio": ("aspect_ratio", str),
         "resolution": ("resolution", str),
@@ -357,6 +367,11 @@ _COMMAND_MAP = {
     },
     "sfx": {
         "play": ("play", _as_bool),
+        # #57 Class B: tri-stated --no-cleanup/--cleanup (CLI-only -- no
+        # agent tool exposes a no_cleanup parameter).
+        "no_cleanup": ("no_cleanup", _as_bool),
+        "master": ("master", _as_bool),
+        "loop": ("loop", _as_bool),
     },
     "music": {
         # `lyrics` is deliberately CLI-only -- it's per-song content, not a
@@ -364,14 +379,32 @@ _COMMAND_MAP = {
         "duration": ("duration", int),
         "speed": ("speed", float),
         "play": ("play", _as_bool),
+        "no_cleanup": ("no_cleanup", _as_bool),  # #57 Class B
+        "instrumental": ("instrumental", _as_bool),
+        "master": ("master", _as_bool),
+        "loop": ("loop", _as_bool),
+    },
+    # #57 Class B: the standalone `venice master` command. Only `loop` -- the
+    # valued knobs (--lufs/--true-peak/--sample-rate/--bit-depth/
+    # --loop-crossfade) keep their hardcoded argparse defaults; relocating
+    # those is Class C. No "master" key here: master.py registers the flags
+    # with include_toggle=False, so that namespace has no `master` attr.
+    # NOTE `defaults.master` is this SECTION; the sfx/music --master toggle
+    # is the KEY defaults.sfx.master / defaults.music.master.
+    "master": {
+        "loop": ("loop", _as_bool),
     },
     "video": {
         "model": ("model", str),
         "resolution": ("resolution", str),
         "aspect_ratio": ("aspect_ratio", str),
         "negative_prompt": ("negative_prompt", str),
+        # #57 Class B: tri-stated --no-audio/--with-audio and --no-cleanup.
+        "no_audio": ("no_audio", _as_bool),
+        "no_cleanup": ("no_cleanup", _as_bool),
     },
     "upscale": {
+        "enhance": ("enhance", _as_bool),  # #57 Class B: tri-stated --enhance
         "enhance_creativity": ("enhance_creativity", float),
         "enhance_prompt": ("enhance_prompt", str),
         "replication": ("replication", float),
@@ -399,6 +432,14 @@ def resolve_default(command: str, key: str, doc=None):
     section = defaults.get(command)
     if isinstance(section, dict) and key in section:
         return section[key]
+    if key in _COMMAND_MAP:
+        # `key` names a command section (e.g. "master"), so a top-level
+        # `defaults.master` is that command's table -- never a global scalar for
+        # a same-named FLAG like sfx/music's `--master`. Without this, a scalar
+        # `defaults.master = true` would leak into every command declaring a
+        # `master` dest while simultaneously making `defaults.master.loop`
+        # unreachable. (#57 Class B)
+        return None
     val = defaults.get(key)
     if isinstance(val, dict):  # a command section, not a global scalar
         return None

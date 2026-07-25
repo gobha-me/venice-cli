@@ -9,6 +9,7 @@ so there is no reliable upfront quote -- we show the balance and confirm.
 """
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 from typing import Optional
@@ -16,6 +17,7 @@ from typing import Optional
 from .. import auth, userconfig
 from ..client import build_client_from_auth
 from ._shared import (
+    add_balance_flag,
     check_image_file,
     confirm_or_exit,
     encode_base64,
@@ -52,9 +54,11 @@ def register(subparsers) -> None:
     )
     p.add_argument(
         "--enhance",
-        action="store_true",
-        default=False,
-        help="Run Venice's enhancer during upscaling (required when --scale 1).",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Run Venice's enhancer during upscaling (required when --scale 1). "
+        "Config-backable via defaults.upscale.enhance; an explicit "
+        "--enhance/--no-enhance still wins.",
     )
     p.add_argument(
         "--enhance-creativity",
@@ -89,8 +93,7 @@ def register(subparsers) -> None:
         help="Refuse if the estimated cost exceeds this cap. Note: upscale "
         "pricing is dynamic, so no pre-charge estimate is available.",
     )
-    p.add_argument("--no-balance", action="store_true",
-                   help="Skip the upfront balance display.")
+    add_balance_flag(p)
     p.set_defaults(handler=_run)
 
 

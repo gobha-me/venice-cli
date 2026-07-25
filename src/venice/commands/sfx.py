@@ -40,7 +40,7 @@ def register(subparsers) -> None:
     p.add_argument("--yes", "-y", action="store_true", default=None)
     p.add_argument("--background", action="store_true")
     p.add_argument("--dry-run", action="store_true")
-    p.add_argument("--no-cleanup", action="store_true")
+    _shared.add_cleanup_flag(p, section="sfx", endpoint="/audio/complete")
     p.add_argument(
         "--max-spend",
         type=float,
@@ -48,11 +48,7 @@ def register(subparsers) -> None:
         metavar="USD",
         help="Refuse to queue if the quote exceeds this USD cap.",
     )
-    p.add_argument(
-        "--no-balance",
-        action="store_true",
-        help="Skip the upfront balance display.",
-    )
+    _shared.add_balance_flag(p)
     p.add_argument("--poll-interval", type=float, default=config.SFX_POLL_INTERVAL_SEC)
     p.add_argument("--max-wait", type=float, default=config.SFX_POLL_MAX_WAIT_SEC)
     audio_post.add_master_flags(p, include_toggle=True)
@@ -75,8 +71,15 @@ def register_status(subparsers) -> None:
         default=DEFAULT_SFX_MODEL,
     )
     sp.add_argument("--output", "-o", type=Path, default=None)
-    sp.add_argument("--play", action="store_true")
-    sp.add_argument("--no-cleanup", action="store_true")
+    status_play = sp.add_mutually_exclusive_group()
+    status_play.add_argument("--play", dest="play", action="store_true",
+                             default=None,
+                             help="Play the audio after download. Config-backable "
+                                  "via defaults.sfx.play.")
+    status_play.add_argument("--no-play", dest="play", action="store_false",
+                             default=None,
+                             help="Never play (beats a config default).")
+    _shared.add_cleanup_flag(sp, section="sfx", endpoint="/audio/complete")
     sp.add_argument("--poll-interval", type=float, default=config.SFX_POLL_INTERVAL_SEC)
     sp.add_argument("--max-wait", type=float, default=config.SFX_POLL_MAX_WAIT_SEC)
     sp.set_defaults(handler=_run_status)
@@ -103,7 +106,8 @@ def _run_generate(args) -> int:
         return 2
 
     if args.master and not audio_post.has_ffmpeg():
-        print("sfx: --master requires ffmpeg on PATH; install it or drop --master",
+        print("sfx: mastering requires ffmpeg on PATH; install it, pass "
+              "--no-master, or unset defaults.sfx.master",
               file=sys.stderr)
         return 2
 
@@ -173,7 +177,7 @@ def _run_generate(args) -> int:
         args.output,
         args.poll_interval,
         args.max_wait,
-        args.no_cleanup,
+        bool(args.no_cleanup),
         args.play,
         name_prefix="venice-sfx",
         retry_hint=f"venice sfx-status {queue_id}",
@@ -182,10 +186,16 @@ def _run_generate(args) -> int:
 
 
 def _run_status(args) -> int:
+    # #57 Class B: status shares its parent's section, so a config
+    # default like defaults.sfx.no_cleanup applies to `venice sfx`
+    # and `venice sfx-status` alike rather than only the former.
+    userconfig.apply_defaults(args, "sfx")
     client, rc = _queue.build_client()
     if rc != 0:
         return rc
-    want_play = True if args.play else None
+    # None = auto-detect (tty + a player); the tri-state maps 1:1 onto
+    # `retrieve_and_save`'s Optional[bool] want_play. (#57 Class B)
+    want_play = args.play
     return _audio.retrieve_and_save(
         client,
         args.model,
@@ -193,7 +203,7 @@ def _run_status(args) -> int:
         args.output,
         args.poll_interval,
         args.max_wait,
-        args.no_cleanup,
+        bool(args.no_cleanup),
         want_play,
         name_prefix="venice-sfx",
         retry_hint=f"venice sfx-status {args.queue_id}",

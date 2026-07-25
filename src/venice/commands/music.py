@@ -8,6 +8,7 @@ unavailable it degrades to letting the API be the backstop.
 """
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 from typing import Optional
@@ -40,8 +41,11 @@ def register(subparsers) -> None:
     )
     p.add_argument(
         "--instrumental",
-        action="store_true",
-        help="Force instrumental (no lyrics/vocals).",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Force instrumental (no lyrics/vocals). Config-backable via "
+        "defaults.music.instrumental; an explicit --lyrics clears a "
+        "config-sourced value, and --instrumental/--no-instrumental still wins.",
     )
     p.add_argument("--lyrics", default=None, metavar="TXT", help="Lyrics prompt (lyric-capable models only).")
     p.add_argument("--speed", type=float, default=None, help="Playback speed multiplier.")
@@ -52,7 +56,7 @@ def register(subparsers) -> None:
     p.add_argument("--yes", "-y", action="store_true", default=None)
     p.add_argument("--background", action="store_true")
     p.add_argument("--dry-run", action="store_true")
-    p.add_argument("--no-cleanup", action="store_true")
+    _shared.add_cleanup_flag(p, section="music", endpoint="/audio/complete")
     p.add_argument(
         "--max-spend",
         type=float,
@@ -60,11 +64,7 @@ def register(subparsers) -> None:
         metavar="USD",
         help="Refuse to queue if the quote exceeds this USD cap.",
     )
-    p.add_argument(
-        "--no-balance",
-        action="store_true",
-        help="Skip the upfront balance display.",
-    )
+    _shared.add_balance_flag(p)
     p.add_argument("--poll-interval", type=float, default=config.SFX_POLL_INTERVAL_SEC)
     p.add_argument("--max-wait", type=float, default=config.SFX_POLL_MAX_WAIT_SEC)
     audio_post.add_master_flags(p, include_toggle=True)
@@ -83,8 +83,15 @@ def register_status(subparsers) -> None:
     sp.add_argument("queue_id")
     sp.add_argument("--model", default=DEFAULT_MUSIC_MODEL)
     sp.add_argument("--output", "-o", type=Path, default=None)
-    sp.add_argument("--play", action="store_true")
-    sp.add_argument("--no-cleanup", action="store_true")
+    status_play = sp.add_mutually_exclusive_group()
+    status_play.add_argument("--play", dest="play", action="store_true",
+                             default=None,
+                             help="Play the audio after download. Config-backable "
+                                  "via defaults.music.play.")
+    status_play.add_argument("--no-play", dest="play", action="store_false",
+                             default=None,
+                             help="Never play (beats a config default).")
+    _shared.add_cleanup_flag(sp, section="music", endpoint="/audio/complete")
     sp.add_argument("--poll-interval", type=float, default=config.SFX_POLL_INTERVAL_SEC)
     sp.add_argument("--max-wait", type=float, default=config.SFX_POLL_MAX_WAIT_SEC)
     sp.set_defaults(handler=_run_status)
@@ -130,6 +137,25 @@ def _num(v):
     if isinstance(v, (int, float)):
         return float(v)
     return None
+
+
+def resolve_instrumental(instrumental, lyrics, *, explicit: bool):
+    """A CONFIG-sourced `--instrumental` yields to a deliberate `--lyrics` (#57).
+
+    `lyrics` is deliberately excluded from `_COMMAND_MAP` (it's per-song content,
+    not a preference), so it can only ever have come from the CLI or a tool call
+    -- it is always deliberate. `instrumental` may have come from
+    `defaults.music.instrumental`, and `apply_defaults` runs BEFORE `_validate`,
+    so without this a user who set that key once and then typed only `--lyrics`
+    would hit the mutual-exclusion error for a flag they never passed.
+
+    Only when BOTH were deliberate does `_validate`'s exit 2 still fire.
+    """
+    if instrumental and lyrics and not explicit:
+        print("music: --lyrics overrides defaults.music.instrumental for this run",
+              file=sys.stderr)
+        return False
+    return instrumental
 
 
 def _validate(args, spec: Optional[dict]) -> Optional[int]:
@@ -201,13 +227,20 @@ def _validate(args, spec: Optional[dict]) -> Optional[int]:
 
 
 def _run_generate(args) -> int:
+    # Capture explicitness BEFORE config can fill the dest -- afterwards a
+    # config-sourced True is indistinguishable from a typed --instrumental.
+    instrumental_explicit = args.instrumental is not None
     userconfig.apply_defaults(args, "music")
+    args.instrumental = resolve_instrumental(
+        args.instrumental, args.lyrics, explicit=instrumental_explicit
+    )
     if not args.prompt:
         print("music: prompt required (or use: venice music-status <id>)", file=sys.stderr)
         return 2
 
     if args.master and not audio_post.has_ffmpeg():
-        print("music: --master requires ffmpeg on PATH; install it or drop --master",
+        print("music: mastering requires ffmpeg on PATH; install it, pass "
+              "--no-master, or unset defaults.music.master",
               file=sys.stderr)
         return 2
 
@@ -290,7 +323,7 @@ def _run_generate(args) -> int:
         args.output,
         args.poll_interval,
         args.max_wait,
-        args.no_cleanup,
+        bool(args.no_cleanup),
         args.play,
         name_prefix="venice-music",
         retry_hint=f"venice music-status {queue_id}",
@@ -299,10 +332,16 @@ def _run_generate(args) -> int:
 
 
 def _run_status(args) -> int:
+    # #57 Class B: status shares its parent's section, so a config
+    # default like defaults.music.no_cleanup applies to `venice music`
+    # and `venice music-status` alike rather than only the former.
+    userconfig.apply_defaults(args, "music")
     client, rc = _queue.build_client()
     if rc != 0:
         return rc
-    want_play = True if args.play else None
+    # None = auto-detect (tty + a player); the tri-state maps 1:1 onto
+    # `retrieve_and_save`'s Optional[bool] want_play. (#57 Class B)
+    want_play = args.play
     return _audio.retrieve_and_save(
         client,
         args.model,
@@ -310,7 +349,7 @@ def _run_status(args) -> int:
         args.output,
         args.poll_interval,
         args.max_wait,
-        args.no_cleanup,
+        bool(args.no_cleanup),
         want_play,
         name_prefix="venice-music",
         retry_hint=f"venice music-status {args.queue_id}",

@@ -182,6 +182,74 @@ class TestSfxFullFlow(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertEqual(calls, [])
 
+    def test_status_handler_applies_config_defaults(self):
+        """#57 Class B: `sfx-status` never called apply_defaults, so a config key
+        would have applied to `venice sfx` but silently not to `venice sfx-status`."""
+        from venice.commands import sfx
+
+        doc = {"version": 1, "mcpServers": {},
+               "defaults": {"sfx": {"no_cleanup": True}}}
+        args = argparse.Namespace(
+            queue_id="abcdef1234567890", model="elevenlabs-sound-effects-v2",
+            output=None, poll_interval=0.0, max_wait=1.0, no_cleanup=None,
+            play=False, command="sfx-status",
+        )
+        seen = {}
+
+        def fake_retrieve(client, model, qid, *a, **kw):
+            seen["no_cleanup"] = a[3]  # 7th positional overall
+            return 0
+
+        with mock.patch("venice.userconfig.load_config", lambda *a, **k: doc), \
+             mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.commands._audio.retrieve_and_save", fake_retrieve):
+            rc = sfx._run_status(args)
+
+        self.assertEqual(rc, 0)
+        self.assertIs(seen["no_cleanup"], True)
+
+    def test_config_master_triggers_the_ffmpeg_precheck(self):
+        """#57 Class B: defaults.sfx.master reaches args.master, proven by the
+        pre-spend ffmpeg guard firing without an inline --master."""
+        from venice.commands import sfx
+
+        calls = []
+
+        def fake_urlopen(req, timeout=None):
+            calls.append(req.full_url)
+            raise AssertionError("should not reach the network")
+
+        doc = {"version": 1, "mcpServers": {},
+               "defaults": {"sfx": {"master": True}}}
+        with mock.patch("venice.userconfig.load_config", lambda *a, **k: doc), \
+             mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.client.urllib.request.urlopen", fake_urlopen), \
+             mock.patch("venice.audio_post.has_ffmpeg", lambda: False):
+            rc = sfx._run_generate(_build_args(master=None))
+
+        self.assertEqual(rc, 2)
+        self.assertEqual(calls, [])
+
+    def test_explicit_no_master_beats_config(self):
+        from venice.commands import sfx
+
+        doc = {"version": 1, "mcpServers": {},
+               "defaults": {"sfx": {"master": True}}}
+        args = _build_args(master=False, dry_run=True)
+
+        # urlopen MUST be patched: --dry-run still POSTs /audio/quote before it
+        # returns, so an unmocked run would hit the real API (CONTRIBUTING: "No
+        # test should ever make a real API call or need a real key.").
+        def fake_urlopen(req, timeout=None):
+            return FakeResp(200, b'{"quote": 0.0027}', "application/json")
+
+        with mock.patch("venice.userconfig.load_config", lambda *a, **k: doc), \
+             mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.client.urllib.request.urlopen", fake_urlopen), \
+             mock.patch("venice.audio_post.has_ffmpeg", lambda: False):
+            sfx._run_generate(args)
+        self.assertIs(args.master, False)  # config did not overwrite it
+
     def test_missing_api_key_returns_exit_2(self):
         from venice.commands import sfx
 

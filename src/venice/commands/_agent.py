@@ -865,7 +865,7 @@ _IMAGE_EDIT_SCHEMA = _obj(
         "aspect_ratio": _p("string", "Output aspect ratio ('auto' infers from the input)."),
         "resolution": _p("string", "Output resolution tier, e.g. 1K/2K/4K."),
         "output_format": _p("string", "Output image format: png, jpeg, or webp."),
-        "no_safe_mode": _p("boolean", "Disable safe mode (defaults to on)."),
+        "safe_mode": _p("boolean", "Blur adult/NSFW content. Defaults to on; set false to disable."),
     },
     required=["prompt"],
 )

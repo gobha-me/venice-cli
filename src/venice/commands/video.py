@@ -80,11 +80,27 @@ def register(subparsers) -> None:
         "--aspect-ratio", choices=ASPECT_CHOICES, default=None, dest="aspect_ratio"
     )
     p.add_argument("--negative-prompt", default=None, dest="negative_prompt")
-    p.add_argument(
+    # Tri-stated so `defaults.video.no_audio` can reach the dest (#57 Class B).
+    # The positive counterpart is `--with-audio`, NOT `--audio`: `--audio` is
+    # already taken below by the background-music media input (dest audio_input),
+    # and a second registration would raise at parser-build time.
+    audio_grp = p.add_mutually_exclusive_group()
+    audio_grp.add_argument(
         "--no-audio",
         action="store_true",
         dest="no_audio",
-        help="Disable audio (models that support it generate audio by default).",
+        default=None,
+        help="Disable audio (models that support it generate audio by default). "
+        "Config-backable via defaults.video.no_audio; an explicit "
+        "--no-audio/--with-audio still wins.",
+    )
+    audio_grp.add_argument(
+        "--with-audio",
+        action="store_false",
+        dest="no_audio",
+        default=None,
+        help="Force the generated audio track on (beats defaults.video.no_audio). "
+        "Distinct from --audio, which supplies an input audio file.",
     )
     # Media inputs (#18). Each accepts a local file path OR an http(s)/data URL;
     # local files are encoded to a `data:` URL. See _collect_media below.
@@ -140,7 +156,7 @@ def register(subparsers) -> None:
     p.add_argument("--yes", "-y", action="store_true", default=None)
     p.add_argument("--background", action="store_true")
     p.add_argument("--dry-run", action="store_true")
-    p.add_argument("--no-cleanup", action="store_true")
+    _shared.add_cleanup_flag(p, section="video", endpoint="/video/complete")
     p.add_argument(
         "--max-spend",
         type=float,
@@ -148,11 +164,7 @@ def register(subparsers) -> None:
         metavar="USD",
         help="Refuse to queue if the quote exceeds this USD cap.",
     )
-    p.add_argument(
-        "--no-balance",
-        action="store_true",
-        help="Skip the upfront balance display.",
-    )
+    _shared.add_balance_flag(p)
     p.add_argument("--poll-interval", type=float, default=config.VIDEO_POLL_INTERVAL_SEC)
     p.add_argument("--max-wait", type=float, default=config.VIDEO_POLL_MAX_WAIT_SEC)
     p.set_defaults(handler=_run_generate)
@@ -181,7 +193,7 @@ def register_status(subparsers) -> None:
         help="Presigned URL from the original queue (VPS-backed models only).",
     )
     sp.add_argument("--output", "-o", type=Path, default=None)
-    sp.add_argument("--no-cleanup", action="store_true")
+    _shared.add_cleanup_flag(sp, section="video", endpoint="/video/complete")
     sp.add_argument("--poll-interval", type=float, default=config.VIDEO_POLL_INTERVAL_SEC)
     sp.add_argument("--max-wait", type=float, default=config.VIDEO_POLL_MAX_WAIT_SEC)
     sp.set_defaults(handler=_run_status)
@@ -424,11 +436,19 @@ def _run_generate(args) -> int:
 
     return _retrieve_and_save(
         client, model, queue_id, download_url,
-        args.output, args.poll_interval, args.max_wait, args.no_cleanup,
+        args.output, args.poll_interval, args.max_wait, bool(args.no_cleanup),
     )
 
 
 def _run_status(args) -> int:
+    # #57 Class B: status shares its parent's section, so a config default like
+    # defaults.video.no_cleanup applies to `venice video` and `venice
+    # video-status` alike rather than only the former. EXCEPT `model`: here it is
+    # job identity (it is sent in the /video/retrieve body), not a preference, so
+    # defaults.video.model must not retarget a job that was queued with another.
+    queued_model = args.model
+    userconfig.apply_defaults(args, "video")
+    args.model = queued_model
     client, rc = _queue.build_client()
     if rc != 0:
         return rc
@@ -442,7 +462,7 @@ def _run_status(args) -> int:
             return rc
     return _retrieve_and_save(
         client, model, args.queue_id, args.download_url,
-        args.output, args.poll_interval, args.max_wait, args.no_cleanup,
+        args.output, args.poll_interval, args.max_wait, bool(args.no_cleanup),
     )
 
 

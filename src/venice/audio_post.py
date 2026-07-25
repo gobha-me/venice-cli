@@ -6,6 +6,7 @@ dependencies, detected at call time; missing tools fail cleanly before any work.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import shutil
 import subprocess
@@ -43,8 +44,11 @@ def add_master_flags(parser, *, include_toggle: bool) -> None:
     if include_toggle:
         parser.add_argument(
             "--master",
-            action="store_true",
-            help="After saving, master to WAV (48k/24-bit, LUFS/true-peak; needs ffmpeg).",
+            action=argparse.BooleanOptionalAction,
+            default=None,
+            help="After saving, master to WAV (48k/24-bit, LUFS/true-peak; needs "
+            "ffmpeg). Config-backable via defaults.sfx.master / "
+            "defaults.music.master; an explicit --master/--no-master still wins.",
         )
     parser.add_argument("--lufs", type=float, default=-16.0, metavar="LUFS",
                         help="Integrated loudness target (default -16).")
@@ -54,8 +58,10 @@ def add_master_flags(parser, *, include_toggle: bool) -> None:
                         metavar="HZ", help="Output sample rate (default 48000).")
     parser.add_argument("--bit-depth", type=int, choices=(16, 24, 32), default=24,
                         dest="bit_depth", help="Output PCM bit depth (default 24).")
-    parser.add_argument("--loop", action="store_true",
-                        help="Make it seamlessly loopable (crossfade tail into head).")
+    parser.add_argument("--loop", action=argparse.BooleanOptionalAction, default=None,
+                        help="Make it seamlessly loopable (crossfade tail into head). "
+                             "Config-backable via defaults.{master,sfx,music}.loop; an "
+                             "explicit --loop/--no-loop still wins.")
     parser.add_argument("--loop-crossfade", type=float, default=2.0, dest="loop_crossfade",
                         metavar="SEC", help="Loop crossfade length in seconds (default 2).")
 
@@ -67,7 +73,9 @@ def master_kwargs(args) -> dict:
         bit_depth=args.bit_depth,
         lufs=args.lufs,
         true_peak=args.true_peak,
-        loop=args.loop,
+        # bool(): `--loop` is tri-state (default None) so config can reach it,
+        # but `master()` annotates loop as a plain bool. (#57 Class B)
+        loop=bool(args.loop),
         loop_crossfade=args.loop_crossfade,
     )
 

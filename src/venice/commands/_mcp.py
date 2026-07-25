@@ -424,7 +424,7 @@ def music_tool(
     *,
     model: str = _music.DEFAULT_MUSIC_MODEL,
     duration: Optional[int] = None,
-    instrumental: bool = False,
+    instrumental: Optional[bool] = None,
     lyrics: Optional[str] = None,
     speed: Optional[float] = None,
     output_dir: Optional[str] = None,
@@ -442,6 +442,11 @@ def music_tool(
     if not prompt or not prompt.strip():
         return _err("music: prompt is required")
 
+    # NOTE: no `resolve_instrumental` here, deliberately. On this path a model's
+    # explicit `instrumental=true` and an operator's defaults.music.instrumental
+    # are already merged into one value, so coercing would silently charge for a
+    # vocal track when the caller explicitly asked for instrumental. `_validate`
+    # keeps returning exit 2 for the both-set case: loud beats silent. (#57)
     ns = SimpleNamespace(
         prompt=prompt.strip(), model=model, duration=duration,
         instrumental=instrumental, lyrics=lyrics, speed=speed,
@@ -519,7 +524,7 @@ def upscale_tool(
     input_path: str,
     *,
     scale: float = 2.0,
-    enhance: bool = False,
+    enhance: Optional[bool] = None,
     enhance_creativity: Optional[float] = None,
     enhance_prompt: Optional[str] = None,
     replication: Optional[float] = None,
@@ -738,7 +743,7 @@ def video_tool(
     negative_prompt: Optional[str] = None,
     resolution: Optional[str] = None,
     aspect_ratio: Optional[str] = None,
-    no_audio: bool = False,
+    no_audio: Optional[bool] = None,
     image_url: Optional[str] = None,
     end_image_url: Optional[str] = None,
     video_url: Optional[str] = None,
@@ -997,7 +1002,7 @@ def image_edit_tool(
     aspect_ratio: Optional[str] = None,
     resolution: Optional[str] = None,
     output_format: Optional[str] = None,
-    no_safe_mode: bool = False,
+    safe_mode: Optional[bool] = None,
     output_dir: Optional[str] = None,
     confirm: bool = False,
     max_spend: Optional[float] = None,
@@ -1013,7 +1018,7 @@ def image_edit_tool(
     ns = SimpleNamespace(
         input=inp, image_url=image_url, prompt=prompt, layer=layers or None,
         model=model, aspect_ratio=aspect_ratio, resolution=resolution,
-        output_format=output_format, no_safe_mode=no_safe_mode,
+        output_format=output_format, safe_mode=safe_mode,
     )
     rc = _image_edit._validate(ns)  # stderr warnings only
     if rc is not None:

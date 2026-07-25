@@ -28,7 +28,7 @@ def _args(**ov):
         aspect_ratio=None,
         resolution=None,
         output_format=None,
-        no_safe_mode=False,
+        safe_mode=None,
         output=None,
         yes=True,
         dry_run=False,
@@ -151,12 +151,30 @@ class TestImageEditFlow(unittest.TestCase):
         self.assertEqual(cap["body"]["modelId"], "qwen-edit")
         self.assertNotIn("model", cap["body"])
 
-    def test_no_safe_mode_sends_false_else_omitted(self):
-        _, cap = self._run(_args(no_safe_mode=True))
+    def test_safe_mode_tristate_body(self):
+        """#57 Class B: safe_mode is sent unconditionally now. Unset -> true
+        (previously the key was omitted; the API schema defaults it to true, so
+        the request is equivalent). Explicit off is unchanged."""
+        _, cap = self._run(_args(safe_mode=False))
         self.assertIs(cap["body"]["safe_mode"], False)
 
-        _, cap2 = self._run(_args())
-        self.assertNotIn("safe_mode", cap2["body"])
+        _, cap2 = self._run(_args())  # safe_mode=None
+        self.assertIs(cap2["body"]["safe_mode"], True)
+
+        _, cap3 = self._run(_args(safe_mode=True))
+        self.assertIs(cap3["body"]["safe_mode"], True)
+
+    def test_config_safe_mode_reaches_the_body(self):
+        """#57 Class B: defaults.image_edit.safe_mode fills the tri-stated dest
+        and lands on the wire; an explicit --safe-mode still wins."""
+        doc = {"version": 1, "mcpServers": {},
+               "defaults": {"image_edit": {"safe_mode": False}}}
+        with mock.patch("venice.userconfig.load_config", lambda *a, **k: doc):
+            _, cap = self._run(_args(safe_mode=None))
+            self.assertIs(cap["body"]["safe_mode"], False)
+
+            _, cap2 = self._run(_args(safe_mode=True))
+            self.assertIs(cap2["body"]["safe_mode"], True)
 
     def test_aspect_ratio_and_resolution_pass_through(self):
         _, cap = self._run(_args(aspect_ratio="16:9", resolution="2K"))

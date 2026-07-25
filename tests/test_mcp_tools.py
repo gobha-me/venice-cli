@@ -256,6 +256,27 @@ class TestMusicTool(_ToolTest):
         self.assertEqual(res["status"], "ok")
         self.assertEqual(Path(res["path"]).read_bytes(), b"MUSICBYTES")
 
+    def test_instrumental_plus_lyrics_still_errors_without_spending(self):
+        """#57 Class B deliberately does NOT call `resolve_instrumental` on the
+        tool path: an explicit model arg and an operator config default are
+        already merged into one value there, so coercing would silently charge
+        for a vocal track when the caller asked for instrumental. The validation
+        error must survive, and no paid endpoint may be reached."""
+        def fake(req, timeout=None):
+            u = req.full_url
+            if "type=music" in u:                            # fetch_music_spec
+                return FakeResp(200, json.dumps(
+                    {"data": [{"id": "elevenlabs-music", "model_spec": {}}]}).encode())
+            raise AssertionError(f"must not reach a paid endpoint: {u}")
+
+        with mock.patch("venice.client.urllib.request.urlopen", fake), self.stdout_guard():
+            res = _mcp.music_tool(
+                _client(), "battle hymn", instrumental=True, lyrics="for the horde",
+                output_dir=self.td, confirm=True,
+            )
+        self.assertEqual(res["status"], "error")
+        self.assertEqual(os.listdir(self.td), [])
+
     def test_background_returns_queue_id(self):
         def fake(req, timeout=None):
             u = req.full_url
@@ -791,6 +812,26 @@ class TestImageEditTool(_ToolTest):
         self.assertTrue(captured["url"].endswith("/image/edit"))
         self.assertIn("image", captured["body"])  # single-edit sends "image"
         self.assertEqual(base64.b64decode(captured["body"]["image"]), ip.read_bytes())
+
+    def test_edit_safe_mode_param(self):
+        """#57 Class B renamed this tool's `no_safe_mode` to `safe_mode`, matching
+        venice_image. Unset now sends true (the API schema's own default)."""
+        ip = self._png()
+        captured = {}
+
+        def fake(req, timeout=None):
+            captured["body"] = json.loads(req.data.decode())
+            return FakeResp(200, b"EDITED", "image/png")
+
+        with mock.patch("venice.client.urllib.request.urlopen", fake), self.stdout_guard():
+            _mcp.image_edit_tool(_client(), "make it blue", input_path=str(ip),
+                                 output_dir=self.td, confirm=True, safe_mode=False)
+        self.assertIs(captured["body"]["safe_mode"], False)
+
+        with mock.patch("venice.client.urllib.request.urlopen", fake), self.stdout_guard():
+            _mcp.image_edit_tool(_client(), "make it blue", input_path=str(ip),
+                                 output_dir=self.td, confirm=True)
+        self.assertIs(captured["body"]["safe_mode"], True)
 
     def test_multi_edit_with_layers(self):
         ip = self._png()
