@@ -274,7 +274,7 @@ def build_server(client, doc=None) -> FastMCP:
         aspect_ratio: Optional[str] = None,
         resolution: Optional[str] = None,
         output_format: Optional[str] = None,
-        no_safe_mode: bool = False,
+        safe_mode: Optional[bool] = None,
         output_dir: Optional[str] = None,
         confirm: bool = False,
         max_spend: Optional[float] = None,
@@ -289,7 +289,7 @@ def build_server(client, doc=None) -> FastMCP:
                 input_path=input_path, image_url=image_url,
                 layer_paths=layer_paths, model=model, aspect_ratio=aspect_ratio,
                 resolution=resolution, output_format=output_format,
-                no_safe_mode=no_safe_mode, output_dir=output_dir, confirm=confirm,
+                safe_mode=safe_mode, output_dir=output_dir, confirm=confirm,
                 max_spend=max_spend,
             )),
         )

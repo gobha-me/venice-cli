@@ -1001,7 +1001,7 @@ def image_edit_tool(
     aspect_ratio: Optional[str] = None,
     resolution: Optional[str] = None,
     output_format: Optional[str] = None,
-    no_safe_mode: bool = False,
+    safe_mode: Optional[bool] = None,
     output_dir: Optional[str] = None,
     confirm: bool = False,
     max_spend: Optional[float] = None,
@@ -1017,7 +1017,7 @@ def image_edit_tool(
     ns = SimpleNamespace(
         input=inp, image_url=image_url, prompt=prompt, layer=layers or None,
         model=model, aspect_ratio=aspect_ratio, resolution=resolution,
-        output_format=output_format, no_safe_mode=no_safe_mode,
+        output_format=output_format, safe_mode=safe_mode,
     )
     rc = _image_edit._validate(ns)  # stderr warnings only
     if rc is not None:

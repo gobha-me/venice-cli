@@ -350,6 +350,10 @@ _COMMAND_MAP = {
         "style_preset": ("style_preset", str),
     },
     "image_edit": {
+        # #57 Class B: tri-stated --safe-mode/--no-safe-mode, matching
+        # defaults.image.safe_mode (the dest was renamed off `no_safe_mode` so
+        # the two image commands read alike here and on the tool surfaces).
+        "safe_mode": ("safe_mode", _as_bool),
         "model": ("model", str),
         "aspect_ratio": ("aspect_ratio", str),
         "resolution": ("resolution", str),

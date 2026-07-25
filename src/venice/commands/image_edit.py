@@ -11,6 +11,7 @@ or an image URL; layers are local files. The endpoint returns raw image bytes
 """
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 from typing import List, Optional
@@ -80,8 +81,14 @@ def register(subparsers) -> None:
     p.add_argument("--output-format", default=None,
                    choices=["png", "jpeg", "webp"],
                    help="Output image format (default inferred; PNG for 1K).")
-    p.add_argument("--no-safe-mode", action="store_true",
-                   help="Disable safe mode (safe_mode defaults to true).")
+    p.add_argument(
+        "--safe-mode",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Safe mode blurs flagged art (on by default). --no-safe-mode "
+        "disables it. Config-backable via defaults.image_edit.safe_mode; an "
+        "explicit --safe-mode/--no-safe-mode still wins.",
+    )
     p.add_argument("--output", "-o", type=Path, default=None,
                    help="Output file or directory. Default: cwd/<input>-edit.<ext> "
                    f"(or {URL_DEFAULT_STEM}.<ext> for --image-url).")
@@ -135,8 +142,11 @@ def _add_common(body: dict, args) -> None:
         body["resolution"] = args.resolution
     if args.output_format is not None:
         body["output_format"] = args.output_format
-    if args.no_safe_mode:
-        body["safe_mode"] = False
+    # None (neither flag nor config set) -> True, i.e. stay safe by default.
+    # Unconditional, matching `image._build_body`: when unset the body now
+    # carries safe_mode=true rather than omitting the key, which the API
+    # schema declares as the default anyway. (#57 Class B)
+    body["safe_mode"] = args.safe_mode if args.safe_mode is not None else True
 
 
 def _build_body(args, base_image: str, layers_b64: List[str]) -> tuple:

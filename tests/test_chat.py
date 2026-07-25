@@ -1044,7 +1044,8 @@ class TestBuiltinToolsRegistry(unittest.TestCase):
 
     def test_image_schema_exposes_safety_flags(self):
         # #61: the agent must be able to toggle safe_mode/hide_watermark per call
-        # (parity with venice_image_edit's no_safe_mode).
+        # (parity with venice_image_edit's safe_mode, renamed off no_safe_mode
+        # in #57 Class B so both image tools spell the property the same way).
         from venice.commands import _agent
         props = _agent._IMAGE_SCHEMA["properties"]
         self.assertIn("safe_mode", props)
