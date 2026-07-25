@@ -80,11 +80,26 @@ def register(subparsers) -> None:
         "--aspect-ratio", choices=ASPECT_CHOICES, default=None, dest="aspect_ratio"
     )
     p.add_argument("--negative-prompt", default=None, dest="negative_prompt")
-    p.add_argument(
+    # Tri-stated so `defaults.video.no_audio` can reach the dest (#57 Class B).
+    # The positive counterpart is `--with-audio`, NOT `--audio`: `--audio` is
+    # already taken below by the background-music media input (dest audio_input),
+    # and a second registration would raise at parser-build time.
+    audio_grp = p.add_mutually_exclusive_group()
+    audio_grp.add_argument(
         "--no-audio",
         action="store_true",
         dest="no_audio",
-        help="Disable audio (models that support it generate audio by default).",
+        default=None,
+        help="Disable audio (models that support it generate audio by default). "
+        "Config-backable via defaults.video.no_audio; an explicit "
+        "--no-audio/--with-audio still wins.",
+    )
+    audio_grp.add_argument(
+        "--with-audio",
+        action="store_false",
+        dest="no_audio",
+        help="Force the generated audio track on (beats defaults.video.no_audio). "
+        "Distinct from --audio, which supplies an input audio file.",
     )
     # Media inputs (#18). Each accepts a local file path OR an http(s)/data URL;
     # local files are encoded to a `data:` URL. See _collect_media below.

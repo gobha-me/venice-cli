@@ -376,8 +376,11 @@ _COMMAND_MAP = {
         "resolution": ("resolution", str),
         "aspect_ratio": ("aspect_ratio", str),
         "negative_prompt": ("negative_prompt", str),
+        # #57 Class B: tri-stated --no-audio/--with-audio.
+        "no_audio": ("no_audio", _as_bool),
     },
     "upscale": {
+        "enhance": ("enhance", _as_bool),  # #57 Class B: tri-stated --enhance
         "enhance_creativity": ("enhance_creativity", float),
         "enhance_prompt": ("enhance_prompt", str),
         "replication": ("replication", float),

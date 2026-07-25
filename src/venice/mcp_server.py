@@ -157,7 +157,7 @@ def build_server(client, doc=None) -> FastMCP:
     def venice_upscale(
         input_path: str,
         scale: float = 2.0,
-        enhance: bool = False,
+        enhance: Optional[bool] = None,
         enhance_creativity: Optional[float] = None,
         enhance_prompt: Optional[str] = None,
         replication: Optional[float] = None,
@@ -227,7 +227,7 @@ def build_server(client, doc=None) -> FastMCP:
         negative_prompt: Optional[str] = None,
         resolution: Optional[str] = None,
         aspect_ratio: Optional[str] = None,
-        no_audio: bool = False,
+        no_audio: Optional[bool] = None,
         image_url: Optional[str] = None,
         end_image_url: Optional[str] = None,
         video_url: Optional[str] = None,

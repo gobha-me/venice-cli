@@ -9,6 +9,7 @@ so there is no reliable upfront quote -- we show the balance and confirm.
 """
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 from typing import Optional
@@ -53,9 +54,11 @@ def register(subparsers) -> None:
     )
     p.add_argument(
         "--enhance",
-        action="store_true",
-        default=False,
-        help="Run Venice's enhancer during upscaling (required when --scale 1).",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Run Venice's enhancer during upscaling (required when --scale 1). "
+        "Config-backable via defaults.upscale.enhance; an explicit "
+        "--enhance/--no-enhance still wins.",
     )
     p.add_argument(
         "--enhance-creativity",
