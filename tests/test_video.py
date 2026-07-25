@@ -314,6 +314,36 @@ class TestVideoMediaInputs(unittest.TestCase):
         # image conditioning is queue-only (QuoteVideoRequest rejects it)
         self.assertNotIn("image_url", cap["quote"])
 
+    def test_status_config_fills_no_cleanup_but_never_the_model(self):
+        """#57 Class B: the status handler shares the `video` section, but on a
+        status call `--model` is job IDENTITY (it goes in the /video/retrieve
+        body), not a preference -- config must not retarget a queued job."""
+        from venice.commands import video
+
+        doc = {"version": 1, "mcpServers": {},
+               "defaults": {"video": {"model": "cfg-model", "no_cleanup": True}}}
+        args = argparse.Namespace(
+            queue_id="vid12345678", model="queued-with-this", output=None,
+            poll_interval=0.0, max_wait=1.0, no_cleanup=None, download_url=None,
+            command="video-status",
+        )
+        seen = {}
+
+        # (client, model, queue_id, download_url, output, poll, max_wait, no_cleanup)
+        def fake_retrieve(client, model, *a, **kw):
+            seen["model"] = model
+            seen["no_cleanup"] = a[5]
+            return 0
+
+        with mock.patch("venice.userconfig.load_config", lambda *a, **k: doc), \
+             mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch.object(video, "_retrieve_and_save", fake_retrieve):
+            rc = video._run_status(args)
+
+        self.assertEqual(rc, 0)
+        self.assertIs(seen["no_cleanup"], True)          # the key we wanted
+        self.assertEqual(seen["model"], "queued-with-this")  # NOT "cfg-model"
+
     def test_config_no_audio_reaches_quote_and_queue(self):
         """#57 Class B: _shared_params feeds BOTH bodies, so defaults.video.no_audio
         must show up in each; --with-audio clears it."""

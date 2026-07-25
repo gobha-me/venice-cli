@@ -503,7 +503,7 @@ class TestClassBParity(unittest.TestCase):
                 parser = _build_parser(mod)
                 got = tuple(
                     parser.parse_args(argv + extra).no_balance
-                    for extra in ([], ["--no-balance"], ["--balance"])
+                    for extra in ([], ["--no-balance"], ["--show-balance"])
                 )
                 self.assertEqual(got, (None, True, False))
 
@@ -517,7 +517,7 @@ class TestClassBParity(unittest.TestCase):
 
     def test_explicit_balance_beats_the_global(self):
         doc = {"defaults": {"no_balance": True}}
-        args = _build_parser(image).parse_args(["image", "p", "--balance"])
+        args = _build_parser(image).parse_args(["image", "p", "--show-balance"])
         uc.apply_defaults(args, "image", doc)
         self.assertIs(args.no_balance, False)
 
@@ -551,13 +551,56 @@ class TestClassBParity(unittest.TestCase):
 
     def test_defaults_master_section_does_not_leak_into_sfx_master(self):
         """`defaults.master` is a command SECTION while `defaults.sfx.master` is a
-        KEY. resolve_default's dict-guard must keep the global lookup from
-        mistaking the section for a scalar."""
+        KEY. resolve_default must keep the global lookup from mistaking the
+        section for a scalar -- in BOTH shapes."""
         doc = {"defaults": {"master": {"loop": True}}}
         args = _build_parser(sfx).parse_args(["sfx", "p"])
         uc.apply_defaults(args, "sfx", doc)
         self.assertIsNone(args.master)  # not True, not a dict
         self.assertIsNone(args.loop)    # defaults.master.loop is master's, not sfx's
+
+    def test_scalar_defaults_master_is_not_a_global_for_the_master_flag(self):
+        """The dict shape is guarded by an isinstance check, but a SCALAR
+        `defaults.master = true` used to fall through as a global and silently
+        enable mastering on every sfx/music render (while making
+        defaults.master.loop unreachable). A key naming a command section is
+        never a global scalar."""
+        doc = {"defaults": {"master": True}}
+        for mod, argv, key in ((sfx, ["sfx", "p"], "sfx"),
+                               (music, ["music", "p"], "music")):
+            with self.subTest(cmd=key):
+                args = _build_parser(mod).parse_args(argv)
+                uc.apply_defaults(args, key, doc)
+                self.assertIsNone(args.master)
+
+    def test_ba_abbreviation_still_resolves_to_background(self):
+        """`--show-balance`, not `--balance`: a bare `--balance` would make the
+        abbreviation `--ba` ambiguous against the pre-existing `--background`."""
+        for mod, argv in ((sfx, ["sfx", "p"]), (music, ["music", "p"]),
+                          (video, ["video", "p"])):
+            with self.subTest(cmd=argv[0]):
+                args = _build_parser(mod).parse_args(argv + ["--ba"])
+                self.assertTrue(args.background)
+
+    def test_status_play_is_tristate_and_config_backable(self):
+        """The parent section must reach BOTH halves of a command, not just the
+        generate parser -- `--play` was left a bare store_true at first."""
+        def status_parser(mod):
+            parser = argparse.ArgumentParser(prog="venice")
+            mod.register_status(parser.add_subparsers(dest="command"))
+            return parser
+
+        for mod, argv, key in ((sfx, ["sfx-status", "j1"], "sfx"),
+                               (music, ["music-status", "j1"], "music")):
+            with self.subTest(cmd=argv[0]):
+                got = tuple(
+                    status_parser(mod).parse_args(argv + extra).play
+                    for extra in ([], ["--play"], ["--no-play"])
+                )
+                self.assertEqual(got, (None, True, False))
+                args = status_parser(mod).parse_args(argv)
+                uc.apply_defaults(args, key, {"defaults": {key: {"play": True}}})
+                self.assertIs(args.play, True)
 
 
 # --------------------------------------------------------------------------- #

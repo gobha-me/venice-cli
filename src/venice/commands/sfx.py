@@ -40,23 +40,7 @@ def register(subparsers) -> None:
     p.add_argument("--yes", "-y", action="store_true", default=None)
     p.add_argument("--background", action="store_true")
     p.add_argument("--dry-run", action="store_true")
-    cleanup_grp = p.add_mutually_exclusive_group()
-    cleanup_grp.add_argument(
-        "--no-cleanup",
-        dest="no_cleanup",
-        action="store_true",
-        default=None,
-        help="Keep the server-side job after download (skip /audio/complete). "
-        "Config-backable via defaults.sfx.no_cleanup; an explicit "
-        "--no-cleanup/--cleanup still wins.",
-    )
-    cleanup_grp.add_argument(
-        "--cleanup",
-        dest="no_cleanup",
-        action="store_false",
-        default=None,
-        help="Force the completion call on (beats defaults.sfx.no_cleanup).",
-    )
+    _shared.add_cleanup_flag(p, section="sfx", endpoint="/audio/complete")
     p.add_argument(
         "--max-spend",
         type=float,
@@ -87,24 +71,15 @@ def register_status(subparsers) -> None:
         default=DEFAULT_SFX_MODEL,
     )
     sp.add_argument("--output", "-o", type=Path, default=None)
-    sp.add_argument("--play", action="store_true")
-    cleanup_grp = sp.add_mutually_exclusive_group()
-    cleanup_grp.add_argument(
-        "--no-cleanup",
-        dest="no_cleanup",
-        action="store_true",
-        default=None,
-        help="Keep the server-side job after download (skip /audio/complete). "
-        "Config-backable via defaults.sfx.no_cleanup; an explicit "
-        "--no-cleanup/--cleanup still wins.",
-    )
-    cleanup_grp.add_argument(
-        "--cleanup",
-        dest="no_cleanup",
-        action="store_false",
-        default=None,
-        help="Force the completion call on (beats defaults.sfx.no_cleanup).",
-    )
+    status_play = sp.add_mutually_exclusive_group()
+    status_play.add_argument("--play", dest="play", action="store_true",
+                             default=None,
+                             help="Play the audio after download. Config-backable "
+                                  "via defaults.sfx.play.")
+    status_play.add_argument("--no-play", dest="play", action="store_false",
+                             default=None,
+                             help="Never play (beats a config default).")
+    _shared.add_cleanup_flag(sp, section="sfx", endpoint="/audio/complete")
     sp.add_argument("--poll-interval", type=float, default=config.SFX_POLL_INTERVAL_SEC)
     sp.add_argument("--max-wait", type=float, default=config.SFX_POLL_MAX_WAIT_SEC)
     sp.set_defaults(handler=_run_status)
@@ -131,7 +106,8 @@ def _run_generate(args) -> int:
         return 2
 
     if args.master and not audio_post.has_ffmpeg():
-        print("sfx: --master requires ffmpeg on PATH; install it or drop --master",
+        print("sfx: mastering requires ffmpeg on PATH; install it, pass "
+              "--no-master, or unset defaults.sfx.master",
               file=sys.stderr)
         return 2
 
@@ -217,7 +193,9 @@ def _run_status(args) -> int:
     client, rc = _queue.build_client()
     if rc != 0:
         return rc
-    want_play = True if args.play else None
+    # None = auto-detect (tty + a player); the tri-state maps 1:1 onto
+    # `retrieve_and_save`'s Optional[bool] want_play. (#57 Class B)
+    want_play = args.play
     return _audio.retrieve_and_save(
         client,
         args.model,

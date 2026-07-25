@@ -432,6 +432,14 @@ def resolve_default(command: str, key: str, doc=None):
     section = defaults.get(command)
     if isinstance(section, dict) and key in section:
         return section[key]
+    if key in _COMMAND_MAP:
+        # `key` names a command section (e.g. "master"), so a top-level
+        # `defaults.master` is that command's table -- never a global scalar for
+        # a same-named FLAG like sfx/music's `--master`. Without this, a scalar
+        # `defaults.master = true` would leak into every command declaring a
+        # `master` dest while simultaneously making `defaults.master.loop`
+        # unreachable. (#57 Class B)
+        return None
     val = defaults.get(key)
     if isinstance(val, dict):  # a command section, not a global scalar
         return None

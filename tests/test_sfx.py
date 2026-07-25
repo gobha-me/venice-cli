@@ -236,8 +236,16 @@ class TestSfxFullFlow(unittest.TestCase):
         doc = {"version": 1, "mcpServers": {},
                "defaults": {"sfx": {"master": True}}}
         args = _build_args(master=False, dry_run=True)
+
+        # urlopen MUST be patched: --dry-run still POSTs /audio/quote before it
+        # returns, so an unmocked run would hit the real API (CONTRIBUTING: "No
+        # test should ever make a real API call or need a real key.").
+        def fake_urlopen(req, timeout=None):
+            return FakeResp(200, b'{"quote": 0.0027}', "application/json")
+
         with mock.patch("venice.userconfig.load_config", lambda *a, **k: doc), \
              mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.client.urllib.request.urlopen", fake_urlopen), \
              mock.patch("venice.audio_post.has_ffmpeg", lambda: False):
             sfx._run_generate(args)
         self.assertIs(args.master, False)  # config did not overwrite it

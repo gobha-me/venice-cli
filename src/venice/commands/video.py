@@ -156,23 +156,7 @@ def register(subparsers) -> None:
     p.add_argument("--yes", "-y", action="store_true", default=None)
     p.add_argument("--background", action="store_true")
     p.add_argument("--dry-run", action="store_true")
-    cleanup_grp = p.add_mutually_exclusive_group()
-    cleanup_grp.add_argument(
-        "--no-cleanup",
-        dest="no_cleanup",
-        action="store_true",
-        default=None,
-        help="Keep the server-side job after download (skip /video/complete). "
-        "Config-backable via defaults.video.no_cleanup; an explicit "
-        "--no-cleanup/--cleanup still wins.",
-    )
-    cleanup_grp.add_argument(
-        "--cleanup",
-        dest="no_cleanup",
-        action="store_false",
-        default=None,
-        help="Force the completion call on (beats defaults.video.no_cleanup).",
-    )
+    _shared.add_cleanup_flag(p, section="video", endpoint="/video/complete")
     p.add_argument(
         "--max-spend",
         type=float,
@@ -209,23 +193,7 @@ def register_status(subparsers) -> None:
         help="Presigned URL from the original queue (VPS-backed models only).",
     )
     sp.add_argument("--output", "-o", type=Path, default=None)
-    cleanup_grp = sp.add_mutually_exclusive_group()
-    cleanup_grp.add_argument(
-        "--no-cleanup",
-        dest="no_cleanup",
-        action="store_true",
-        default=None,
-        help="Keep the server-side job after download (skip /video/complete). "
-        "Config-backable via defaults.video.no_cleanup; an explicit "
-        "--no-cleanup/--cleanup still wins.",
-    )
-    cleanup_grp.add_argument(
-        "--cleanup",
-        dest="no_cleanup",
-        action="store_false",
-        default=None,
-        help="Force the completion call on (beats defaults.video.no_cleanup).",
-    )
+    _shared.add_cleanup_flag(sp, section="video", endpoint="/video/complete")
     sp.add_argument("--poll-interval", type=float, default=config.VIDEO_POLL_INTERVAL_SEC)
     sp.add_argument("--max-wait", type=float, default=config.VIDEO_POLL_MAX_WAIT_SEC)
     sp.set_defaults(handler=_run_status)
@@ -473,10 +441,14 @@ def _run_generate(args) -> int:
 
 
 def _run_status(args) -> int:
-    # #57 Class B: status shares its parent's section, so a config
-    # default like defaults.video.no_cleanup applies to `venice video`
-    # and `venice video-status` alike rather than only the former.
+    # #57 Class B: status shares its parent's section, so a config default like
+    # defaults.video.no_cleanup applies to `venice video` and `venice
+    # video-status` alike rather than only the former. EXCEPT `model`: here it is
+    # job identity (it is sent in the /video/retrieve body), not a preference, so
+    # defaults.video.model must not retarget a job that was queued with another.
+    queued_model = args.model
     userconfig.apply_defaults(args, "video")
+    args.model = queued_model
     client, rc = _queue.build_client()
     if rc != 0:
         return rc

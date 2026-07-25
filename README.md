@@ -160,7 +160,7 @@ After charge:   $32.69 USD
 ```
 
 Suppress with `--no-balance`, or set `defaults.no_balance` once to suppress it
-everywhere (`--balance` re-enables it for a single run). Hard-cap a single call
+everywhere (`--show-balance` re-enables it for a single run). Hard-cap a single call
 with `--max-spend USD` (refuses to queue / synthesize if the estimate exceeds
 the cap).
 
@@ -1492,7 +1492,7 @@ The file looks like:
 Global keys under `defaults` (`output_dir`, `max_spend`, `yes`, `no_balance`)
 apply to any command that has the flag; a per-command section (e.g.
 `defaults.chat`) overrides them. `no_balance` covers every spend-incurring
-command at once -- `--balance` forces the display back on for a single run.
+command at once -- `--show-balance` forces the display back on for a single run.
 **Precedence for any flag is: explicit CLI flag > environment variable > config
 file > built-in default** — so a config default never shadows
 something you pass on the command line or set in the environment.
@@ -1508,9 +1508,10 @@ safety), it should be settable in config." Currently config-backable:
 - `defaults.image_edit.*` — `model`, `aspect_ratio`, `resolution`, `output_format`,
   `safe_mode` (tri-state `--safe-mode`/`--no-safe-mode`)
 - `defaults.tts.*` — `voice`, `speed`, `play`
-- `defaults.sfx.*` — `play`, `master`, `loop`, `no_cleanup`
+- `defaults.sfx.*` — `play`, `master`, `loop`, `no_cleanup` (`loop` only takes
+  effect when `master` is also on -- it is a mastering-chain knob)
 - `defaults.music.*` — `duration`, `speed`, `play`, `instrumental`, `master`,
-  `loop`, `no_cleanup`
+  `loop`, `no_cleanup` (same `loop` caveat as `sfx`)
 - `defaults.master.*` — `loop`. This is the standalone `venice master` command's
   own section; the `venice sfx`/`venice music` **`--master` toggle** is the key
   `defaults.sfx.master` / `defaults.music.master`, not this table

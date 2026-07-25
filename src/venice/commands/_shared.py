@@ -34,6 +34,9 @@ def add_balance_flag(parser) -> None:
     `userconfig.apply_defaults` only fills a dest that is still None. Consumers
     read `show=not args.no_balance`, and `not None == not False`, so no
     consumption site needs a None branch.
+
+    The positive spelling is `--show-balance`: a bare `--balance` would make the
+    abbreviation `--ba` ambiguous against `--background` on sfx/music/video.
     """
     grp = parser.add_mutually_exclusive_group()
     grp.add_argument(
@@ -42,14 +45,42 @@ def add_balance_flag(parser) -> None:
         action="store_true",
         default=None,
         help="Skip the upfront balance display. Config-backable via "
-        "defaults.no_balance; an explicit --balance/--no-balance still wins.",
+        "defaults.no_balance; an explicit --show-balance/--no-balance still wins.",
     )
     grp.add_argument(
-        "--balance",
+        "--show-balance",
         dest="no_balance",
         action="store_false",
         default=None,
-        help="Force the upfront balance display on (beats defaults.no_balance).",
+        help="Force the upfront balance display on (beats defaults.no_balance). "
+        "Spelled --show-balance, not --balance, so the abbreviation --ba keeps "
+        "resolving to --background on the commands that have it.",
+    )
+
+
+def add_cleanup_flag(parser, *, section: str, endpoint: str) -> None:
+    """Register the tri-stated `--no-cleanup` / `--cleanup` pair (#57 Class B).
+
+    Same shape and rationale as :func:`add_balance_flag`; `section` names the
+    config table (sfx/music/video) and `endpoint` the completion call skipped
+    when set. Registered on the generate AND `-status` parsers of each command.
+    """
+    grp = parser.add_mutually_exclusive_group()
+    grp.add_argument(
+        "--no-cleanup",
+        dest="no_cleanup",
+        action="store_true",
+        default=None,
+        help=f"Keep the server-side job after download (skip {endpoint}). "
+        f"Config-backable via defaults.{section}.no_cleanup; an explicit "
+        "--no-cleanup/--cleanup still wins.",
+    )
+    grp.add_argument(
+        "--cleanup",
+        dest="no_cleanup",
+        action="store_false",
+        default=None,
+        help=f"Force the completion call on (beats defaults.{section}.no_cleanup).",
     )
 
 

@@ -442,10 +442,11 @@ def music_tool(
     if not prompt or not prompt.strip():
         return _err("music: prompt is required")
 
-    # explicit=False: an OPERATOR's defaults.music.instrumental must never make
-    # a model-authored `lyrics` call fail. (#57 Class B -- note this replaces the
-    # old hard error for the both-set case on the tool path.)
-    instrumental = _music.resolve_instrumental(instrumental, lyrics, explicit=False)
+    # NOTE: no `resolve_instrumental` here, deliberately. On this path a model's
+    # explicit `instrumental=true` and an operator's defaults.music.instrumental
+    # are already merged into one value, so coercing would silently charge for a
+    # vocal track when the caller explicitly asked for instrumental. `_validate`
+    # keeps returning exit 2 for the both-set case: loud beats silent. (#57)
     ns = SimpleNamespace(
         prompt=prompt.strip(), model=model, duration=duration,
         instrumental=instrumental, lyrics=lyrics, speed=speed,
