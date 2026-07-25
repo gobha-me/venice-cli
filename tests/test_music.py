@@ -8,6 +8,7 @@ import argparse
 import io
 import json
 import os
+import sys
 import tempfile
 import unittest
 import urllib.error
@@ -240,6 +241,7 @@ class TestMusicFlow(unittest.TestCase):
         self.assertTrue(all("/audio/quote" not in c for c in calls))
 
     def test_lyrics_and_instrumental_conflict(self):
+        """Both EXPLICIT still exits 2 -- unchanged CLI behavior (#57 Class B)."""
         from venice.commands import music
 
         urlopen = _router(_models_payload(), [])
@@ -249,6 +251,44 @@ class TestMusicFlow(unittest.TestCase):
             rc = music._run_generate(_build_args(lyrics="la la", instrumental=True))
 
         self.assertEqual(rc, 2)
+
+    def test_config_instrumental_yields_to_explicit_lyrics(self):
+        """#57 Class B: apply_defaults runs before _validate, so without the
+        resolver a user who set defaults.music.instrumental once and then typed
+        only --lyrics would be rejected for a flag they never passed."""
+        from venice.commands import music
+
+        cfg = {"version": 1, "mcpServers": {},
+               "defaults": {"music": {"instrumental": True}}}
+        urlopen = _router(_models_payload(), [_quote(0.5)])
+        err = io.StringIO()
+
+        with mock.patch("venice.userconfig.load_config", lambda *a, **k: cfg), \
+             mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.client.urllib.request.urlopen", urlopen), \
+             mock.patch.object(sys, "stderr", err):
+            rc = music._run_generate(
+                _build_args(lyrics="la la", instrumental=None, dry_run=True)
+            )
+
+        self.assertEqual(rc, 0)  # not the exit 2 conflict
+        self.assertIn("--lyrics overrides", err.getvalue())
+
+    def test_config_instrumental_applies_without_lyrics(self):
+        from venice.commands import music
+
+        cfg = {"version": 1, "mcpServers": {},
+               "defaults": {"music": {"instrumental": True}}}
+        urlopen = _router(_models_payload(), [_quote(0.5)])
+
+        with mock.patch("venice.userconfig.load_config", lambda *a, **k: cfg), \
+             mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.client.urllib.request.urlopen", urlopen):
+            args = _build_args(instrumental=None, dry_run=True)
+            rc = music._run_generate(args)
+
+        self.assertEqual(rc, 0)
+        self.assertIs(args.instrumental, True)  # config reached the dest
 
     def test_instrumental_gated_off_by_model(self):
         from venice.commands import music

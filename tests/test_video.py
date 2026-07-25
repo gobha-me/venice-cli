@@ -314,6 +314,25 @@ class TestVideoMediaInputs(unittest.TestCase):
         # image conditioning is queue-only (QuoteVideoRequest rejects it)
         self.assertNotIn("image_url", cap["quote"])
 
+    def test_config_no_audio_reaches_quote_and_queue(self):
+        """#57 Class B: _shared_params feeds BOTH bodies, so defaults.video.no_audio
+        must show up in each; --with-audio clears it."""
+        doc = {"version": 1, "mcpServers": {},
+               "defaults": {"video": {"no_audio": True}}}
+        with mock.patch("venice.userconfig.load_config", lambda *a, **k: doc):
+            rc, cap = self._run_full(_build_args(no_audio=None))
+        self.assertEqual(rc, 0)
+        self.assertIs(cap["quote"]["audio"], False)
+        self.assertIs(cap["queue"]["audio"], False)
+
+    def test_explicit_with_audio_beats_config(self):
+        doc = {"version": 1, "mcpServers": {},
+               "defaults": {"video": {"no_audio": True}}}
+        with mock.patch("venice.userconfig.load_config", lambda *a, **k: doc):
+            rc, cap = self._run_full(_build_args(no_audio=False))
+        self.assertEqual(rc, 0)
+        self.assertNotIn("audio", cap["queue"])  # key omitted, server default applies
+
     def test_image_url_passthrough(self):
         rc, cap = self._run_full(_build_args(image="https://x.test/a.png"))
         self.assertEqual(rc, 0)

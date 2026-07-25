@@ -792,6 +792,26 @@ class TestImageEditTool(_ToolTest):
         self.assertIn("image", captured["body"])  # single-edit sends "image"
         self.assertEqual(base64.b64decode(captured["body"]["image"]), ip.read_bytes())
 
+    def test_edit_safe_mode_param(self):
+        """#57 Class B renamed this tool's `no_safe_mode` to `safe_mode`, matching
+        venice_image. Unset now sends true (the API schema's own default)."""
+        ip = self._png()
+        captured = {}
+
+        def fake(req, timeout=None):
+            captured["body"] = json.loads(req.data.decode())
+            return FakeResp(200, b"EDITED", "image/png")
+
+        with mock.patch("venice.client.urllib.request.urlopen", fake), self.stdout_guard():
+            _mcp.image_edit_tool(_client(), "make it blue", input_path=str(ip),
+                                 output_dir=self.td, confirm=True, safe_mode=False)
+        self.assertIs(captured["body"]["safe_mode"], False)
+
+        with mock.patch("venice.client.urllib.request.urlopen", fake), self.stdout_guard():
+            _mcp.image_edit_tool(_client(), "make it blue", input_path=str(ip),
+                                 output_dir=self.td, confirm=True)
+        self.assertIs(captured["body"]["safe_mode"], True)
+
     def test_multi_edit_with_layers(self):
         ip = self._png()
         layer = Path(self.td) / "mask.png"

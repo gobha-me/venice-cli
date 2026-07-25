@@ -166,6 +166,36 @@ class TestUpscaleFlow(unittest.TestCase):
             rc = upscale._run(_args(scale=1.0, enhance=False))
         self.assertEqual(rc, 2)
 
+    def test_config_enhance_unlocks_scale_one(self):
+        """#57 Class B: apply_defaults runs before _validate, so setting
+        defaults.upscale.enhance once makes --scale 1 usable with no inline flag
+        -- previously an unavoidable exit 2."""
+        from venice.commands import upscale
+
+        doc = {"version": 1, "mcpServers": {},
+               "defaults": {"upscale": {"enhance": True}}}
+        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.userconfig.load_config", lambda *a, **k: doc), \
+             mock.patch("venice.client.urllib.request.urlopen",
+                        lambda *a, **kw: FakeResp(200, UPSCALED_PNG, "image/png")):
+            rc = upscale._run(_args(scale=1.0, enhance=None))
+        self.assertEqual(rc, 0)
+
+    def test_explicit_no_enhance_beats_config_and_still_gates(self):
+        from venice.commands import upscale
+
+        doc = {"version": 1, "mcpServers": {},
+               "defaults": {"upscale": {"enhance": True}}}
+        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.userconfig.load_config", lambda *a, **k: doc):
+            rc = upscale._run(_args(scale=1.0, enhance=False))
+        self.assertEqual(rc, 2)  # explicit --no-enhance wins, gate still fires
+
+    def test_unset_enhance_sends_false_not_none(self):
+        from venice.commands import upscale
+        body = upscale._build_body(_args(enhance=None), "b64")
+        self.assertIs(body["enhance"], False)
+
     def test_scale_one_with_enhance_ok(self):
         from venice.commands import upscale
 

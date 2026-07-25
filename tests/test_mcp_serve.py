@@ -6,6 +6,7 @@ absent on Python 3.9, where the extra's environment marker excludes it).
 """
 import argparse
 import importlib.util
+import inspect
 import io
 import sys
 import unittest
@@ -94,6 +95,61 @@ class TestConfigDefaultsWiring(unittest.TestCase):
         self._invoke_image(doc, spy, steps=5, safe_mode=True)
         self.assertEqual(captured["steps"], 5)            # explicit host arg wins
         self.assertIs(captured["safe_mode"], True)        # exposed flag, host wins
+
+    # -- #57 Class B: the tri-stated booleans must survive the wrapper --------- #
+    #
+    # `_merged` layers config UNDER host args and drops only None. A wrapper param
+    # declared `bool = False` therefore fills a concrete False when the host omits
+    # the arg, and that False silently BEATS the config default -- while the CLI
+    # path looks perfectly correct. These four are the guard for that: each new
+    # _COMMAND_MAP boolean must reach its impl when the host says nothing.
+    _CLASS_B_TOOLS = [
+        ("music", "venice_music", "music_tool", "instrumental", dict(prompt="p")),
+        ("video", "venice_video", "video_tool", "no_audio", dict(prompt="p")),
+        ("upscale", "venice_upscale", "upscale_tool", "enhance",
+         dict(input_path="in.png")),
+        ("image_edit", "venice_image_edit", "image_edit_tool", "safe_mode",
+         dict(prompt="p")),
+    ]
+
+    def _invoke(self, section, tool_name, impl_name, param, call_kwargs, doc):
+        """Patch the named impl with a real function exposing `param`, build the
+        server against `doc`, and invoke the registered tool."""
+        from venice.mcp_server import build_server
+        from venice.commands import _mcp
+
+        captured = {}
+
+        def spy(client, *a, **kw):
+            captured.update(kw)
+            return {"status": "ok"}
+
+        spy.__signature__ = inspect.Signature([
+            inspect.Parameter("client", inspect.Parameter.POSITIONAL_OR_KEYWORD),
+            inspect.Parameter(param, inspect.Parameter.KEYWORD_ONLY, default=None),
+            inspect.Parameter("kw", inspect.Parameter.VAR_KEYWORD),
+        ])
+
+        with mock.patch.object(_mcp, impl_name, spy):
+            server = build_server(self._Client(), doc=doc)
+            server._tool_manager.get_tool(tool_name).fn(**call_kwargs)
+        return captured
+
+    def test_class_b_config_reaches_impl_when_host_omits_the_arg(self):
+        for section, tool, impl, param, kwargs in self._CLASS_B_TOOLS:
+            with self.subTest(tool=tool, param=param):
+                doc = {"defaults": {section: {param: True}}}
+                captured = self._invoke(section, tool, impl, param, kwargs, doc)
+                self.assertIs(captured.get(param), True,
+                              msg=f"{tool}.{param} did not receive the config default")
+
+    def test_class_b_host_arg_still_beats_config(self):
+        for section, tool, impl, param, kwargs in self._CLASS_B_TOOLS:
+            with self.subTest(tool=tool, param=param):
+                doc = {"defaults": {section: {param: True}}}
+                captured = self._invoke(section, tool, impl, param,
+                                        dict(kwargs, **{param: False}), doc)
+                self.assertIs(captured.get(param), False)
 
     def test_no_config_no_injection(self):
         captured, spy = self._spy()

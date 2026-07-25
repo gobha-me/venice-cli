@@ -19,7 +19,8 @@ import venice.userconfig as uc
 from venice import cli
 from venice.commands import config as cfgcmd
 from venice.commands import (
-    chat, code, image, image_edit, index, music, sfx, tts, upscale, video,
+    bg_remove, chat, code, image, image_edit, index, master, music, sfx, tts,
+    upscale, video,
 )
 
 
@@ -402,6 +403,161 @@ class TestClassAParity(unittest.TestCase):
         doc = {"defaults": {"index": {"exclude": "solo-pat"}}}
         uc.apply_defaults(args, "index", doc)
         self.assertEqual(args.exclude, ["solo-pat"])
+
+
+# --------------------------------------------------------------------------- #
+# #57 config parity -- Class B: `store_true` flags tri-stated to default=None so
+# `apply_defaults` (which only fills a dest still None) can reach them. Each case
+# parses the command's REAL parser, so a wrong dest -- or an option string that
+# collides with an existing flag -- fails here rather than at runtime.
+#
+# `on`/`off` are the two spellings that must produce True/False. Positive-sense
+# flags use BooleanOptionalAction (--enhance/--no-enhance); negative-sense dests
+# keep their name and gain a positive counterpart (--no-audio/--with-audio), so
+# the config key stays honest and no tool-argument name changes.
+# --------------------------------------------------------------------------- #
+_CLASS_B_CASES = [
+    dict(key="image_edit", mod=image_edit, argv=["image-edit", "p"],
+         dest="safe_mode", on="--safe-mode", off="--no-safe-mode",
+         cfg=False, want=False, explicit="--safe-mode", eval=True),
+    dict(key="upscale", mod=upscale, argv=["upscale", "in.png"],
+         dest="enhance", on="--enhance", off="--no-enhance",
+         cfg="yes", want=True, explicit="--no-enhance", eval=False),
+    dict(key="video", mod=video, argv=["video", "p"],
+         dest="no_audio", on="--no-audio", off="--with-audio",
+         cfg=True, want=True, explicit="--with-audio", eval=False),
+    dict(key="video", mod=video, argv=["video", "p"],
+         dest="no_cleanup", on="--no-cleanup", off="--cleanup",
+         cfg=True, want=True, explicit="--cleanup", eval=False),
+    dict(key="music", mod=music, argv=["music", "p"],
+         dest="instrumental", on="--instrumental", off="--no-instrumental",
+         cfg="true", want=True, explicit="--no-instrumental", eval=False),
+    dict(key="music", mod=music, argv=["music", "p"],
+         dest="master", on="--master", off="--no-master",
+         cfg=True, want=True, explicit="--no-master", eval=False),
+    dict(key="music", mod=music, argv=["music", "p"],
+         dest="loop", on="--loop", off="--no-loop",
+         cfg=True, want=True, explicit="--no-loop", eval=False),
+    dict(key="music", mod=music, argv=["music", "p"],
+         dest="no_cleanup", on="--no-cleanup", off="--cleanup",
+         cfg=True, want=True, explicit="--cleanup", eval=False),
+    dict(key="sfx", mod=sfx, argv=["sfx", "p"],
+         dest="master", on="--master", off="--no-master",
+         cfg=True, want=True, explicit="--no-master", eval=False),
+    dict(key="sfx", mod=sfx, argv=["sfx", "p"],
+         dest="loop", on="--loop", off="--no-loop",
+         cfg="on", want=True, explicit="--no-loop", eval=False),
+    dict(key="sfx", mod=sfx, argv=["sfx", "p"],
+         dest="no_cleanup", on="--no-cleanup", off="--cleanup",
+         cfg=True, want=True, explicit="--cleanup", eval=False),
+    dict(key="master", mod=master, argv=["master", "in.wav"],
+         dest="loop", on="--loop", off="--no-loop",
+         cfg=True, want=True, explicit="--no-loop", eval=False),
+]
+
+# Every command carrying the tri-stated `--no-balance`/`--balance` pair. It lives
+# in `_GLOBAL_MAP`, not eight sections, so it gets its own cases below.
+_BALANCE_MODS = [
+    ("sfx", sfx, ["sfx", "p"]), ("music", music, ["music", "p"]),
+    ("video", video, ["video", "p"]), ("tts", tts, ["tts", "hello"]),
+    ("image", image, ["image", "p"]), ("image_edit", image_edit, ["image-edit", "p"]),
+    ("upscale", upscale, ["upscale", "in.png"]),
+    ("bg_remove", bg_remove, ["bg-remove", "in.png"]),
+]
+
+
+class TestClassBParity(unittest.TestCase):
+    def test_flag_is_tristate(self):
+        """Unset -> None (so config can fill it), on -> True, off -> False."""
+        for case in _CLASS_B_CASES:
+            with self.subTest(cmd=case["key"], dest=case["dest"]):
+                parser = _build_parser(case["mod"])
+                got = tuple(
+                    getattr(parser.parse_args(case["argv"] + extra), case["dest"])
+                    for extra in ([], [case["on"]], [case["off"]])
+                )
+                self.assertEqual(got, (None, True, False))
+
+    def test_config_fills_none_dest(self):
+        for case in _CLASS_B_CASES:
+            with self.subTest(cmd=case["key"], dest=case["dest"]):
+                parser = _build_parser(case["mod"])
+                args = parser.parse_args(case["argv"])
+                doc = {"defaults": {case["key"]: {case["dest"]: case["cfg"]}}}
+                uc.apply_defaults(args, case["key"], doc)
+                self.assertIs(getattr(args, case["dest"]), case["want"])
+
+    def test_explicit_cli_beats_config(self):
+        for case in _CLASS_B_CASES:
+            with self.subTest(cmd=case["key"], dest=case["dest"]):
+                parser = _build_parser(case["mod"])
+                args = parser.parse_args(case["argv"] + [case["explicit"]])
+                doc = {"defaults": {case["key"]: {case["dest"]: case["cfg"]}}}
+                uc.apply_defaults(args, case["key"], doc)
+                self.assertIs(getattr(args, case["dest"]), case["eval"])
+
+    # -- the `--no-balance` global ------------------------------------------ #
+    def test_no_balance_tristate_on_every_spend_command(self):
+        for key, mod, argv in _BALANCE_MODS:
+            with self.subTest(cmd=key):
+                parser = _build_parser(mod)
+                got = tuple(
+                    parser.parse_args(argv + extra).no_balance
+                    for extra in ([], ["--no-balance"], ["--balance"])
+                )
+                self.assertEqual(got, (None, True, False))
+
+    def test_no_balance_global_fills_every_spend_command(self):
+        doc = {"defaults": {"no_balance": True}}
+        for key, mod, argv in _BALANCE_MODS:
+            with self.subTest(cmd=key):
+                args = _build_parser(mod).parse_args(argv)
+                uc.apply_defaults(args, key, doc)
+                self.assertIs(args.no_balance, True)
+
+    def test_explicit_balance_beats_the_global(self):
+        doc = {"defaults": {"no_balance": True}}
+        args = _build_parser(image).parse_args(["image", "p", "--balance"])
+        uc.apply_defaults(args, "image", doc)
+        self.assertIs(args.no_balance, False)
+
+    def test_per_command_no_balance_overrides_the_global(self):
+        doc = {"defaults": {"no_balance": True, "image": {"no_balance": False}}}
+        args = _build_parser(image).parse_args(["image", "p"])
+        uc.apply_defaults(args, "image", doc)
+        self.assertIs(args.no_balance, False)
+
+    def test_global_is_skipped_for_a_command_without_the_flag(self):
+        """The `hasattr` guard is what makes a _GLOBAL_MAP row safe -- `chat` has
+        no --no-balance, and must not sprout the attribute."""
+        args = argparse.Namespace(model=None)
+        uc.apply_defaults(args, "chat", {"defaults": {"no_balance": True}})
+        self.assertFalse(hasattr(args, "no_balance"))
+
+    def test_bg_remove_gets_globals_without_a_section(self):
+        """bg_remove calls apply_defaults but has no _COMMAND_MAP section; the
+        globals must still reach it."""
+        self.assertNotIn("bg_remove", uc._COMMAND_MAP)
+        args = _build_parser(bg_remove).parse_args(["bg-remove", "in.png"])
+        uc.apply_defaults(args, "bg_remove", {"defaults": {"no_balance": True}})
+        self.assertIs(args.no_balance, True)
+
+    def test_master_section_has_no_master_key(self):
+        """`venice master` registers the mastering flags with include_toggle=False,
+        so its namespace has no `master` attr -- a key would be dead config."""
+        self.assertEqual(set(uc._COMMAND_MAP["master"]), {"loop"})
+        args = _build_parser(master).parse_args(["master", "in.wav"])
+        self.assertFalse(hasattr(args, "master"))
+
+    def test_defaults_master_section_does_not_leak_into_sfx_master(self):
+        """`defaults.master` is a command SECTION while `defaults.sfx.master` is a
+        KEY. resolve_default's dict-guard must keep the global lookup from
+        mistaking the section for a scalar."""
+        doc = {"defaults": {"master": {"loop": True}}}
+        args = _build_parser(sfx).parse_args(["sfx", "p"])
+        uc.apply_defaults(args, "sfx", doc)
+        self.assertIsNone(args.master)  # not True, not a dict
+        self.assertIsNone(args.loop)    # defaults.master.loop is master's, not sfx's
 
 
 # --------------------------------------------------------------------------- #
