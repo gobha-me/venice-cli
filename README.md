@@ -159,9 +159,10 @@ Balance:        $32.70 USD (6.56 DIEM allowance + 26.14 USD cash)
 After charge:   $32.69 USD
 ```
 
-Suppress with `--no-balance`. Hard-cap a single call with
-`--max-spend USD` (refuses to queue / synthesize if the estimate
-exceeds the cap).
+Suppress with `--no-balance`, or set `defaults.no_balance` once to suppress it
+everywhere (`--balance` re-enables it for a single run). Hard-cap a single call
+with `--max-spend USD` (refuses to queue / synthesize if the estimate exceeds
+the cap).
 
 ## Sound effects
 
@@ -336,6 +337,7 @@ venice upscale env.png --scale 2 --yes
 
 # Enhance-only pass (scale 1 requires --enhance) with a style hint.
 venice upscale portrait.png --scale 1 --enhance --enhance-prompt gold --yes
+# ...or set `defaults.upscale.enhance true` once and --scale 1 works bare.
 
 # Custom output, tune how much the enhancer may change the image.
 venice upscale card.png --scale 4 --enhance --enhance-creativity 0.3 \
@@ -395,7 +397,8 @@ venice image-edit card.png -p "brighter" --dry-run
 
 Provide exactly one base source: a positional file (base64-encoded under 25 MB)
 or `--image-url`. `--prompt/-p` is required. Optional `--model`, `--aspect-ratio`,
-`--resolution`, `--output-format`, and `--no-safe-mode` map straight to the API;
+`--resolution`, `--output-format`, and `--safe-mode`/`--no-safe-mode` (config-backable
+via `defaults.image_edit.safe_mode`) map straight to the API;
 omit them to take the model defaults (`firered-image-edit`, PNG for 1K). Pricing
 is dynamic like `upscale`; balance is shown and you confirm before the charge.
 
@@ -433,7 +436,9 @@ venice sfx "campfire crackle" --duration 8 --yes --master
 ```
 
 Needs ffmpeg on PATH (`sudo apt install ffmpeg`). ffprobe (bundled with ffmpeg)
-is required only for `--loop`.
+is required only for `--loop`. Both toggles are config-backable
+(`defaults.sfx.master`, `defaults.music.master`, `defaults.{master,sfx,music}.loop`)
+and both have `--no-master`/`--no-loop` to override a config default for one run.
 
 ## Video
 
@@ -453,6 +458,8 @@ venice video "a koi pond at dawn, slow push-in" --dry-run
 venice video "a koi pond at dawn" --duration 5s --resolution 720p -o out.mp4 --yes
 
 # Pick a model / aspect ratio; drop the generated audio track.
+# (`defaults.video.no_audio` makes that the default; `--with-audio` re-enables
+# it for one run. Note `--audio` is different -- it supplies an INPUT audio file.)
 venice video "neon city flythrough" --model seedance-2-0-text-to-video \
   --aspect-ratio 16:9 --no-audio --yes
 
@@ -1482,10 +1489,12 @@ The file looks like:
 }
 ```
 
-Global keys under `defaults` (`output_dir`, `max_spend`, `yes`) apply to any
-command that has the flag; a per-command section (e.g. `defaults.chat`)
-overrides them. **Precedence for any flag is: explicit CLI flag > environment
-variable > config file > built-in default** — so a config default never shadows
+Global keys under `defaults` (`output_dir`, `max_spend`, `yes`, `no_balance`)
+apply to any command that has the flag; a per-command section (e.g.
+`defaults.chat`) overrides them. `no_balance` covers every spend-incurring
+command at once -- `--balance` forces the display back on for a single run.
+**Precedence for any flag is: explicit CLI flag > environment variable > config
+file > built-in default** — so a config default never shadows
 something you pass on the command line or set in the environment.
 
 Per-command sections cover the *persistent preferences* of most commands — the
@@ -1496,12 +1505,19 @@ safety), it should be settable in config." Currently config-backable:
   `style_prefix`, `preset`, `preset_file`, `negative_prompt`, `cfg_scale`,
   `steps`, `style_preset`, `hide_watermark`, `safe_mode` (tri-state
   `--safe-mode`/`--no-safe-mode`; set `false` to skip Venice's safety blur)
-- `defaults.image_edit.*` — `model`, `aspect_ratio`, `resolution`, `output_format`
+- `defaults.image_edit.*` — `model`, `aspect_ratio`, `resolution`, `output_format`,
+  `safe_mode` (tri-state `--safe-mode`/`--no-safe-mode`)
 - `defaults.tts.*` — `voice`, `speed`, `play`
-- `defaults.sfx.*` — `play`
-- `defaults.music.*` — `duration`, `speed`, `play`
-- `defaults.video.*` — `model`, `resolution`, `aspect_ratio`, `negative_prompt`
-- `defaults.upscale.*` — `enhance_creativity`, `enhance_prompt`, `replication`
+- `defaults.sfx.*` — `play`, `master`, `loop`, `no_cleanup`
+- `defaults.music.*` — `duration`, `speed`, `play`, `instrumental`, `master`,
+  `loop`, `no_cleanup`
+- `defaults.master.*` — `loop`. This is the standalone `venice master` command's
+  own section; the `venice sfx`/`venice music` **`--master` toggle** is the key
+  `defaults.sfx.master` / `defaults.music.master`, not this table
+- `defaults.video.*` — `model`, `resolution`, `aspect_ratio`, `negative_prompt`,
+  `no_audio`, `no_cleanup`
+- `defaults.upscale.*` — `enhance`, `enhance_creativity`, `enhance_prompt`,
+  `replication`
 - `defaults.chat.*`, `defaults.code.*`, `defaults.embed.*`, `defaults.index.*`,
   `defaults.search.*` — see each command's section above
 
@@ -1511,8 +1527,10 @@ positionals) stay CLI-only by design.
 These per-command defaults also apply when a generator runs as an **agent tool**
 inside `venice chat --tools` and `venice code` — e.g. `defaults.image.safe_mode`
 is honored when the model calls `venice_image`, not just on the `venice image`
-CLI. An explicit argument the model puts in the tool call still wins over config.
-(`venice mcp-serve` doesn't yet thread config into its wrappers.)
+CLI. `defaults.image_edit.safe_mode`, `defaults.music.instrumental`,
+`defaults.video.no_audio` and `defaults.upscale.enhance` reach the tools the same
+way. An explicit argument the model puts in the tool call still wins over config.
+`venice mcp-serve` threads the same defaults into its wrappers.
 
 The **API key is never stored here** — it stays in
 `~/.config/venice/credentials`. Unknown keys are preserved on write, so the
