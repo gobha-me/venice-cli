@@ -18,6 +18,7 @@ from typing import List, Optional
 from .. import auth, userconfig
 from ..client import build_client_from_auth
 from ._shared import (
+    add_balance_flag,
     check_image_file,
     confirm_or_exit,
     encode_base64,
@@ -95,8 +96,7 @@ def register(subparsers) -> None:
         help="Refuse if the estimated cost exceeds this cap. Note: image-edit "
         "pricing is dynamic, so no pre-charge estimate is available.",
     )
-    p.add_argument("--no-balance", action="store_true",
-                   help="Skip the upfront balance display.")
+    add_balance_flag(p)
     p.set_defaults(handler=_run)
 
 

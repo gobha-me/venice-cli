@@ -32,6 +32,7 @@ from typing import List, Optional, Tuple
 from .. import auth, billing, config, userconfig
 from ..client import VeniceAPIError, build_client_from_auth
 from ._shared import (
+    add_balance_flag as _add_balance_flag,
     confirm_or_exit as _confirm_or_exit,
     over_budget as _over_budget,
     print_balance_and_remaining as _print_balance_and_remaining,
@@ -193,8 +194,7 @@ def register(subparsers) -> None:
         metavar="USD",
         help="Refuse to generate if the estimated cost exceeds this USD cap.",
     )
-    p.add_argument("--no-balance", action="store_true",
-                   help="Skip the upfront balance display.")
+    _add_balance_flag(p)
     p.set_defaults(handler=_run)
 
 

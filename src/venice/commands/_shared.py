@@ -27,6 +27,31 @@ def resolve_output(arg_output: Optional[Path], default_name: str) -> Path:
     return arg_output
 
 
+def add_balance_flag(parser) -> None:
+    """Register the tri-stated `--no-balance` / `--balance` pair (#57 Class B).
+
+    `default=None` (not False) is what lets `defaults.no_balance` reach the dest:
+    `userconfig.apply_defaults` only fills a dest that is still None. Consumers
+    read `show=not args.no_balance`, and `not None == not False`, so no
+    consumption site needs a None branch.
+    """
+    grp = parser.add_mutually_exclusive_group()
+    grp.add_argument(
+        "--no-balance",
+        dest="no_balance",
+        action="store_true",
+        default=None,
+        help="Skip the upfront balance display. Config-backable via "
+        "defaults.no_balance; an explicit --balance/--no-balance still wins.",
+    )
+    grp.add_argument(
+        "--balance",
+        dest="no_balance",
+        action="store_false",
+        help="Force the upfront balance display on (beats defaults.no_balance).",
+    )
+
+
 def encode_data_url(path: Path, *, default_mime: str = "application/octet-stream") -> str:
     """Read a local file and return a `data:<mime>;base64,<b64>` URL.
 

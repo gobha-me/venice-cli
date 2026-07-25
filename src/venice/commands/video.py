@@ -148,11 +148,7 @@ def register(subparsers) -> None:
         metavar="USD",
         help="Refuse to queue if the quote exceeds this USD cap.",
     )
-    p.add_argument(
-        "--no-balance",
-        action="store_true",
-        help="Skip the upfront balance display.",
-    )
+    _shared.add_balance_flag(p)
     p.add_argument("--poll-interval", type=float, default=config.VIDEO_POLL_INTERVAL_SEC)
     p.add_argument("--max-wait", type=float, default=config.VIDEO_POLL_MAX_WAIT_SEC)
     p.set_defaults(handler=_run_generate)

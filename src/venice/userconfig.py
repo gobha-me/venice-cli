@@ -263,6 +263,12 @@ _GLOBAL_MAP = {
     "output_dir": ("output", _as_path),
     "max_spend": ("max_spend", float),
     "yes": ("yes", _as_bool),
+    # #57 Class B: `--no-balance`/`--balance` is tri-state (default None) on all
+    # eight spend-incurring commands. A global rather than eight sections -- the
+    # `hasattr` guard in `apply_defaults` skips commands that don't declare it,
+    # and `resolve_default` still lets `defaults.<cmd>.no_balance` override this.
+    # Deliberately NOT in `_COMMAND_MAP`: no agent tool prints a balance.
+    "no_balance": ("no_balance", _as_bool),
 }
 _COMMAND_MAP = {
     "chat": {

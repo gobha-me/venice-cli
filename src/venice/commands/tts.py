@@ -14,6 +14,7 @@ from typing import Optional, Tuple
 
 from .. import audio_player, auth, billing, config, userconfig
 from ..client import VeniceAPIError, build_client_from_auth
+from . import _shared
 
 # Slugs verified against /models?type=tts on 2026-05-22.
 TTS_MODELS = (
@@ -109,11 +110,7 @@ def register(subparsers) -> None:
         metavar="USD",
         help="Refuse to synthesize if the estimated cost exceeds this USD cap.",
     )
-    p.add_argument(
-        "--no-balance",
-        action="store_true",
-        help="Skip the upfront balance display.",
-    )
+    _shared.add_balance_flag(p)
     p.set_defaults(handler=_run)
 
 
