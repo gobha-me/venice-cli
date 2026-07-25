@@ -70,6 +70,7 @@ def register(subparsers) -> None:
         "--cleanup",
         dest="no_cleanup",
         action="store_false",
+        default=None,
         help="Force the completion call on (beats defaults.music.no_cleanup).",
     )
     p.add_argument(
@@ -113,6 +114,7 @@ def register_status(subparsers) -> None:
         "--cleanup",
         dest="no_cleanup",
         action="store_false",
+        default=None,
         help="Force the completion call on (beats defaults.music.no_cleanup).",
     )
     sp.add_argument("--poll-interval", type=float, default=config.SFX_POLL_INTERVAL_SEC)

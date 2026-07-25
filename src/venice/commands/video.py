@@ -98,6 +98,7 @@ def register(subparsers) -> None:
         "--with-audio",
         action="store_false",
         dest="no_audio",
+        default=None,
         help="Force the generated audio track on (beats defaults.video.no_audio). "
         "Distinct from --audio, which supplies an input audio file.",
     )
@@ -169,6 +170,7 @@ def register(subparsers) -> None:
         "--cleanup",
         dest="no_cleanup",
         action="store_false",
+        default=None,
         help="Force the completion call on (beats defaults.video.no_cleanup).",
     )
     p.add_argument(
@@ -221,6 +223,7 @@ def register_status(subparsers) -> None:
         "--cleanup",
         dest="no_cleanup",
         action="store_false",
+        default=None,
         help="Force the completion call on (beats defaults.video.no_cleanup).",
     )
     sp.add_argument("--poll-interval", type=float, default=config.VIDEO_POLL_INTERVAL_SEC)

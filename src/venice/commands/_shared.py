@@ -48,6 +48,7 @@ def add_balance_flag(parser) -> None:
         "--balance",
         dest="no_balance",
         action="store_false",
+        default=None,
         help="Force the upfront balance display on (beats defaults.no_balance).",
     )
 
