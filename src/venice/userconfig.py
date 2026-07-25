@@ -376,6 +376,7 @@ _COMMAND_MAP = {
         "speed": ("speed", float),
         "play": ("play", _as_bool),
         "no_cleanup": ("no_cleanup", _as_bool),  # #57 Class B
+        "instrumental": ("instrumental", _as_bool),
         "master": ("master", _as_bool),
         "loop": ("loop", _as_bool),
     },

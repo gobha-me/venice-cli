@@ -424,7 +424,7 @@ def music_tool(
     *,
     model: str = _music.DEFAULT_MUSIC_MODEL,
     duration: Optional[int] = None,
-    instrumental: bool = False,
+    instrumental: Optional[bool] = None,
     lyrics: Optional[str] = None,
     speed: Optional[float] = None,
     output_dir: Optional[str] = None,
@@ -442,6 +442,10 @@ def music_tool(
     if not prompt or not prompt.strip():
         return _err("music: prompt is required")
 
+    # explicit=False: an OPERATOR's defaults.music.instrumental must never make
+    # a model-authored `lyrics` call fail. (#57 Class B -- note this replaces the
+    # old hard error for the both-set case on the tool path.)
+    instrumental = _music.resolve_instrumental(instrumental, lyrics, explicit=False)
     ns = SimpleNamespace(
         prompt=prompt.strip(), model=model, duration=duration,
         instrumental=instrumental, lyrics=lyrics, speed=speed,

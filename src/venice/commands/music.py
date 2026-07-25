@@ -8,6 +8,7 @@ unavailable it degrades to letting the API be the backstop.
 """
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 from typing import Optional
@@ -40,8 +41,11 @@ def register(subparsers) -> None:
     )
     p.add_argument(
         "--instrumental",
-        action="store_true",
-        help="Force instrumental (no lyrics/vocals).",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Force instrumental (no lyrics/vocals). Config-backable via "
+        "defaults.music.instrumental; an explicit --lyrics clears a "
+        "config-sourced value, and --instrumental/--no-instrumental still wins.",
     )
     p.add_argument("--lyrics", default=None, metavar="TXT", help="Lyrics prompt (lyric-capable models only).")
     p.add_argument("--speed", type=float, default=None, help="Playback speed multiplier.")
@@ -158,6 +162,25 @@ def _num(v):
     return None
 
 
+def resolve_instrumental(instrumental, lyrics, *, explicit: bool):
+    """A CONFIG-sourced `--instrumental` yields to a deliberate `--lyrics` (#57).
+
+    `lyrics` is deliberately excluded from `_COMMAND_MAP` (it's per-song content,
+    not a preference), so it can only ever have come from the CLI or a tool call
+    -- it is always deliberate. `instrumental` may have come from
+    `defaults.music.instrumental`, and `apply_defaults` runs BEFORE `_validate`,
+    so without this a user who set that key once and then typed only `--lyrics`
+    would hit the mutual-exclusion error for a flag they never passed.
+
+    Only when BOTH were deliberate does `_validate`'s exit 2 still fire.
+    """
+    if instrumental and lyrics and not explicit:
+        print("music: --lyrics overrides defaults.music.instrumental for this run",
+              file=sys.stderr)
+        return False
+    return instrumental
+
+
 def _validate(args, spec: Optional[dict]) -> Optional[int]:
     """Return an exit code if the request is invalid, else None. Music-only
     params are gated by the model's advertised capabilities."""
@@ -227,7 +250,13 @@ def _validate(args, spec: Optional[dict]) -> Optional[int]:
 
 
 def _run_generate(args) -> int:
+    # Capture explicitness BEFORE config can fill the dest -- afterwards a
+    # config-sourced True is indistinguishable from a typed --instrumental.
+    instrumental_explicit = args.instrumental is not None
     userconfig.apply_defaults(args, "music")
+    args.instrumental = resolve_instrumental(
+        args.instrumental, args.lyrics, explicit=instrumental_explicit
+    )
     if not args.prompt:
         print("music: prompt required (or use: venice music-status <id>)", file=sys.stderr)
         return 2

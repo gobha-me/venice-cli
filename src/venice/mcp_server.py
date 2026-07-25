@@ -134,7 +134,7 @@ def build_server(client, doc=None) -> FastMCP:
         prompt: str,
         model: str = _mcp._music.DEFAULT_MUSIC_MODEL,
         duration: Optional[int] = None,
-        instrumental: bool = False,
+        instrumental: Optional[bool] = None,
         lyrics: Optional[str] = None,
         speed: Optional[float] = None,
         output_dir: Optional[str] = None,
