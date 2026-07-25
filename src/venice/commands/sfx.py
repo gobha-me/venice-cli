@@ -40,7 +40,22 @@ def register(subparsers) -> None:
     p.add_argument("--yes", "-y", action="store_true", default=None)
     p.add_argument("--background", action="store_true")
     p.add_argument("--dry-run", action="store_true")
-    p.add_argument("--no-cleanup", action="store_true")
+    cleanup_grp = p.add_mutually_exclusive_group()
+    cleanup_grp.add_argument(
+        "--no-cleanup",
+        dest="no_cleanup",
+        action="store_true",
+        default=None,
+        help="Keep the server-side job after download (skip /audio/complete). "
+        "Config-backable via defaults.sfx.no_cleanup; an explicit "
+        "--no-cleanup/--cleanup still wins.",
+    )
+    cleanup_grp.add_argument(
+        "--cleanup",
+        dest="no_cleanup",
+        action="store_false",
+        help="Force the completion call on (beats defaults.sfx.no_cleanup).",
+    )
     p.add_argument(
         "--max-spend",
         type=float,
@@ -72,7 +87,22 @@ def register_status(subparsers) -> None:
     )
     sp.add_argument("--output", "-o", type=Path, default=None)
     sp.add_argument("--play", action="store_true")
-    sp.add_argument("--no-cleanup", action="store_true")
+    cleanup_grp = sp.add_mutually_exclusive_group()
+    cleanup_grp.add_argument(
+        "--no-cleanup",
+        dest="no_cleanup",
+        action="store_true",
+        default=None,
+        help="Keep the server-side job after download (skip /audio/complete). "
+        "Config-backable via defaults.sfx.no_cleanup; an explicit "
+        "--no-cleanup/--cleanup still wins.",
+    )
+    cleanup_grp.add_argument(
+        "--cleanup",
+        dest="no_cleanup",
+        action="store_false",
+        help="Force the completion call on (beats defaults.sfx.no_cleanup).",
+    )
     sp.add_argument("--poll-interval", type=float, default=config.SFX_POLL_INTERVAL_SEC)
     sp.add_argument("--max-wait", type=float, default=config.SFX_POLL_MAX_WAIT_SEC)
     sp.set_defaults(handler=_run_status)
@@ -169,7 +199,7 @@ def _run_generate(args) -> int:
         args.output,
         args.poll_interval,
         args.max_wait,
-        args.no_cleanup,
+        bool(args.no_cleanup),
         args.play,
         name_prefix="venice-sfx",
         retry_hint=f"venice sfx-status {queue_id}",
@@ -178,6 +208,10 @@ def _run_generate(args) -> int:
 
 
 def _run_status(args) -> int:
+    # #57 Class B: status shares its parent's section, so a config
+    # default like defaults.sfx.no_cleanup applies to `venice sfx`
+    # and `venice sfx-status` alike rather than only the former.
+    userconfig.apply_defaults(args, "sfx")
     client, rc = _queue.build_client()
     if rc != 0:
         return rc
@@ -189,7 +223,7 @@ def _run_status(args) -> int:
         args.output,
         args.poll_interval,
         args.max_wait,
-        args.no_cleanup,
+        bool(args.no_cleanup),
         want_play,
         name_prefix="venice-sfx",
         retry_hint=f"venice sfx-status {args.queue_id}",

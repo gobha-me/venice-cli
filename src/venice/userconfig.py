@@ -363,6 +363,9 @@ _COMMAND_MAP = {
     },
     "sfx": {
         "play": ("play", _as_bool),
+        # #57 Class B: tri-stated --no-cleanup/--cleanup (CLI-only -- no
+        # agent tool exposes a no_cleanup parameter).
+        "no_cleanup": ("no_cleanup", _as_bool),
     },
     "music": {
         # `lyrics` is deliberately CLI-only -- it's per-song content, not a
@@ -370,14 +373,16 @@ _COMMAND_MAP = {
         "duration": ("duration", int),
         "speed": ("speed", float),
         "play": ("play", _as_bool),
+        "no_cleanup": ("no_cleanup", _as_bool),  # #57 Class B
     },
     "video": {
         "model": ("model", str),
         "resolution": ("resolution", str),
         "aspect_ratio": ("aspect_ratio", str),
         "negative_prompt": ("negative_prompt", str),
-        # #57 Class B: tri-stated --no-audio/--with-audio.
+        # #57 Class B: tri-stated --no-audio/--with-audio and --no-cleanup.
         "no_audio": ("no_audio", _as_bool),
+        "no_cleanup": ("no_cleanup", _as_bool),
     },
     "upscale": {
         "enhance": ("enhance", _as_bool),  # #57 Class B: tri-stated --enhance
