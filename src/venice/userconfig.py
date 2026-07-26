@@ -377,6 +377,12 @@ _COMMAND_MAP = {
         "cfg_scale": ("cfg_scale", float),
         "steps": ("steps", int),
         "style_preset": ("style_preset", str),
+        # #57 Class C: the valued generation knobs. Their argparse defaults moved
+        # to None and the literals now live in `image._run`'s `apply_literals`
+        # call, which runs AFTER the --from-json replay merge.
+        "model": ("model", str),
+        "format": ("format", _one_of("venice.commands.image", "FORMATS")),
+        "variants": ("variants", int),
     },
     "image_edit": {
         # #57 Class B: tri-stated --safe-mode/--no-safe-mode, matching

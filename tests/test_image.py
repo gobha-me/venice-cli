@@ -14,11 +14,16 @@ FAKE_PNG = b"FAKEPNG"
 
 
 def _build_args(**ov):
+    # #57 Class C1: model/format/variants default None on the parser now, so the
+    # fixture matches. `_run` resolves them (apply_defaults -> apply_literals),
+    # which turns every _run-based test below into passive proof the fallback
+    # fires. Callers that reach past `_run` into `_build_body` want a RESOLVED
+    # namespace -- use `_resolved_args` for those.
     base = dict(
         prompt="a fierce red dragon",
         from_file=None,
-        model="venice-sd35",
-        format="png",
+        model=None,
+        format=None,
         width=None,
         height=None,
         aspect_ratio=None,
@@ -31,7 +36,7 @@ def _build_args(**ov):
         cfg_scale=None,
         steps=None,
         style_preset=None,
-        variants=1,
+        variants=None,
         safe_mode=True,
         hide_watermark=False,
         name=None,
@@ -46,6 +51,30 @@ def _build_args(**ov):
     )
     base.update(ov)
     return argparse.Namespace(**base)
+
+
+def _apply_class_c_literals(args):
+    """Mirror `image._run`'s built-in-literal layer (#57 Class C1)."""
+    from venice import userconfig
+    from venice.commands import image
+
+    userconfig.apply_literals(
+        args,
+        model=image.DEFAULT_IMAGE_MODEL,
+        format=image.DEFAULT_FORMAT,
+        variants=image.DEFAULT_VARIANTS,
+    )
+    return args
+
+
+def _resolved_args(**ov):
+    """A namespace as `_build_body` sees it: after `_run`'s resolution layers.
+
+    `_build_body` legitimately assumes model/format/variants are already
+    resolved -- hardening it with its own fallback would put a second copy of
+    each literal in a second place and mask an ordering mistake in `_run`.
+    """
+    return _apply_class_c_literals(_build_args(**ov))
 
 
 def _image_models_payload():
@@ -273,7 +302,7 @@ class TestImageFlow(unittest.TestCase):
         from venice.commands import image
 
         body = image._build_body(
-            "a fierce red dragon", _build_args(style_prefix="EPIC,"))
+            "a fierce red dragon", _resolved_args(style_prefix="EPIC,"))
         self.assertEqual(body["prompt"], "EPIC, a fierce red dragon")
 
     def test_style_prefix_applies_in_batch(self):
@@ -580,7 +609,7 @@ class TestHideWatermarkConfig(unittest.TestCase):
 
     def test_body_none_keeps_watermark(self):
         from venice.commands import image
-        body = image._build_body("p", _build_args(hide_watermark=None))
+        body = image._build_body("p", _resolved_args(hide_watermark=None))
         self.assertEqual(body["hide_watermark"], False)  # None -> keep watermark
 
     def test_config_default_hides_watermark(self):
@@ -590,6 +619,7 @@ class TestHideWatermarkConfig(unittest.TestCase):
                "defaults": {"image": {"hide_watermark": True}}}
         args = self._parse()  # nothing on the CLI
         userconfig.apply_defaults(args, "image", doc)
+        _apply_class_c_literals(args)  # mirror _run: _build_body needs variants
         self.assertTrue(args.hide_watermark)
         self.assertEqual(image._build_body("p", args)["hide_watermark"], True)
 
@@ -624,7 +654,7 @@ class TestSafeModeConfig(unittest.TestCase):
 
     def test_body_none_stays_safe(self):
         from venice.commands import image
-        body = image._build_body("p", _build_args(safe_mode=None))
+        body = image._build_body("p", _resolved_args(safe_mode=None))
         self.assertEqual(body["safe_mode"], True)  # None -> stay safe
 
     def test_config_default_disables_safe_mode(self):
@@ -634,6 +664,7 @@ class TestSafeModeConfig(unittest.TestCase):
                "defaults": {"image": {"safe_mode": False}}}
         args = self._parse()  # nothing on the CLI
         userconfig.apply_defaults(args, "image", doc)
+        _apply_class_c_literals(args)  # mirror _run: _build_body needs variants
         self.assertFalse(args.safe_mode)
         self.assertEqual(image._build_body("p", args)["safe_mode"], False)
 

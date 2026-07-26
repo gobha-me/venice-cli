@@ -54,6 +54,7 @@ EXT_BY_FORMAT = {
 
 MIN_VARIANTS = 1
 MAX_VARIANTS = 4
+DEFAULT_VARIANTS = 1
 
 
 def register(subparsers) -> None:
@@ -94,15 +95,17 @@ def register(subparsers) -> None:
     )
     p.add_argument(
         "--model",
-        default=DEFAULT_IMAGE_MODEL,
+        default=None,
         help=f"Image model id (default {DEFAULT_IMAGE_MODEL}). "
-        "See `venice models --type image`.",
+        "See `venice models --type image`. Config-backable via "
+        "defaults.image.model; an explicit --model still wins.",
     )
     p.add_argument(
         "--format",
         choices=FORMATS,
-        default=DEFAULT_FORMAT,
-        help=f"Output image format (default {DEFAULT_FORMAT}).",
+        default=None,
+        help=f"Output image format (default {DEFAULT_FORMAT}). Config-backable "
+        "via defaults.image.format; an explicit --format still wins.",
     )
     # Sizing presets.
     p.add_argument("--width", type=int, default=None,
@@ -149,9 +152,11 @@ def register(subparsers) -> None:
     p.add_argument(
         "--variants",
         type=int,
-        default=1,
+        default=None,
         metavar="N",
-        help=f"Images to generate per prompt ({MIN_VARIANTS}-{MAX_VARIANTS}).",
+        help=f"Images to generate per prompt ({MIN_VARIANTS}-{MAX_VARIANTS}; "
+        f"default {DEFAULT_VARIANTS}). Config-backable via "
+        "defaults.image.variants; an explicit --variants still wins.",
     )
     p.add_argument(
         "--safe-mode",
@@ -489,6 +494,11 @@ def _apply_replay(args):
         return 2
 
     from ..cli import build_parser  # lazy: avoids a circular import at load
+    # A VIRGIN namespace: no config, no built-in literals. That is the whole
+    # point -- `cur != defaults.<f>` below is how "the user (or their config)
+    # supplied this" is detected, so anything pre-filled here would read as
+    # explicit and the sidecar would never win. `_run` deliberately applies the
+    # Class C literals AFTER this merge for the same reason. (#57 Class C1)
     defaults = build_parser().parse_args(["image"])
 
     merged = argparse.Namespace(**vars(args))
@@ -555,6 +565,16 @@ def _run(args) -> int:
         if isinstance(merged, int):
             return merged
         args = merged
+    # AFTER the replay merge, never before: a literal applied up front would
+    # make every _REPLAY_FIELDS comparison read as "explicit" and the sidecar
+    # would be ignored. Also before the --variants range check below, which
+    # cannot compare None. (#57 Class C1)
+    userconfig.apply_literals(
+        args,
+        model=DEFAULT_IMAGE_MODEL,
+        format=DEFAULT_FORMAT,
+        variants=DEFAULT_VARIANTS,
+    )
 
     rc = _resolve_preset(args)
     if rc is not None:
