@@ -1543,11 +1543,15 @@ way, as do the generation knobs `defaults.image.{model,format,variants}`,
 An explicit argument the model puts in the tool call still wins over config.
 `venice mcp-serve` threads the same defaults into its wrappers.
 
-A config value whose flag has a fixed set of choices (`defaults.image.format`,
-`defaults.tts.model`, `defaults.tts.format`, `defaults.sfx.model`,
-`defaults.video.duration`) is validated against that set. An unrecognized value
-is reported on stderr and skipped, and the command falls back to its built-in
-default rather than sending something the API will reject.
+**Any** config value whose flag has a fixed set of choices is validated against
+that set — `defaults.image.format`, `defaults.tts.{model,format}`,
+`defaults.sfx.model`, `defaults.video.{duration,resolution,aspect_ratio}`,
+`defaults.image_edit.{aspect_ratio,output_format}` and `defaults.chat.web_search`.
+An unrecognized value is reported on stderr, naming the legal values exactly as
+`--flag` would, and skipped — so the command falls back to its built-in default
+rather than sending something the API will reject. This applies on the CLI and on
+the agent-tool path alike; config must never be able to set a value the command
+line would refuse.
 
 The **API key is never stored here** — it stays in
 `~/.config/venice/credentials`. Unknown keys are preserved on write, so the

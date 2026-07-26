@@ -627,12 +627,14 @@ _CLASS_C_CASES = [
     dict(key="image", mod=image, argv=["image", "p"], dest="variants",
          literal=image.DEFAULT_VARIANTS, cfg="3", want=3,
          explicit=["--variants", "2"], eval=2),
+    # cfg/explicit must be DISTINCT legal values, and both distinct from the
+    # literal -- otherwise test_explicit_cli_beats_config asserts nothing.
     dict(key="tts", mod=tts, argv=["tts", "hi"], dest="model",
-         literal=tts.DEFAULT_TTS_MODEL, cfg="tts-kokoro", want="tts-kokoro",
-         explicit=["--model", "tts-kokoro"], eval="tts-kokoro"),
+         literal=tts.DEFAULT_TTS_MODEL, cfg="tts-orpheus", want="tts-orpheus",
+         explicit=["--model", "tts-xai-v1"], eval="tts-xai-v1"),
     dict(key="tts", mod=tts, argv=["tts", "hi"], dest="format",
          literal=tts.DEFAULT_FORMAT, cfg="wav", want="wav",
-         explicit=["--format", "wav"], eval="wav"),
+         explicit=["--format", "flac"], eval="flac"),
     dict(key="sfx", mod=sfx, argv=["sfx", "p"], dest="model",
          literal=sfx.DEFAULT_SFX_MODEL, cfg="mmaudio-v2-text-to-audio",
          want="mmaudio-v2-text-to-audio",
@@ -759,6 +761,45 @@ class TestClassCParity(unittest.TestCase):
         uc.apply_defaults(
             args, "sfx", {"defaults": {"sfx": {"model": "mmaudio-v2-text-to-audio"}}})
         self.assertEqual(args.model, "mmaudio-v2-text-to-audio")
+
+    def test_every_one_of_row_resolves_to_a_real_collection(self):
+        """`_one_of` names its allowed set by (module, attr) STRINGS, because a
+        module-scope import would cycle. Strings are invisible to a rename, and a
+        stale one raises ImportError/AttributeError -- which `apply_defaults` and
+        `config_defaults_for` do NOT catch (only TypeError/ValueError), breaking
+        userconfig's "degrade, never crash" contract. Resolving every row here
+        turns that runtime traceback into a CI failure."""
+        for section, rows in uc._COMMAND_MAP.items():
+            for key, (_dest, coerce) in rows.items():
+                if getattr(coerce, "__name__", "") != "coerce":
+                    continue  # not a _one_of closure
+                with self.subTest(section=section, key=key):
+                    # A value no real choice set contains: resolving the
+                    # collection is the point, ValueError is the proof it did.
+                    with self.assertRaises(ValueError):
+                        coerce("\x00 definitely not a valid choice")
+
+    def test_every_choices_flag_has_a_validating_coercer(self):
+        """The invariant `_one_of` exists for: config must never be able to set a
+        value the command line would reject. Any `_COMMAND_MAP` row whose flag
+        carries argparse `choices=` must validate against that set, or config
+        silently ships a value argparse would have exited 2 on."""
+        mods = {"image": image, "image_edit": image_edit, "tts": tts, "sfx": sfx,
+                "music": music, "video": video, "upscale": upscale, "chat": chat}
+        for section, mod in mods.items():
+            parser = _build_parser(mod)
+            sub = list(parser._subparsers._group_actions[0].choices.values())[0]
+            by_dest = {a.dest: a for a in sub._actions}
+            for key, (dest, coerce) in uc._COMMAND_MAP.get(section, {}).items():
+                action = by_dest.get(dest)
+                if action is None or not action.choices:
+                    continue
+                with self.subTest(section=section, key=key):
+                    self.assertEqual(
+                        getattr(coerce, "__name__", ""), "coerce",
+                        msg=f"defaults.{section}.{key} maps to a flag with "
+                            f"choices={list(action.choices)!r} but is not "
+                            "validated -- wrap it in _one_of")
 
 
 # --------------------------------------------------------------------------- #

@@ -37,6 +37,7 @@ MAX_PROMPT = 32768
 URL_DEFAULT_STEM = "venice-edit"
 
 ASPECT_RATIOS = ["auto", "1:1", "3:2", "16:9", "21:9", "9:16", "2:3", "3:4", "4:5"]
+OUTPUT_FORMATS = ["png", "jpeg", "webp"]
 
 # Map --output-format to a file extension for the default output name. Mirrors
 # image.py's EXT_BY_FORMAT; the response content-type is not inspected by
@@ -79,7 +80,7 @@ def register(subparsers) -> None:
     p.add_argument("--resolution", default=None, metavar="TIER",
                    help="Output resolution tier, e.g. 1K/2K/4K (default 1K).")
     p.add_argument("--output-format", default=None,
-                   choices=["png", "jpeg", "webp"],
+                   choices=OUTPUT_FORMATS,
                    help="Output image format (default inferred; PNG for 1K).")
     p.add_argument(
         "--safe-mode",

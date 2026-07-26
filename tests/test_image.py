@@ -681,6 +681,20 @@ class TestClassCReplayPrecedence(unittest.TestCase):
         body = self._body(model=image.DEFAULT_IMAGE_MODEL)
         self.assertEqual(body["model"], image.DEFAULT_IMAGE_MODEL)
 
+    def test_config_variants_does_not_multiply_a_replay(self):
+        """`_sidecar_params` drops `variants` so a sidecar reproduces the ONE
+        saved image. A standing `defaults.image.variants` must not silently turn
+        `--from-json` into an N-image charge."""
+        doc = {"version": 1, "mcpServers": {},
+               "defaults": {"image": {"variants": 4}}}
+        body = self._body(doc)
+        self.assertNotIn("variants", body)  # omitted when 1
+
+    def test_explicit_variants_still_multiplies_a_replay(self):
+        """The other half: the user can still ask for N on a replay."""
+        body = self._body(variants=2)
+        self.assertEqual(body["variants"], 2)
+
     def test_variants_from_config_survives_the_range_check(self):
         """Proves the literal lands after the merge but before the range check --
         an out-of-range config value must exit 2, not TypeError on None."""
@@ -688,8 +702,17 @@ class TestClassCReplayPrecedence(unittest.TestCase):
 
         doc = {"version": 1, "mcpServers": {},
                "defaults": {"image": {"variants": 9}}}
+
+        def no_network(req, timeout=None):
+            # The range check returns 2 before the client is ever built, so this
+            # should never fire -- but it must be patched anyway. Nothing pins
+            # that ordering, and an unmocked urlopen here would POST to the real
+            # api.venice.ai from `make test` the day the check moves.
+            raise AssertionError(f"unexpected network call: {req.full_url}")
+
         with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
-             mock.patch("venice.userconfig.load_config", lambda *a, **k: doc):
+             mock.patch("venice.userconfig.load_config", lambda *a, **k: doc), \
+             mock.patch("venice.client.urllib.request.urlopen", no_network):
             rc = image._run(_build_args(prompt="p", from_json=None))
         self.assertEqual(rc, 2)
 

@@ -9,6 +9,7 @@ unavailable it degrades to letting the API be the backstop.
 from __future__ import annotations
 
 import argparse
+import shlex
 import sys
 from pathlib import Path
 from typing import Optional
@@ -247,8 +248,9 @@ def _run_generate(args) -> int:
     args.instrumental = resolve_instrumental(
         args.instrumental, args.lyrics, explicit=instrumental_explicit
     )
-    # #57 Class C1: built-in literals last. After resolve_instrumental, which
-    # cares about config-vs-CLI provenance that apply_literals would blur.
+    # #57 Class C1: built-in literal last, so config gets first refusal.
+    # Position relative to resolve_instrumental is not load-bearing -- it reads
+    # instrumental/lyrics, never model -- so this may move if that changes.
     userconfig.apply_literals(args, model=DEFAULT_MUSIC_MODEL)
     if not args.prompt:
         print("music: prompt required (or use: venice music-status <id>)", file=sys.stderr)
@@ -330,7 +332,7 @@ def _run_generate(args) -> int:
             # command line, and on the status side it is job identity, so the
             # hint has to carry it. (#57 Class C1)
             f"queued as {queue_id}; fetch with: "
-            f"venice music-status {queue_id} --model {args.model}",
+            f"venice music-status {queue_id} --model {shlex.quote(args.model)}",
             file=sys.stderr,
         )
         return 0
@@ -346,7 +348,7 @@ def _run_generate(args) -> int:
         bool(args.no_cleanup),
         args.play,
         name_prefix="venice-music",
-        retry_hint=f"venice music-status {queue_id} --model {args.model}",
+        retry_hint=f"venice music-status {queue_id} --model {shlex.quote(args.model)}",
         post_process=post,
     )
 
@@ -372,5 +374,5 @@ def _run_status(args) -> int:
         bool(args.no_cleanup),
         want_play,
         name_prefix="venice-music",
-        retry_hint=f"venice music-status {args.queue_id} --model {args.model}",
+        retry_hint=f"venice music-status {args.queue_id} --model {shlex.quote(args.model)}",
     )

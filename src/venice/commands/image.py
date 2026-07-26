@@ -559,12 +559,21 @@ def _resolve_preset(args) -> Optional[int]:
 # ---- main flow ---------------------------------------------------------------
 
 def _run(args) -> int:
+    # Capture explicitness BEFORE config can fill the dest -- afterwards a
+    # config-sourced value is indistinguishable from a typed --variants.
+    variants_explicit = args.variants is not None
     userconfig.apply_defaults(args, "image")
     if args.from_json is not None:
         merged = _apply_replay(args)
         if isinstance(merged, int):
             return merged
         args = merged
+        if not variants_explicit:
+            # A sidecar deliberately records no `variants` (see _sidecar_params)
+            # so a replay reproduces the ONE saved image. A standing
+            # defaults.image.variants must not silently turn that into an N-image
+            # charge; an explicit --variants on the command line still can.
+            merged.variants = DEFAULT_VARIANTS
     # AFTER the replay merge, never before: a literal applied up front would
     # make every _REPLAY_FIELDS comparison read as "explicit" and the sidecar
     # would be ignored. Also before the --variants range check below, which
