@@ -255,8 +255,12 @@ def _make_handler(api: FakeVenice):
         def do_POST(self):  # noqa: N802 - stdlib hook name
             path, _, body = self._dispatch("POST")
             if path == "/image/generate":
+                # Honor `variants` so a multi-variant run writes the number of
+                # files the confirm gate just charged for. `_build_body` omits
+                # the key entirely when it is 1, so that stays the default.
+                n = int((body or {}).get("variants", 1) or 1)
                 self._send_json({
-                    "images": [base64.b64encode(PNG_BYTES).decode("ascii")],
+                    "images": [base64.b64encode(PNG_BYTES).decode("ascii")] * n,
                     "request": {"data": body or {}},
                 })
             elif path == "/chat/completions":

@@ -112,6 +112,68 @@ class TestConfigDefaultsWiring(unittest.TestCase):
          dict(prompt="p")),
     ]
 
+    # -- #57 Class C1: the same trap, for the VALUED defaults ------------------ #
+    #
+    # Identical mechanism to Class B above, and identical blast radius: a wrapper
+    # param left as `model: str = DEFAULT_IMAGE_MODEL` fills a concrete value
+    # when the host omits the arg, and that value beats defaults.image.model --
+    # silently, while the CLI path, the _COMMAND_MAP rows and the docs all look
+    # correct. Ten params across six tools; each needs to reach its impl.
+    _CLASS_C_TOOLS = [
+        ("image", "venice_image", "image_tool", "model", "hidream",
+         dict(prompt="p")),
+        ("image", "venice_image", "image_tool", "format", "webp",
+         dict(prompt="p")),
+        ("image", "venice_image", "image_tool", "variants", 3, dict(prompt="p")),
+        ("tts", "venice_tts", "tts_tool", "model", "tts-kokoro", dict(text="t")),
+        ("tts", "venice_tts", "tts_tool", "format", "wav", dict(text="t")),
+        ("sfx", "venice_sfx", "sfx_tool", "model", "mmaudio-v2-text-to-audio",
+         dict(prompt="p")),
+        ("sfx", "venice_sfx", "sfx_tool", "duration", 12, dict(prompt="p")),
+        ("music", "venice_music", "music_tool", "model", "other-music",
+         dict(prompt="p")),
+        ("video", "venice_video", "video_tool", "duration", "10s",
+         dict(prompt="p")),
+        ("upscale", "venice_upscale", "upscale_tool", "scale", 3.0,
+         dict(input_path="in.png")),
+    ]
+
+    def test_class_c_config_reaches_impl_when_host_omits_the_arg(self):
+        for section, tool, impl, param, val, kwargs in self._CLASS_C_TOOLS:
+            with self.subTest(tool=tool, param=param):
+                doc = {"defaults": {section: {param: val}}}
+                captured = self._invoke(section, tool, impl, param, kwargs, doc)
+                self.assertEqual(captured.get(param), val,
+                                 msg=f"{tool}.{param} did not receive the "
+                                     f"config default")
+
+    def test_class_c_host_arg_still_beats_config(self):
+        for section, tool, impl, param, val, kwargs in self._CLASS_C_TOOLS:
+            with self.subTest(tool=tool, param=param):
+                doc = {"defaults": {section: {param: val}}}
+                captured = self._invoke(
+                    section, tool, impl, param, {**kwargs, param: val}, doc)
+                self.assertEqual(captured.get(param), val)
+
+    def test_class_c_wrapper_defaults_are_none(self):
+        """The direct tripwire, needing no config doc at all: it fails the
+        instant someone re-types a wrapper param back to a concrete literal,
+        which is what made these ten unreachable from config in the first place.
+        """
+        import inspect as _inspect
+
+        from venice.mcp_server import build_server
+
+        server = build_server(self._Client(), doc=None)
+        for _section, tool, _impl, param, _val, _kwargs in self._CLASS_C_TOOLS:
+            with self.subTest(tool=tool, param=param):
+                fn = server._tool_manager.get_tool(tool).fn
+                default = _inspect.signature(fn).parameters[param].default
+                self.assertIsNone(
+                    default,
+                    msg=f"{tool}.{param} default is {default!r}, not None -- it "
+                        "will silently beat the config value")
+
     def _invoke(self, section, tool_name, impl_name, param, call_kwargs, doc):
         """Patch the named impl with a real function exposing `param`, build the
         server against `doc`, and invoke the registered tool."""

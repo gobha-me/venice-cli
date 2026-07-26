@@ -1,5 +1,7 @@
 """End-to-end SFX flow with mocked HTTP. Drives the command handler with --yes."""
 import argparse
+import contextlib
+import io
 import json
 import os
 import tempfile
@@ -252,6 +254,62 @@ class TestSfxFullFlow(unittest.TestCase):
              mock.patch("venice.audio_post.has_ffmpeg", lambda: False):
             sfx._run_generate(args)
         self.assertIs(args.master, False)  # config did not overwrite it
+
+    def test_config_model_reaches_the_body_and_the_status_hint(self):
+        """#57 Class C1. `defaults.sfx.model` must reach the queue body -- and the
+        printed follow-up must carry `--model`, because on the status side the
+        model is job IDENTITY. Without it, a job queued under a config model is
+        fetched back with the built-in model and 404s something already paid for.
+        """
+        from venice.commands import sfx
+
+        doc = {"version": 1, "mcpServers": {},
+               "defaults": {"sfx": {"model": "mmaudio-v2-text-to-audio"}}}
+        bodies = []
+        responses = iter([
+            FakeResp(200, b'{"quote": 0.0027}', "application/json"),
+            FakeResp(200, b'{"queue_id":"BGID12345","status":"QUEUED"}',
+                     "application/json"),
+        ])
+
+        def fake_urlopen(req, timeout=None):
+            bodies.append(json.loads(req.data.decode("utf-8")))
+            return next(responses)
+
+        err = io.StringIO()
+        with mock.patch("venice.userconfig.load_config", lambda *a, **k: doc), \
+             mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.client.urllib.request.urlopen", fake_urlopen), \
+             contextlib.redirect_stderr(err):
+            rc = sfx._run_generate(_build_args(background=True))
+
+        self.assertEqual(rc, 0)
+        for body in bodies:
+            self.assertEqual(body["model"], "mmaudio-v2-text-to-audio")
+        self.assertIn("venice sfx-status BGID12345 "
+                      "--model mmaudio-v2-text-to-audio", err.getvalue())
+
+    def test_zero_duration_from_config_still_warns(self):
+        """#57 Class C1: `apply_literals` fills with `is not None`, never `or`.
+        A config-set 0 is a value the user typed and must reach _clamp_duration's
+        own "must be > 0" warning rather than be silently rewritten to 5."""
+        from venice.commands import sfx
+
+        doc = {"version": 1, "mcpServers": {},
+               "defaults": {"sfx": {"duration": 0}}}
+        args = _build_args(duration=None, dry_run=True)
+
+        def fake_urlopen(req, timeout=None):
+            return FakeResp(200, b'{"quote": 0.0027}', "application/json")
+
+        err = io.StringIO()
+        with mock.patch("venice.userconfig.load_config", lambda *a, **k: doc), \
+             mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.client.urllib.request.urlopen", fake_urlopen), \
+             contextlib.redirect_stderr(err):
+            sfx._run_generate(args)
+
+        self.assertIn("--duration must be > 0", err.getvalue())
 
     def test_missing_api_key_returns_exit_2(self):
         from venice.commands import sfx

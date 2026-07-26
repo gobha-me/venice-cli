@@ -139,6 +139,33 @@ class TestDriveCharge(_DriveCase):
             ["/models", "/api_keys/rate_limits", "/image/generate"],
         )
 
+    def test_config_defaults_reach_the_confirm_gate(self):
+        """#57 Class C1: `defaults.image.variants` is a COST MULTIPLIER, so it has
+        to be visible in the very line the user is being asked to approve. Only a
+        real pty run through the real parser proves the config value survives
+        `apply_defaults` -> `apply_literals` and lands in the quote.
+
+        The model stays at the built-in id on purpose: the fake catalog is keyed
+        to `image.DEFAULT_IMAGE_MODEL`, and an unknown id would make the price
+        lookup fail and change the shape of this line.
+        """
+        cfgdir = self.home / ".config" / "venice"
+        cfgdir.mkdir(parents=True, exist_ok=True)
+        (cfgdir / "config.json").write_text(json.dumps({
+            "version": 1,
+            "mcpServers": {},
+            "defaults": {"image": {"model": "venice-sd35", "variants": 2}},
+        }), encoding="utf-8")
+
+        with self.cli("image", "a cat", "--name", "drive-cfg") as d:
+            d.expect("Estimated cost: $0.0200 USD (2 images, model=venice-sd35)")
+            d.expect("Proceed? [y/N] ")
+            d.send("y")
+            d.expect("wrote %d bytes to" % len(fake.PNG_BYTES))
+            self.assertEqual(d.wait(), 0)
+
+        self.assertEqual(len(sorted(self.project.glob("drive-cfg*.png"))), 2)
+
     def test_image_confirm_decline_makes_no_paid_call(self):
         with self.cli("image", "a cat", "--name", "drive-test") as d:
             d.expect("Proceed? [y/N] ")
