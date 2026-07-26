@@ -417,6 +417,10 @@ _COMMAND_MAP = {
         "loop": ("loop", _as_bool),
     },
     "music": {
+        # #57 Class C: literal now lives in `music._run_generate`. Generate
+        # parser only -- `music-status --model` is job identity (see sfx).
+        # No `_one_of`: --model has no `choices=` (the catalog is fetched).
+        "model": ("model", str),
         # `lyrics` is deliberately CLI-only -- it's per-song content, not a
         # persistent preference.
         "duration": ("duration", int),

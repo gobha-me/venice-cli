@@ -21,7 +21,8 @@ from tests.test_client import FakeResp
 def _build_args(**overrides):
     base = dict(
         prompt="tense dungeon drone",
-        model="elevenlabs-music",
+        # #57 Class C1: None on the parser now; `_run_generate` resolves it.
+        model=None,
         duration=60,
         instrumental=False,
         lyrics=None,
