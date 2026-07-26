@@ -404,6 +404,11 @@ _COMMAND_MAP = {
         "play": ("play", _as_bool),
     },
     "sfx": {
+        # #57 Class C: literals now live in `sfx._run_generate`. Note `model`
+        # reaches the GENERATE parser only -- `sfx-status --model` keeps its
+        # concrete default because there it is job identity, not a preference.
+        "model": ("model", _one_of("venice.commands.sfx", "SFX_MODELS")),
+        "duration": ("duration", int),
         "play": ("play", _as_bool),
         # #57 Class B: tri-stated --no-cleanup/--cleanup (CLI-only -- no
         # agent tool exposes a no_cleanup parameter).

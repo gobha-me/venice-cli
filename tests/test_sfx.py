@@ -13,7 +13,10 @@ from tests.test_client import FakeResp
 def _build_args(**overrides):
     base = dict(
         prompt="thunder",
-        model="elevenlabs-sound-effects-v2",
+        # #57 Class C1: None on the parser now; `_run_generate` resolves it, so
+        # the tests below double as proof the fallback fires. `duration` stays
+        # concrete -- it models an explicitly-passed `--duration 3`.
+        model=None,
         duration=3,
         output=None,
         play=False,
