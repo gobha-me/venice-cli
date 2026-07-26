@@ -9,6 +9,7 @@ unavailable it degrades to letting the API be the backstop.
 from __future__ import annotations
 
 import argparse
+import shlex
 import sys
 from pathlib import Path
 from typing import Optional
@@ -32,7 +33,11 @@ def register(subparsers) -> None:
         ),
     )
     p.add_argument("prompt", nargs="?", help="Music/ambience description (e.g. 'tense dungeon drone').")
-    p.add_argument("--model", default=DEFAULT_MUSIC_MODEL)
+    p.add_argument(
+        "--model", default=None,
+        help=f"Music model id (default {DEFAULT_MUSIC_MODEL}). Config-backable "
+        "via defaults.music.model; an explicit --model still wins.",
+    )
     p.add_argument(
         "--duration",
         type=int,
@@ -81,7 +86,16 @@ def register_status(subparsers) -> None:
         ),
     )
     sp.add_argument("queue_id")
-    sp.add_argument("--model", default=DEFAULT_MUSIC_MODEL)
+    # #57 Class C1: deliberately NOT tri-stated, unlike the generate parser's
+    # --model. Here the model is job IDENTITY -- it goes in the /audio/retrieve
+    # and /audio/complete bodies (_audio.py) -- so `defaults.music.model` must
+    # never reach it and retarget an already-queued, already-charged job. The
+    # concrete default is exactly what makes `apply_defaults` skip this dest
+    # (it only fills a dest that is still None). Do not "tidy" it to None.
+    sp.add_argument(
+        "--model", default=DEFAULT_MUSIC_MODEL,
+        help="Model the job was queued under (job identity, not a preference).",
+    )
     sp.add_argument("--output", "-o", type=Path, default=None)
     status_play = sp.add_mutually_exclusive_group()
     status_play.add_argument("--play", dest="play", action="store_true",
@@ -234,6 +248,10 @@ def _run_generate(args) -> int:
     args.instrumental = resolve_instrumental(
         args.instrumental, args.lyrics, explicit=instrumental_explicit
     )
+    # #57 Class C1: built-in literal last, so config gets first refusal.
+    # Position relative to resolve_instrumental is not load-bearing -- it reads
+    # instrumental/lyrics, never model -- so this may move if that changes.
+    userconfig.apply_literals(args, model=DEFAULT_MUSIC_MODEL)
     if not args.prompt:
         print("music: prompt required (or use: venice music-status <id>)", file=sys.stderr)
         return 2
@@ -310,7 +328,11 @@ def _run_generate(args) -> int:
         sys.stdout.write(queue_id + "\n")
         sys.stdout.flush()
         print(
-            f"queued as {queue_id}; fetch with: venice music-status {queue_id}",
+            # The model may have come from defaults.music.model rather than the
+            # command line, and on the status side it is job identity, so the
+            # hint has to carry it. (#57 Class C1)
+            f"queued as {queue_id}; fetch with: "
+            f"venice music-status {queue_id} --model {shlex.quote(args.model)}",
             file=sys.stderr,
         )
         return 0
@@ -326,7 +348,7 @@ def _run_generate(args) -> int:
         bool(args.no_cleanup),
         args.play,
         name_prefix="venice-music",
-        retry_hint=f"venice music-status {queue_id}",
+        retry_hint=f"venice music-status {queue_id} --model {shlex.quote(args.model)}",
         post_process=post,
     )
 
@@ -352,5 +374,5 @@ def _run_status(args) -> int:
         bool(args.no_cleanup),
         want_play,
         name_prefix="venice-music",
-        retry_hint=f"venice music-status {args.queue_id}",
+        retry_hint=f"venice music-status {args.queue_id} --model {shlex.quote(args.model)}",
     )

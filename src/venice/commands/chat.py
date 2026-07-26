@@ -22,6 +22,10 @@ from .. import auth, userconfig
 from ..client import build_client_from_auth
 from . import _agent, _compact, _mcp, _mcp_client, _models, _openai, _persona, _repl, _session
 
+# Named so `defaults.chat.web_search` can be validated against the same set the
+# CLI enforces, rather than only argparse seeing it. (#57)
+WEB_SEARCH_CHOICES = ("auto", "on", "off")
+
 
 def register(subparsers) -> None:
     p = subparsers.add_parser(
@@ -118,7 +122,7 @@ def register(subparsers) -> None:
     # --- Venice extensions -> venice_parameters ---
     ext = p.add_argument_group("Venice extensions")
     ext.add_argument(
-        "--web-search", choices=("auto", "on", "off"), default=None,
+        "--web-search", choices=WEB_SEARCH_CHOICES, default=None,
         dest="web_search", help="Enable Venice web search (default: off).",
     )
     ext.add_argument(

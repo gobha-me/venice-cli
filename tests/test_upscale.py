@@ -19,7 +19,8 @@ UPSCALED_PNG = b"UPSCALEDPNGBYTES"
 def _args(**ov):
     base = dict(
         input=Path("in.png"),
-        scale=2.0,
+        # #57 Class C1: None on the parser now; `_run` resolves it.
+        scale=None,
         enhance=False,
         enhance_creativity=None,
         enhance_prompt=None,
@@ -33,6 +34,21 @@ def _args(**ov):
     )
     base.update(ov)
     return argparse.Namespace(**base)
+
+
+def _resolved_args(**ov):
+    """A namespace as `_build_body` sees it: after `_run`'s resolution layers.
+
+    Mirrors test_image's helper. `_build_body` assumes `scale` is resolved;
+    hardening it with its own fallback would put a second copy of the literal in
+    a second place and mask an ordering mistake in `_run`. (#57 Class C1)
+    """
+    from venice import userconfig
+    from venice.commands import upscale
+
+    args = _args(**ov)
+    userconfig.apply_literals(args, scale=upscale.DEFAULT_SCALE)
+    return args
 
 
 def _http_error(code):
@@ -193,7 +209,11 @@ class TestUpscaleFlow(unittest.TestCase):
 
     def test_unset_enhance_sends_false_not_none(self):
         from venice.commands import upscale
-        body = upscale._build_body(_args(enhance=None), "b64")
+        body = upscale._build_body(_resolved_args(enhance=None), "b64")
+        # `_build_body` reads args.scale raw, with no fallback of its own -- so a
+        # namespace that never went through `_run` must be resolved here or this
+        # silently builds {"scale": null}. (#57 Class C1)
+        self.assertEqual(body["scale"], upscale.DEFAULT_SCALE)
         self.assertIs(body["enhance"], False)
 
     def test_scale_one_with_enhance_ok(self):

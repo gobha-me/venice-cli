@@ -257,6 +257,46 @@ def _as_list(v):
     return [str(v)]
 
 
+def _one_of(module: str, attr: str):
+    """Coercer factory for a config key whose flag carries argparse ``choices=``.
+
+    The config layer does no membership validation, so without this a typo like
+    ``defaults.sfx.model = "bogus"`` reaches ``SFX_MODELS[model]`` as a raw
+    KeyError traceback -- something the command line itself cannot do (argparse
+    exits 2 with "invalid choice"). Config must never be able to do what the CLI
+    can't. Raising ValueError routes the bad value into `apply_defaults`' existing
+    warn-and-skip path, leaving the dest None so the built-in literal applies --
+    the same "degrade to no defaults, never crash" contract `load_config` keeps.
+    (#57 Class C)
+
+    The allowed set is resolved LAZILY inside the closure: every command module
+    imports this one, so a module-scope import would be a cycle and would take
+    `venice --help` down with it. By the time a coercer runs we are already
+    inside a command, so the import is free.
+
+    That laziness makes the reference stringly-typed, and a stale one would raise
+    ImportError/AttributeError -- which callers do NOT catch (they expect only
+    TypeError/ValueError), turning this module's "degrade, never crash" contract
+    into a traceback for every user with that key set. So a broken reference is
+    re-raised as ValueError: the key degrades to its built-in default and says so
+    on stderr, instead of taking the command down. `test_config` resolves every
+    row so a stale string fails CI long before it reaches anyone.
+    """
+    def coerce(v):
+        import importlib
+
+        try:
+            allowed = getattr(importlib.import_module(module), attr)
+        except (ImportError, AttributeError) as e:  # pragma: no cover - see above
+            raise ValueError(f"choices {module}.{attr} unavailable ({e})") from None
+        s = str(v)
+        if s not in allowed:
+            raise ValueError(f"expected one of: {', '.join(sorted(allowed))}")
+        return s
+
+    return coerce
+
+
 # config key -> (argparse dest, coercer). Globals apply to any command that
 # declares the flag; a per-command section overrides them.
 _GLOBAL_MAP = {
@@ -277,7 +317,7 @@ _COMMAND_MAP = {
         "persona": ("persona", str),
         "temperature": ("temperature", float),
         "max_tokens": ("max_tokens", int),
-        "web_search": ("web_search", str),
+        "web_search": ("web_search", _one_of("venice.commands.chat", "WEB_SEARCH_CHOICES")),
         "character": ("character", str),
         "tools": ("tools", _as_bool),
         "max_tool_calls": ("max_tool_calls", int),
@@ -348,6 +388,12 @@ _COMMAND_MAP = {
         "cfg_scale": ("cfg_scale", float),
         "steps": ("steps", int),
         "style_preset": ("style_preset", str),
+        # #57 Class C: the valued generation knobs. Their argparse defaults moved
+        # to None and the literals now live in `image._run`'s `apply_literals`
+        # call, which runs AFTER the --from-json replay merge.
+        "model": ("model", str),
+        "format": ("format", _one_of("venice.commands.image", "FORMATS")),
+        "variants": ("variants", int),
     },
     "image_edit": {
         # #57 Class B: tri-stated --safe-mode/--no-safe-mode, matching
@@ -355,17 +401,25 @@ _COMMAND_MAP = {
         # the two image commands read alike here and on the tool surfaces).
         "safe_mode": ("safe_mode", _as_bool),
         "model": ("model", str),
-        "aspect_ratio": ("aspect_ratio", str),
-        "resolution": ("resolution", str),
-        "output_format": ("output_format", str),
+        "aspect_ratio": ("aspect_ratio", _one_of("venice.commands.image_edit", "ASPECT_RATIOS")),
+        "resolution": ("resolution", str),  # free-form tier, no argparse choices
+        "output_format": ("output_format", _one_of("venice.commands.image_edit", "OUTPUT_FORMATS")),
     },
     "tts": {
+        # #57 Class C: literals now live in `tts._run`'s `apply_literals` call.
+        "model": ("model", _one_of("venice.commands.tts", "TTS_MODELS")),
+        "format": ("format", _one_of("venice.commands.tts", "FORMATS")),
         "voice": ("voice", str),
         "speed": ("speed", float),
         # `--play`/`--no-play` is a tri-stated store_true(None)/store_false pair.
         "play": ("play", _as_bool),
     },
     "sfx": {
+        # #57 Class C: literals now live in `sfx._run_generate`. Note `model`
+        # reaches the GENERATE parser only -- `sfx-status --model` keeps its
+        # concrete default because there it is job identity, not a preference.
+        "model": ("model", _one_of("venice.commands.sfx", "SFX_MODELS")),
+        "duration": ("duration", int),
         "play": ("play", _as_bool),
         # #57 Class B: tri-stated --no-cleanup/--cleanup (CLI-only -- no
         # agent tool exposes a no_cleanup parameter).
@@ -374,6 +428,10 @@ _COMMAND_MAP = {
         "loop": ("loop", _as_bool),
     },
     "music": {
+        # #57 Class C: literal now lives in `music._run_generate`. Generate
+        # parser only -- `music-status --model` is job identity (see sfx).
+        # No `_one_of`: --model has no `choices=` (the catalog is fetched).
+        "model": ("model", str),
         # `lyrics` is deliberately CLI-only -- it's per-song content, not a
         # persistent preference.
         "duration": ("duration", int),
@@ -395,15 +453,21 @@ _COMMAND_MAP = {
         "loop": ("loop", _as_bool),
     },
     "video": {
+        # #57 Class C: literal now lives in `video._run_generate`. `_run_status`
+        # already snapshots/restores args.model around apply_defaults, since
+        # there the model is job identity rather than a preference.
+        "duration": ("duration", _one_of("venice.commands.video", "DURATION_CHOICES")),
         "model": ("model", str),
-        "resolution": ("resolution", str),
-        "aspect_ratio": ("aspect_ratio", str),
+        "resolution": ("resolution", _one_of("venice.commands.video", "RESOLUTION_CHOICES")),
+        "aspect_ratio": ("aspect_ratio", _one_of("venice.commands.video", "ASPECT_CHOICES")),
         "negative_prompt": ("negative_prompt", str),
         # #57 Class B: tri-stated --no-audio/--with-audio and --no-cleanup.
         "no_audio": ("no_audio", _as_bool),
         "no_cleanup": ("no_cleanup", _as_bool),
     },
     "upscale": {
+        # #57 Class C: literal now lives in `upscale._run`.
+        "scale": ("scale", float),
         "enhance": ("enhance", _as_bool),  # #57 Class B: tri-stated --enhance
         "enhance_creativity": ("enhance_creativity", float),
         "enhance_prompt": ("enhance_prompt", str),
@@ -474,8 +538,16 @@ def config_defaults_for(section: str, impl, doc=None) -> dict:
             continue
         try:
             out[dest] = coerce(raw)
-        except (TypeError, ValueError):
-            pass  # a bad config value shouldn't break tool building
+        except (TypeError, ValueError) as e:
+            # Skip it -- a bad config value must never break tool building -- but
+            # say so. Silence here meant a typo'd key applied on the CLI and
+            # inexplicably not inside `venice chat --tools`/`code`/`mcp-serve`,
+            # with nothing printed to explain the difference. stderr is safe on
+            # every transport: the MCP stdio server owns stdout, not stderr.
+            print(
+                f"{section}: ignoring invalid config default {key}={raw!r} ({e})",
+                file=sys.stderr,
+            )
     return out
 
 
@@ -497,8 +569,48 @@ def apply_defaults(args, command: str, doc=None) -> None:
             continue
         try:
             setattr(args, dest, coerce(raw))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as e:
+            # Include the coercer's message: for a `choices=` key that is the
+            # list of legal values, which is what argparse would have printed.
+            # Without it the user is told the value was ignored but not why.
             print(
-                f"{command}: ignoring invalid config default {key}={raw!r}",
+                f"{command}: ignoring invalid config default {key}={raw!r} ({e})",
                 file=sys.stderr,
             )
+
+
+def apply_literals(args, **literals) -> None:
+    """Fill a flag's BUILT-IN literal default, but only where the dest is still
+    None -- the last layer of `explicit CLI flag > config file > built-in default`.
+
+    The counterpart to :func:`apply_defaults`. A flag whose argparse default is a
+    hardcoded value can never be reached by config, because `apply_defaults` only
+    fills a dest that is still None; relocating that default to ``default=None``
+    is what opens the flag up, and this is where the literal goes instead.
+    (#57 Class C)
+
+    ALWAYS call this AFTER `apply_defaults` -- and, for `image`, after the
+    ``--from-json`` replay merge, whose "was this set explicitly?" test compares
+    against a virgin parser namespace (see image._apply_replay). Call it BEFORE
+    any range check or request-body build that would choke on None.
+
+    `is not None`, never `or`: a config-set ``0`` is a value the user typed, and
+    it must reach the command's own validator rather than be silently rewritten
+    to the literal.
+
+    Unlike :func:`apply_defaults`, an unknown dest raises rather than being
+    skipped. The two have opposite key sets: `apply_defaults` applies the
+    command-agnostic ``_GLOBAL_MAP`` to every command, so "this command doesn't
+    declare the flag" is a normal skip; the literals here are written by hand in
+    the handler that owns the parser, so a dest that isn't there is always a bug
+    -- a renamed flag, or a stale kwarg. Silently minting a dead attribute would
+    hide it until the real dest blew up somewhere downstream as a None.
+    """
+    for dest, literal in literals.items():
+        if not hasattr(args, dest):
+            raise AttributeError(
+                f"apply_literals: namespace has no dest {dest!r} -- the flag was "
+                "renamed or removed but its literal was left behind"
+            )
+        if getattr(args, dest) is None:
+            setattr(args, dest, literal)

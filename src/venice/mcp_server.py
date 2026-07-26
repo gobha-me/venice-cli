@@ -53,9 +53,9 @@ def build_server(client, doc=None) -> FastMCP:
     @server.tool()
     def venice_image(
         prompt: str,
-        model: str = _mcp._image.DEFAULT_IMAGE_MODEL,
-        variants: int = 1,
-        format: str = _mcp._image.DEFAULT_FORMAT,
+        model: Optional[str] = None,
+        variants: Optional[int] = None,
+        format: Optional[str] = None,
         width: Optional[int] = None,
         height: Optional[int] = None,
         negative_prompt: Optional[str] = None,
@@ -71,8 +71,10 @@ def build_server(client, doc=None) -> FastMCP:
     ) -> dict:
         """Generate 1-4 image variants from a text prompt via Venice /image/generate.
         Writes PNG/WebP/JPEG file(s) and returns their paths (never inline blobs).
-        safe_mode blurs adult content; hide_watermark removes the Venice watermark
-        (both fall back to your config defaults.image.* when omitted). Paid: the cost
+        safe_mode blurs adult content; hide_watermark removes the Venice watermark.
+        Omitted args fall back to defaults.image.* in the user's config, then to the
+        built-ins (model=venice-sd35, format=png, variants=1); variants multiplies
+        the cost 1-4x, so omit it unless more than one image is wanted. Paid: the cost
         is estimated up front; if it is over the auto-approve cap the call returns
         status=confirmation_required and you must re-call with confirm=true."""
         return _mcp.image_tool(
@@ -90,9 +92,9 @@ def build_server(client, doc=None) -> FastMCP:
     @server.tool()
     def venice_tts(
         text: str,
-        model: str = _mcp._tts.DEFAULT_TTS_MODEL,
+        model: Optional[str] = None,
         voice: Optional[str] = None,
-        format: str = _mcp._tts.DEFAULT_FORMAT,
+        format: Optional[str] = None,
         speed: Optional[float] = None,
         output_dir: Optional[str] = None,
         confirm: bool = False,
@@ -100,7 +102,8 @@ def build_server(client, doc=None) -> FastMCP:
     ) -> dict:
         """Synthesize speech from text via Venice /audio/speech. Writes an audio file
         and returns its path. Paid: cost is estimated per character; over-cap calls
-        need confirm=true."""
+        need confirm=true. Omitted args fall back to defaults.tts.* in the user's
+        config, then to the built-ins (model=tts-kokoro, format=mp3)."""
         return _mcp.tts_tool(
             client, text,
             **_merged(_defaults["tts"], dict(
@@ -112,15 +115,17 @@ def build_server(client, doc=None) -> FastMCP:
     @server.tool()
     def venice_sfx(
         prompt: str,
-        model: str = _mcp._sfx.DEFAULT_SFX_MODEL,
-        duration: int = _mcp._sfx.DEFAULT_DURATION,
+        model: Optional[str] = None,
+        duration: Optional[int] = None,
         output_dir: Optional[str] = None,
         confirm: bool = False,
         max_spend: Optional[float] = None,
     ) -> dict:
         """Generate a short sound effect via Venice's async audio queue (blocks with a
         capped wait until ready). Writes an audio file and returns its path. Paid: a
-        quote is fetched first; over-cap quotes need confirm=true."""
+        quote is fetched first; over-cap quotes need confirm=true. Omitted args fall
+        back to defaults.sfx.* in the user's config, then to the built-ins
+        (model=elevenlabs-sound-effects-v2, duration=5)."""
         return _mcp.sfx_tool(
             client, prompt,
             **_merged(_defaults["sfx"], dict(
@@ -132,7 +137,7 @@ def build_server(client, doc=None) -> FastMCP:
     @server.tool()
     def venice_music(
         prompt: str,
-        model: str = _mcp._music.DEFAULT_MUSIC_MODEL,
+        model: Optional[str] = None,
         duration: Optional[int] = None,
         instrumental: Optional[bool] = None,
         lyrics: Optional[str] = None,
@@ -143,7 +148,8 @@ def build_server(client, doc=None) -> FastMCP:
     ) -> dict:
         """Generate long-form music/ambience (~60-90s) via Venice's async audio queue
         (blocks with a capped wait). Writes an audio file and returns its path. Paid:
-        a quote is fetched first; over-cap quotes need confirm=true."""
+        a quote is fetched first; over-cap quotes need confirm=true. An omitted model
+        falls back to defaults.music.model, then to elevenlabs-music."""
         return _mcp.music_tool(
             client, prompt,
             **_merged(_defaults["music"], dict(
@@ -156,7 +162,7 @@ def build_server(client, doc=None) -> FastMCP:
     @server.tool()
     def venice_upscale(
         input_path: str,
-        scale: float = 2.0,
+        scale: Optional[float] = None,
         enhance: Optional[bool] = None,
         enhance_creativity: Optional[float] = None,
         enhance_prompt: Optional[str] = None,
@@ -167,7 +173,8 @@ def build_server(client, doc=None) -> FastMCP:
     ) -> dict:
         """Upscale/enhance a local image (factor 1-4) via Venice /image/upscale. Writes
         the result and returns its path. Pricing is dynamic (no up-front estimate), so
-        this ALWAYS requires confirm=true."""
+        this ALWAYS requires confirm=true. An omitted scale falls back to
+        defaults.upscale.scale, then to 2.0."""
         return _mcp.upscale_tool(
             client, input_path,
             **_merged(_defaults["upscale"], dict(
@@ -223,7 +230,7 @@ def build_server(client, doc=None) -> FastMCP:
     def venice_video(
         prompt: str,
         model: Optional[str] = None,
-        duration: str = _mcp._video.DEFAULT_VIDEO_DURATION,
+        duration: Optional[str] = None,
         negative_prompt: Optional[str] = None,
         resolution: Optional[str] = None,
         aspect_ratio: Optional[str] = None,
@@ -246,7 +253,8 @@ def build_server(client, doc=None) -> FastMCP:
         Text-to-video (prompt) plus optional image/reference conditioning: each *_url
         takes an http(s)/data URL or a local path. LONG-RUNNING -- blocks while polling
         up to max_wait seconds (a host may time out). Paid: a quote is fetched first;
-        over-cap or dynamic quotes need confirm=true."""
+        over-cap or dynamic quotes need confirm=true. Omitted args fall back to
+        defaults.video.* in the user's config, then to the built-in duration=5s."""
         return _mcp.video_tool(
             client, prompt,
             **_merged(_defaults["video"], dict(

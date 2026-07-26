@@ -5,6 +5,7 @@ path, budget/dry-run, capability gating, and graceful degrade when /models is
 unreachable.
 """
 import argparse
+import contextlib
 import io
 import json
 import os
@@ -21,7 +22,8 @@ from tests.test_client import FakeResp
 def _build_args(**overrides):
     base = dict(
         prompt="tense dungeon drone",
-        model="elevenlabs-music",
+        # #57 Class C1: None on the parser now; `_run_generate` resolves it.
+        model=None,
         duration=60,
         instrumental=False,
         lyrics=None,
@@ -315,6 +317,30 @@ class TestMusicFlow(unittest.TestCase):
         self.assertEqual(rc, 0)
         writes = "".join(c.args[0] for c in out.write.call_args_list)
         self.assertIn("BGMUSIC99", writes)
+
+    def test_config_model_reaches_the_body_and_the_status_hint(self):
+        """#57 Class C1. Mirror of the sfx guard: `defaults.music.model` must
+        reach the queue body, and the printed follow-up must carry `--model`,
+        because on the status side the model is job IDENTITY. Without it a job
+        queued under a config model is fetched back with the built-in model and
+        404s something the user has already paid for."""
+        from venice.commands import music
+
+        doc = {"version": 1, "mcpServers": {},
+               "defaults": {"music": {"model": "cfg-music"}}}
+        urlopen = _router(_models_payload(), [_quote(), _queue("BGMUSIC99")])
+        err = io.StringIO()
+
+        with mock.patch("venice.userconfig.load_config", lambda *a, **k: doc), \
+             mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.client.urllib.request.urlopen", urlopen), \
+             mock.patch("sys.stdout"), \
+             contextlib.redirect_stderr(err):
+            rc = music._run_generate(_build_args(background=True))
+
+        self.assertEqual(rc, 0)
+        self.assertIn("venice music-status BGMUSIC99 --model cfg-music",
+                      err.getvalue())
 
     def test_models_unreachable_degrades_and_proceeds(self):
         from venice.commands import music

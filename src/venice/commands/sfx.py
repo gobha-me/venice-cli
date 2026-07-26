@@ -30,9 +30,16 @@ def register(subparsers) -> None:
     p.add_argument(
         "--model",
         choices=sorted(SFX_MODELS),
-        default=DEFAULT_SFX_MODEL,
+        default=None,
+        help=f"SFX model id (default {DEFAULT_SFX_MODEL}). Config-backable via "
+        "defaults.sfx.model; an explicit --model still wins.",
     )
-    p.add_argument("--duration", type=int, default=DEFAULT_DURATION)
+    p.add_argument(
+        "--duration", type=int, default=None,
+        help=f"Length in seconds (default {DEFAULT_DURATION}; clamped to the "
+        "model max). Config-backable via defaults.sfx.duration; an explicit "
+        "--duration still wins.",
+    )
     p.add_argument("--output", "-o", type=Path, default=None)
     play_grp = p.add_mutually_exclusive_group()
     play_grp.add_argument("--play", dest="play", action="store_true", default=None)
@@ -65,10 +72,18 @@ def register_status(subparsers) -> None:
         ),
     )
     sp.add_argument("queue_id")
+    # #57 Class C1: deliberately NOT tri-stated, unlike the generate parser's
+    # --model. Here the model is job IDENTITY -- it goes in the /audio/retrieve
+    # and /audio/complete bodies (_audio.py) -- so `defaults.sfx.model` must
+    # never reach it and retarget an already-queued, already-charged job. The
+    # concrete default is exactly what makes `apply_defaults` skip this dest
+    # (it only fills a dest that is still None). Do not "tidy" it to None.
+    # Same reasoning as video._run_status's snapshot/restore of args.model.
     sp.add_argument(
         "--model",
         choices=sorted(SFX_MODELS),
         default=DEFAULT_SFX_MODEL,
+        help="Model the job was queued under (job identity, not a preference).",
     )
     sp.add_argument("--output", "-o", type=Path, default=None)
     status_play = sp.add_mutually_exclusive_group()
@@ -101,6 +116,10 @@ def _clamp_duration(model: str, duration: int) -> int:
 
 def _run_generate(args) -> int:
     userconfig.apply_defaults(args, "sfx")
+    # #57 Class C1: built-in literals last, and before `_clamp_duration` below,
+    # which cannot compare None. A config-set `duration: 0` deliberately
+    # survives this to reach _clamp_duration's own "must be > 0" warning.
+    userconfig.apply_literals(args, model=DEFAULT_SFX_MODEL, duration=DEFAULT_DURATION)
     if not args.prompt:
         print("sfx: prompt required (or use: venice sfx-status <id>)", file=sys.stderr)
         return 2
@@ -163,8 +182,13 @@ def _run_generate(args) -> int:
     if args.background:
         sys.stdout.write(queue_id + "\n")
         sys.stdout.flush()
+        # --model is job identity on the status side, and the model here may
+        # have come from defaults.sfx.model rather than the command line, so
+        # the hint has to carry it or the follow-up fetches the wrong job.
+        # (#57 Class C1; `venice video` already did this.)
         print(
-            f"queued as {queue_id}; fetch with: venice sfx-status {queue_id}",
+            f"queued as {queue_id}; fetch with: "
+            f"venice sfx-status {queue_id} --model {args.model}",
             file=sys.stderr,
         )
         return 0
@@ -180,7 +204,7 @@ def _run_generate(args) -> int:
         bool(args.no_cleanup),
         args.play,
         name_prefix="venice-sfx",
-        retry_hint=f"venice sfx-status {queue_id}",
+        retry_hint=f"venice sfx-status {queue_id} --model {args.model}",
         post_process=post,
     )
 
@@ -206,5 +230,5 @@ def _run_status(args) -> int:
         bool(args.no_cleanup),
         want_play,
         name_prefix="venice-sfx",
-        retry_hint=f"venice sfx-status {args.queue_id}",
+        retry_hint=f"venice sfx-status {args.queue_id} --model {args.model}",
     )

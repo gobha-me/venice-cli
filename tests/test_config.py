@@ -4,6 +4,7 @@ Points config.CONFIG_DIR/CONFIG_FILE at a tmpdir so nothing touches the real
 ~/.config/venice. The API key is never written here.
 """
 import argparse
+import contextlib
 import io
 import json
 import os
@@ -601,6 +602,204 @@ class TestClassBParity(unittest.TestCase):
                 args = status_parser(mod).parse_args(argv)
                 uc.apply_defaults(args, key, {"defaults": {key: {"play": True}}})
                 self.assertIs(args.play, True)
+
+
+# --------------------------------------------------------------------------- #
+# #57 config parity -- Class C: flags whose argparse default was a hardcoded
+# VALUE (`--model venice-sd35`, `--variants 1`, `--scale 2.0`). Same blocker as
+# Class B: `apply_defaults` only fills a dest that is still None, so the literal
+# had to move off the parser. It now lives in a `userconfig.apply_literals` call
+# in each handler, which runs AFTER `apply_defaults` -- giving the full ladder:
+#
+#     explicit CLI flag > defaults.<cmd>.<key> > built-in literal
+#
+# `literal` is the value the command falls back to when nothing is set; it is
+# asserted against the module constant, not a copy of the string, so moving a
+# default value doesn't quietly desync the test from the code.
+# --------------------------------------------------------------------------- #
+_CLASS_C_CASES = [
+    dict(key="image", mod=image, argv=["image", "p"], dest="model",
+         literal=image.DEFAULT_IMAGE_MODEL, cfg="hidream", want="hidream",
+         explicit=["--model", "cli-m"], eval="cli-m"),
+    dict(key="image", mod=image, argv=["image", "p"], dest="format",
+         literal=image.DEFAULT_FORMAT, cfg="webp", want="webp",
+         explicit=["--format", "jpeg"], eval="jpeg"),
+    dict(key="image", mod=image, argv=["image", "p"], dest="variants",
+         literal=image.DEFAULT_VARIANTS, cfg="3", want=3,
+         explicit=["--variants", "2"], eval=2),
+    # cfg/explicit must be DISTINCT legal values, and both distinct from the
+    # literal -- otherwise test_explicit_cli_beats_config asserts nothing.
+    dict(key="tts", mod=tts, argv=["tts", "hi"], dest="model",
+         literal=tts.DEFAULT_TTS_MODEL, cfg="tts-orpheus", want="tts-orpheus",
+         explicit=["--model", "tts-xai-v1"], eval="tts-xai-v1"),
+    dict(key="tts", mod=tts, argv=["tts", "hi"], dest="format",
+         literal=tts.DEFAULT_FORMAT, cfg="wav", want="wav",
+         explicit=["--format", "flac"], eval="flac"),
+    dict(key="sfx", mod=sfx, argv=["sfx", "p"], dest="model",
+         literal=sfx.DEFAULT_SFX_MODEL, cfg="mmaudio-v2-text-to-audio",
+         want="mmaudio-v2-text-to-audio",
+         explicit=["--model", "elevenlabs-sound-effects-v2"],
+         eval="elevenlabs-sound-effects-v2"),
+    dict(key="sfx", mod=sfx, argv=["sfx", "p"], dest="duration",
+         literal=sfx.DEFAULT_DURATION, cfg="12", want=12,
+         explicit=["--duration", "7"], eval=7),
+    dict(key="music", mod=music, argv=["music", "p"], dest="model",
+         literal=music.DEFAULT_MUSIC_MODEL, cfg="other-music", want="other-music",
+         explicit=["--model", "cli-mu"], eval="cli-mu"),
+    dict(key="video", mod=video, argv=["video", "p"], dest="duration",
+         literal=video.DEFAULT_VIDEO_DURATION, cfg="10s", want="10s",
+         explicit=["--duration", "8s"], eval="8s"),
+    dict(key="upscale", mod=upscale, argv=["upscale", "in.png"], dest="scale",
+         literal=upscale.DEFAULT_SCALE, cfg="3", want=3.0,
+         explicit=["--scale", "4"], eval=4.0),
+]
+
+
+class TestClassCParity(unittest.TestCase):
+
+    def test_parser_default_is_none(self):
+        """The load-bearing one: this IS what "the literal moved off the parser"
+        means. A concrete default here makes the dest unreachable from config,
+        because `apply_defaults` only fills a dest that is still None."""
+        for case in _CLASS_C_CASES:
+            with self.subTest(cmd=case["key"], dest=case["dest"]):
+                args = _build_parser(case["mod"]).parse_args(case["argv"])
+                self.assertIsNone(getattr(args, case["dest"]),
+                                  msg=f"{case['key']}.{case['dest']}")
+
+    def test_config_fills_none_dest(self):
+        for case in _CLASS_C_CASES:
+            with self.subTest(cmd=case["key"], dest=case["dest"]):
+                args = _build_parser(case["mod"]).parse_args(case["argv"])
+                doc = {"defaults": {case["key"]: {case["dest"]: case["cfg"]}}}
+                uc.apply_defaults(args, case["key"], doc)
+                self.assertEqual(getattr(args, case["dest"]), case["want"],
+                                 msg=f"{case['key']}.{case['dest']}")
+
+    def test_explicit_cli_beats_config(self):
+        for case in _CLASS_C_CASES:
+            with self.subTest(cmd=case["key"], dest=case["dest"]):
+                args = _build_parser(case["mod"]).parse_args(
+                    case["argv"] + case["explicit"])
+                doc = {"defaults": {case["key"]: {case["dest"]: case["cfg"]}}}
+                uc.apply_defaults(args, case["key"], doc)
+                self.assertEqual(getattr(args, case["dest"]), case["eval"],
+                                 msg=f"{case['key']}.{case['dest']}")
+
+    def test_literal_applies_when_nothing_is_set(self):
+        """No flag, no config -> the built-in literal. This is the contract that
+        keeps the UX unchanged for everyone who never opens config.json."""
+        for case in _CLASS_C_CASES:
+            with self.subTest(cmd=case["key"], dest=case["dest"]):
+                args = _build_parser(case["mod"]).parse_args(case["argv"])
+                uc.apply_defaults(args, case["key"], {})
+                uc.apply_literals(args, **{case["dest"]: case["literal"]})
+                self.assertEqual(getattr(args, case["dest"]), case["literal"],
+                                 msg=f"{case['key']}.{case['dest']}")
+
+    def test_every_class_c_dest_has_a_command_map_row(self):
+        """Relocating a default without adding the config row leaves the flag
+        unreachable from BOTH layers -- it silently stops being configurable and
+        never becomes so. Pins the half-done state."""
+        for case in _CLASS_C_CASES:
+            with self.subTest(cmd=case["key"], dest=case["dest"]):
+                dests = {d for d, _ in uc._COMMAND_MAP[case["key"]].values()}
+                self.assertIn(case["dest"], dests,
+                              msg=f"no _COMMAND_MAP['{case['key']}'] row fills "
+                                  f"{case['dest']}")
+
+    def test_status_model_is_not_config_backable(self):
+        """`sfx-status`/`music-status` --model is job IDENTITY, not a preference:
+        it goes in the /audio/retrieve and /audio/complete bodies. A config value
+        reaching it would retarget an already-queued, already-charged job. The
+        concrete argparse default is what makes `apply_defaults` skip the dest,
+        so "tidying" it to None would silently reintroduce that bug."""
+        def status_parser(mod):
+            parser = argparse.ArgumentParser(prog="venice")
+            sub = parser.add_subparsers(dest="command")
+            mod.register_status(sub)
+            return parser
+
+        for mod, argv, key, literal in (
+            (sfx, ["sfx-status", "j1"], "sfx", sfx.DEFAULT_SFX_MODEL),
+            (music, ["music-status", "j1"], "music", music.DEFAULT_MUSIC_MODEL),
+        ):
+            with self.subTest(cmd=key):
+                args = status_parser(mod).parse_args(argv)
+                self.assertEqual(args.model, literal)  # NOT None
+                uc.apply_defaults(
+                    args, key, {"defaults": {key: {"model": "retargeted"}}})
+                self.assertEqual(args.model, literal,
+                                 msg="config retargeted a queued job")
+
+    def test_invalid_choice_in_config_is_warned_and_skipped(self):
+        """A config key whose flag has `choices=` must not be able to do what the
+        command line can't. Without `_one_of`, `defaults.sfx.model = "bogus"`
+        reaches SFX_MODELS[model] as a raw KeyError traceback."""
+        cases = [
+            ("image", image, ["image", "p"], "format", "gif"),
+            ("tts", tts, ["tts", "hi"], "model", "tts-nope"),
+            ("tts", tts, ["tts", "hi"], "format", "ogg"),
+            ("sfx", sfx, ["sfx", "p"], "model", "bogus"),
+            ("video", video, ["video", "p"], "duration", "99s"),
+        ]
+        for key, mod, argv, dest, bad in cases:
+            with self.subTest(cmd=key, dest=dest):
+                args = _build_parser(mod).parse_args(argv)
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    uc.apply_defaults(
+                        args, key, {"defaults": {key: {dest: bad}}})
+                self.assertIsNone(getattr(args, dest),
+                                  msg="a bad choice was accepted")
+                self.assertIn(f"ignoring invalid config default {dest}={bad!r}",
+                              err.getvalue())
+
+    def test_valid_choice_in_config_is_accepted(self):
+        """The other half of `_one_of`: a legal value must still pass through."""
+        args = _build_parser(sfx).parse_args(["sfx", "p"])
+        uc.apply_defaults(
+            args, "sfx", {"defaults": {"sfx": {"model": "mmaudio-v2-text-to-audio"}}})
+        self.assertEqual(args.model, "mmaudio-v2-text-to-audio")
+
+    def test_every_one_of_row_resolves_to_a_real_collection(self):
+        """`_one_of` names its allowed set by (module, attr) STRINGS, because a
+        module-scope import would cycle. Strings are invisible to a rename, and a
+        stale one raises ImportError/AttributeError -- which `apply_defaults` and
+        `config_defaults_for` do NOT catch (only TypeError/ValueError), breaking
+        userconfig's "degrade, never crash" contract. Resolving every row here
+        turns that runtime traceback into a CI failure."""
+        for section, rows in uc._COMMAND_MAP.items():
+            for key, (_dest, coerce) in rows.items():
+                if getattr(coerce, "__name__", "") != "coerce":
+                    continue  # not a _one_of closure
+                with self.subTest(section=section, key=key):
+                    # A value no real choice set contains: resolving the
+                    # collection is the point, ValueError is the proof it did.
+                    with self.assertRaises(ValueError):
+                        coerce("\x00 definitely not a valid choice")
+
+    def test_every_choices_flag_has_a_validating_coercer(self):
+        """The invariant `_one_of` exists for: config must never be able to set a
+        value the command line would reject. Any `_COMMAND_MAP` row whose flag
+        carries argparse `choices=` must validate against that set, or config
+        silently ships a value argparse would have exited 2 on."""
+        mods = {"image": image, "image_edit": image_edit, "tts": tts, "sfx": sfx,
+                "music": music, "video": video, "upscale": upscale, "chat": chat}
+        for section, mod in mods.items():
+            parser = _build_parser(mod)
+            sub = list(parser._subparsers._group_actions[0].choices.values())[0]
+            by_dest = {a.dest: a for a in sub._actions}
+            for key, (dest, coerce) in uc._COMMAND_MAP.get(section, {}).items():
+                action = by_dest.get(dest)
+                if action is None or not action.choices:
+                    continue
+                with self.subTest(section=section, key=key):
+                    self.assertEqual(
+                        getattr(coerce, "__name__", ""), "coerce",
+                        msg=f"defaults.{section}.{key} maps to a flag with "
+                            f"choices={list(action.choices)!r} but is not "
+                            "validated -- wrap it in _one_of")
 
 
 # --------------------------------------------------------------------------- #

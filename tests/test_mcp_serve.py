@@ -112,6 +112,79 @@ class TestConfigDefaultsWiring(unittest.TestCase):
          dict(prompt="p")),
     ]
 
+    # -- #57 Class C1: the same trap, for the VALUED defaults ------------------ #
+    #
+    # Identical mechanism to Class B above, and identical blast radius: a wrapper
+    # param left as `model: str = DEFAULT_IMAGE_MODEL` fills a concrete value
+    # when the host omits the arg, and that value beats defaults.image.model --
+    # silently, while the CLI path, the _COMMAND_MAP rows and the docs all look
+    # correct. Ten params across six tools; each needs to reach its impl.
+    # (section, tool, impl, param, config_value, HOST_value, base_kwargs)
+    # config_value and host_value MUST differ: seeding both with the same value
+    # makes the host-beats-config assertion hold regardless of precedence.
+    _CLASS_C_TOOLS = [
+        ("image", "venice_image", "image_tool", "model", "hidream", "venice-sd35",
+         dict(prompt="p")),
+        ("image", "venice_image", "image_tool", "format", "webp", "jpeg",
+         dict(prompt="p")),
+        ("image", "venice_image", "image_tool", "variants", 3, 1, dict(prompt="p")),
+        ("tts", "venice_tts", "tts_tool", "model", "tts-orpheus", "tts-xai-v1",
+         dict(text="t")),
+        ("tts", "venice_tts", "tts_tool", "format", "wav", "flac", dict(text="t")),
+        ("sfx", "venice_sfx", "sfx_tool", "model", "mmaudio-v2-text-to-audio",
+         "elevenlabs-sound-effects-v2", dict(prompt="p")),
+        ("sfx", "venice_sfx", "sfx_tool", "duration", 12, 7, dict(prompt="p")),
+        ("music", "venice_music", "music_tool", "model", "other-music", "cli-music",
+         dict(prompt="p")),
+        ("video", "venice_video", "video_tool", "duration", "10s", "8s",
+         dict(prompt="p")),
+        ("upscale", "venice_upscale", "upscale_tool", "scale", 3.0, 4.0,
+         dict(input_path="in.png")),
+    ]
+
+    def test_class_c_config_reaches_impl_when_host_omits_the_arg(self):
+        for section, tool, impl, param, cfg, _host, kwargs in self._CLASS_C_TOOLS:
+            with self.subTest(tool=tool, param=param):
+                doc = {"defaults": {section: {param: cfg}}}
+                captured = self._invoke(section, tool, impl, param, kwargs, doc)
+                self.assertEqual(captured.get(param), cfg,
+                                 msg=f"{tool}.{param} did not receive the "
+                                     f"config default")
+
+    def test_class_c_host_arg_still_beats_config(self):
+        for section, tool, impl, param, cfg, host, kwargs in self._CLASS_C_TOOLS:
+            with self.subTest(tool=tool, param=param):
+                self.assertNotEqual(cfg, host, "table row would be vacuous")
+                doc = {"defaults": {section: {param: cfg}}}
+                captured = self._invoke(
+                    section, tool, impl, param, {**kwargs, param: host}, doc)
+                self.assertEqual(captured.get(param), host,
+                                 msg=f"{tool}.{param}: config beat an explicit "
+                                     "host argument")
+
+    def test_class_c_wrapper_defaults_are_none(self):
+        """The direct tripwire, needing no config doc at all: it fails the
+        instant someone re-types a wrapper param back to a concrete literal,
+        which is what made these ten unreachable from config in the first place.
+        """
+        import inspect as _inspect
+
+        from venice.mcp_server import build_server
+
+        # `doc={}`, never `doc=None`: None is the sentinel that makes
+        # build_server call `userconfig.load_config()` and read the developer's
+        # real ~/.config/venice/config.json. This module redirects no HOME, and
+        # CONTRIBUTING requires hermetic tests. `{}` proves the same thing.
+        server = build_server(self._Client(), doc={})
+        for _section, tool, _impl, param, _cfg, _host, _kwargs in self._CLASS_C_TOOLS:
+            with self.subTest(tool=tool, param=param):
+                fn = server._tool_manager.get_tool(tool).fn
+                default = _inspect.signature(fn).parameters[param].default
+                self.assertIsNone(
+                    default,
+                    msg=f"{tool}.{param} default is {default!r}, not None -- it "
+                        "will silently beat the config value")
+
     def _invoke(self, section, tool_name, impl_name, param, call_kwargs, doc):
         """Patch the named impl with a real function exposing `param`, build the
         server against `doc`, and invoke the registered tool."""

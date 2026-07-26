@@ -17,9 +17,11 @@ def _build_args(**ov):
         text="hello world",
         from_file=None,
         stdin=False,
-        model="tts-kokoro",
+        # #57 Class C1: both default None on the parser now; `_run` resolves
+        # them, so the tests below double as proof the fallback fires.
+        model=None,
         voice=None,
-        format="mp3",
+        format=None,
         speed=None,
         output=None,
         play=False,

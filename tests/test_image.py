@@ -14,11 +14,16 @@ FAKE_PNG = b"FAKEPNG"
 
 
 def _build_args(**ov):
+    # #57 Class C1: model/format/variants default None on the parser now, so the
+    # fixture matches. `_run` resolves them (apply_defaults -> apply_literals),
+    # which turns every _run-based test below into passive proof the fallback
+    # fires. Callers that reach past `_run` into `_build_body` want a RESOLVED
+    # namespace -- use `_resolved_args` for those.
     base = dict(
         prompt="a fierce red dragon",
         from_file=None,
-        model="venice-sd35",
-        format="png",
+        model=None,
+        format=None,
         width=None,
         height=None,
         aspect_ratio=None,
@@ -31,7 +36,7 @@ def _build_args(**ov):
         cfg_scale=None,
         steps=None,
         style_preset=None,
-        variants=1,
+        variants=None,
         safe_mode=True,
         hide_watermark=False,
         name=None,
@@ -46,6 +51,30 @@ def _build_args(**ov):
     )
     base.update(ov)
     return argparse.Namespace(**base)
+
+
+def _apply_class_c_literals(args):
+    """Mirror `image._run`'s built-in-literal layer (#57 Class C1)."""
+    from venice import userconfig
+    from venice.commands import image
+
+    userconfig.apply_literals(
+        args,
+        model=image.DEFAULT_IMAGE_MODEL,
+        format=image.DEFAULT_FORMAT,
+        variants=image.DEFAULT_VARIANTS,
+    )
+    return args
+
+
+def _resolved_args(**ov):
+    """A namespace as `_build_body` sees it: after `_run`'s resolution layers.
+
+    `_build_body` legitimately assumes model/format/variants are already
+    resolved -- hardening it with its own fallback would put a second copy of
+    each literal in a second place and mask an ordering mistake in `_run`.
+    """
+    return _apply_class_c_literals(_build_args(**ov))
 
 
 def _image_models_payload():
@@ -273,7 +302,7 @@ class TestImageFlow(unittest.TestCase):
         from venice.commands import image
 
         body = image._build_body(
-            "a fierce red dragon", _build_args(style_prefix="EPIC,"))
+            "a fierce red dragon", _resolved_args(style_prefix="EPIC,"))
         self.assertEqual(body["prompt"], "EPIC, a fierce red dragon")
 
     def test_style_prefix_applies_in_batch(self):
@@ -566,6 +595,128 @@ class TestImageFlow(unittest.TestCase):
         self.assertEqual(rc, 2)
 
 
+class TestClassCReplayPrecedence(unittest.TestCase):
+    """#57 Class C1: model/format/variants moved off the parser to `default=None`,
+    with the literal applied in `_run` AFTER the --from-json replay merge.
+
+    `_apply_replay` decides "did the user set this?" by diffing against a virgin
+    parser namespace. Applying the literals before the merge would make every
+    field read as explicit and the sidecar would be ignored entirely -- silently,
+    and with no other failing test. These cases pin the full ladder:
+
+        explicit CLI flag > defaults.image.* > sidecar > built-in literal
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.cwd = os.getcwd()
+        os.chdir(self.tmp.name)
+        self.addCleanup(os.chdir, self.cwd)
+        self.sidecar = Path(self.tmp.name) / "card.json"
+        self.sidecar.write_text(json.dumps({
+            "model": "sidecar-model",
+            "prompt": "a saved dragon",
+            "format": "jpeg",
+            "variants": 3,
+            "seed": 998319,
+        }), encoding="utf-8")
+
+    def _body(self, doc=None, **arg_overrides):
+        """Run the real handler and return the /image/generate request body."""
+        from venice.commands import image
+
+        responses = iter([
+            FakeResp(200, _image_models_payload(), "application/json"),
+            FakeResp(200, _gen_payload(4), "application/json"),
+        ])
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            if req.full_url.endswith("/image/generate"):
+                captured["body"] = json.loads(req.data.decode("utf-8"))
+            return next(responses)
+
+        doc = doc or {"version": 1, "mcpServers": {}, "defaults": {}}
+        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.userconfig.load_config", lambda *a, **k: doc), \
+             mock.patch("venice.client.urllib.request.urlopen", fake_urlopen):
+            rc = image._run(_build_args(
+                prompt=None, from_json=self.sidecar, **arg_overrides))
+        self.assertEqual(rc, 0)
+        return captured["body"]
+
+    def test_cli_flag_beats_everything(self):
+        doc = {"version": 1, "mcpServers": {},
+               "defaults": {"image": {"model": "cfg-model"}}}
+        self.assertEqual(self._body(doc, model="cli-model")["model"], "cli-model")
+
+    def test_config_beats_the_sidecar(self):
+        """Matches Class A's width/height exactly: `apply_defaults` runs before
+        the merge, so a config value is indistinguishable from a typed flag."""
+        doc = {"version": 1, "mcpServers": {},
+               "defaults": {"image": {"model": "cfg-model"}}}
+        self.assertEqual(self._body(doc)["model"], "cfg-model")
+
+    def test_sidecar_beats_the_literal(self):
+        body = self._body()
+        self.assertEqual(body["model"], "sidecar-model")
+        self.assertEqual(body["format"], "jpeg")
+
+    def test_literal_applies_when_the_sidecar_omits_the_field(self):
+        from venice.commands import image
+
+        self.sidecar.write_text(json.dumps({"prompt": "p", "seed": 1}),
+                                encoding="utf-8")
+        body = self._body()
+        self.assertEqual(body["model"], image.DEFAULT_IMAGE_MODEL)
+        self.assertEqual(body["format"], image.DEFAULT_FORMAT)
+
+    def test_explicit_flag_equal_to_the_literal_beats_the_sidecar(self):
+        """The bug this slice fixes. Before Class C the typed value equalled the
+        parser default, so `_apply_replay` read it as unset and the sidecar
+        silently overrode a flag the user had actually typed."""
+        from venice.commands import image
+
+        body = self._body(model=image.DEFAULT_IMAGE_MODEL)
+        self.assertEqual(body["model"], image.DEFAULT_IMAGE_MODEL)
+
+    def test_config_variants_does_not_multiply_a_replay(self):
+        """`_sidecar_params` drops `variants` so a sidecar reproduces the ONE
+        saved image. A standing `defaults.image.variants` must not silently turn
+        `--from-json` into an N-image charge."""
+        doc = {"version": 1, "mcpServers": {},
+               "defaults": {"image": {"variants": 4}}}
+        body = self._body(doc)
+        self.assertNotIn("variants", body)  # omitted when 1
+
+    def test_explicit_variants_still_multiplies_a_replay(self):
+        """The other half: the user can still ask for N on a replay."""
+        body = self._body(variants=2)
+        self.assertEqual(body["variants"], 2)
+
+    def test_variants_from_config_survives_the_range_check(self):
+        """Proves the literal lands after the merge but before the range check --
+        an out-of-range config value must exit 2, not TypeError on None."""
+        from venice.commands import image
+
+        doc = {"version": 1, "mcpServers": {},
+               "defaults": {"image": {"variants": 9}}}
+
+        def no_network(req, timeout=None):
+            # The range check returns 2 before the client is ever built, so this
+            # should never fire -- but it must be patched anyway. Nothing pins
+            # that ordering, and an unmocked urlopen here would POST to the real
+            # api.venice.ai from `make test` the day the check moves.
+            raise AssertionError(f"unexpected network call: {req.full_url}")
+
+        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.userconfig.load_config", lambda *a, **k: doc), \
+             mock.patch("venice.client.urllib.request.urlopen", no_network):
+            rc = image._run(_build_args(prompt="p", from_json=None))
+        self.assertEqual(rc, 2)
+
+
 class TestHideWatermarkConfig(unittest.TestCase):
     """`--hide-watermark` is tri-state + config-backable (issue #56)."""
 
@@ -580,7 +731,7 @@ class TestHideWatermarkConfig(unittest.TestCase):
 
     def test_body_none_keeps_watermark(self):
         from venice.commands import image
-        body = image._build_body("p", _build_args(hide_watermark=None))
+        body = image._build_body("p", _resolved_args(hide_watermark=None))
         self.assertEqual(body["hide_watermark"], False)  # None -> keep watermark
 
     def test_config_default_hides_watermark(self):
@@ -590,6 +741,7 @@ class TestHideWatermarkConfig(unittest.TestCase):
                "defaults": {"image": {"hide_watermark": True}}}
         args = self._parse()  # nothing on the CLI
         userconfig.apply_defaults(args, "image", doc)
+        _apply_class_c_literals(args)  # mirror _run: _build_body needs variants
         self.assertTrue(args.hide_watermark)
         self.assertEqual(image._build_body("p", args)["hide_watermark"], True)
 
@@ -624,7 +776,7 @@ class TestSafeModeConfig(unittest.TestCase):
 
     def test_body_none_stays_safe(self):
         from venice.commands import image
-        body = image._build_body("p", _build_args(safe_mode=None))
+        body = image._build_body("p", _resolved_args(safe_mode=None))
         self.assertEqual(body["safe_mode"], True)  # None -> stay safe
 
     def test_config_default_disables_safe_mode(self):
@@ -634,6 +786,7 @@ class TestSafeModeConfig(unittest.TestCase):
                "defaults": {"image": {"safe_mode": False}}}
         args = self._parse()  # nothing on the CLI
         userconfig.apply_defaults(args, "image", doc)
+        _apply_class_c_literals(args)  # mirror _run: _build_body needs variants
         self.assertFalse(args.safe_mode)
         self.assertEqual(image._build_body("p", args)["safe_mode"], False)
 
