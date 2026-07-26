@@ -257,6 +257,35 @@ def _as_list(v):
     return [str(v)]
 
 
+def _one_of(module: str, attr: str):
+    """Coercer factory for a config key whose flag carries argparse ``choices=``.
+
+    The config layer does no membership validation, so without this a typo like
+    ``defaults.sfx.model = "bogus"`` reaches ``SFX_MODELS[model]`` as a raw
+    KeyError traceback -- something the command line itself cannot do (argparse
+    exits 2 with "invalid choice"). Config must never be able to do what the CLI
+    can't. Raising ValueError routes the bad value into `apply_defaults`' existing
+    warn-and-skip path, leaving the dest None so the built-in literal applies --
+    the same "degrade to no defaults, never crash" contract `load_config` keeps.
+    (#57 Class C)
+
+    The allowed set is resolved LAZILY inside the closure: every command module
+    imports this one, so a module-scope import would be a cycle and would take
+    `venice --help` down with it. By the time a coercer runs we are already
+    inside a command, so the import is free.
+    """
+    def coerce(v):
+        import importlib
+
+        allowed = getattr(importlib.import_module(module), attr)
+        s = str(v)
+        if s not in allowed:
+            raise ValueError(f"expected one of: {', '.join(sorted(allowed))}")
+        return s
+
+    return coerce
+
+
 # config key -> (argparse dest, coercer). Globals apply to any command that
 # declares the flag; a per-command section overrides them.
 _GLOBAL_MAP = {
@@ -502,3 +531,27 @@ def apply_defaults(args, command: str, doc=None) -> None:
                 f"{command}: ignoring invalid config default {key}={raw!r}",
                 file=sys.stderr,
             )
+
+
+def apply_literals(args, **literals) -> None:
+    """Fill a flag's BUILT-IN literal default, but only where the dest is still
+    None -- the last layer of `explicit CLI flag > config file > built-in default`.
+
+    The counterpart to :func:`apply_defaults`. A flag whose argparse default is a
+    hardcoded value can never be reached by config, because `apply_defaults` only
+    fills a dest that is still None; relocating that default to ``default=None``
+    is what opens the flag up, and this is where the literal goes instead.
+    (#57 Class C)
+
+    ALWAYS call this AFTER `apply_defaults` -- and, for `image`, after the
+    ``--from-json`` replay merge, whose "was this set explicitly?" test compares
+    against a virgin parser namespace (see image._apply_replay). Call it BEFORE
+    any range check or request-body build that would choke on None.
+
+    `is not None`, never `or`: a config-set ``0`` is a value the user typed, and
+    it must reach the command's own validator rather than be silently rewritten
+    to the literal.
+    """
+    for dest, literal in literals.items():
+        if getattr(args, dest, None) is None:
+            setattr(args, dest, literal)
