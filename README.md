@@ -1501,24 +1501,31 @@ Per-command sections cover the *persistent preferences* of most commands — the
 knob is "if it expresses a preference (model, format, voice, sizing, style,
 safety), it should be settable in config." Currently config-backable:
 
-- `defaults.image.*` — `width`, `height`, `aspect_ratio`, `resolution`,
-  `style_prefix`, `preset`, `preset_file`, `negative_prompt`, `cfg_scale`,
-  `steps`, `style_preset`, `hide_watermark`, `safe_mode` (tri-state
-  `--safe-mode`/`--no-safe-mode`; set `false` to skip Venice's safety blur)
+- `defaults.image.*` — `model`, `format`, `variants`, `width`, `height`,
+  `aspect_ratio`, `resolution`, `style_prefix`, `preset`, `preset_file`,
+  `negative_prompt`, `cfg_scale`, `steps`, `style_preset`, `hide_watermark`,
+  `safe_mode` (tri-state `--safe-mode`/`--no-safe-mode`; set `false` to skip
+  Venice's safety blur). Note `variants` is a **cost multiplier** — it is
+  reflected in the confirmation prompt before anything is charged
 - `defaults.image_edit.*` — `model`, `aspect_ratio`, `resolution`, `output_format`,
   `safe_mode` (tri-state `--safe-mode`/`--no-safe-mode`)
-- `defaults.tts.*` — `voice`, `speed`, `play`
-- `defaults.sfx.*` — `play`, `master`, `loop`, `no_cleanup` (`loop` only takes
-  effect when `master` is also on -- it is a mastering-chain knob)
-- `defaults.music.*` — `duration`, `speed`, `play`, `instrumental`, `master`,
-  `loop`, `no_cleanup` (same `loop` caveat as `sfx`)
+- `defaults.tts.*` — `model`, `format`, `voice`, `speed`, `play`
+- `defaults.sfx.*` — `model`, `duration`, `play`, `master`, `loop`, `no_cleanup`
+  (`loop` only takes effect when `master` is also on -- it is a mastering-chain
+  knob). `model` applies to `venice sfx` only: on `venice sfx-status` the model
+  identifies the queued job rather than expressing a preference, so config never
+  reaches it. `venice sfx --background` prints the matching `--model` in its
+  follow-up hint
+- `defaults.music.*` — `model`, `duration`, `speed`, `play`, `instrumental`,
+  `master`, `loop`, `no_cleanup` (same `loop` caveat as `sfx`, and the same
+  generate-only caveat on `model` as `sfx`)
 - `defaults.master.*` — `loop`. This is the standalone `venice master` command's
   own section; the `venice sfx`/`venice music` **`--master` toggle** is the key
   `defaults.sfx.master` / `defaults.music.master`, not this table
-- `defaults.video.*` — `model`, `resolution`, `aspect_ratio`, `negative_prompt`,
-  `no_audio`, `no_cleanup`
-- `defaults.upscale.*` — `enhance`, `enhance_creativity`, `enhance_prompt`,
-  `replication`
+- `defaults.video.*` — `model`, `duration`, `resolution`, `aspect_ratio`,
+  `negative_prompt`, `no_audio`, `no_cleanup`
+- `defaults.upscale.*` — `scale`, `enhance`, `enhance_creativity`,
+  `enhance_prompt`, `replication`
 - `defaults.chat.*`, `defaults.code.*`, `defaults.embed.*`, `defaults.index.*`,
   `defaults.search.*` — see each command's section above
 
@@ -1530,8 +1537,17 @@ inside `venice chat --tools` and `venice code` — e.g. `defaults.image.safe_mod
 is honored when the model calls `venice_image`, not just on the `venice image`
 CLI. `defaults.image_edit.safe_mode`, `defaults.music.instrumental`,
 `defaults.video.no_audio` and `defaults.upscale.enhance` reach the tools the same
-way. An explicit argument the model puts in the tool call still wins over config.
+way, as do the generation knobs `defaults.image.{model,format,variants}`,
+`defaults.tts.{model,format}`, `defaults.sfx.{model,duration}`,
+`defaults.music.model`, `defaults.video.duration` and `defaults.upscale.scale`.
+An explicit argument the model puts in the tool call still wins over config.
 `venice mcp-serve` threads the same defaults into its wrappers.
+
+A config value whose flag has a fixed set of choices (`defaults.image.format`,
+`defaults.tts.model`, `defaults.tts.format`, `defaults.sfx.model`,
+`defaults.video.duration`) is validated against that set. An unrecognized value
+is reported on stderr and skipped, and the command falls back to its built-in
+default rather than sending something the API will reject.
 
 The **API key is never stored here** — it stays in
 `~/.config/venice/credentials`. Unknown keys are preserved on write, so the
