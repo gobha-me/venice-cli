@@ -53,9 +53,9 @@ def build_server(client, doc=None) -> FastMCP:
     @server.tool()
     def venice_image(
         prompt: str,
-        model: str = _mcp._image.DEFAULT_IMAGE_MODEL,
-        variants: int = 1,
-        format: str = _mcp._image.DEFAULT_FORMAT,
+        model: Optional[str] = None,
+        variants: Optional[int] = None,
+        format: Optional[str] = None,
         width: Optional[int] = None,
         height: Optional[int] = None,
         negative_prompt: Optional[str] = None,
@@ -90,9 +90,9 @@ def build_server(client, doc=None) -> FastMCP:
     @server.tool()
     def venice_tts(
         text: str,
-        model: str = _mcp._tts.DEFAULT_TTS_MODEL,
+        model: Optional[str] = None,
         voice: Optional[str] = None,
-        format: str = _mcp._tts.DEFAULT_FORMAT,
+        format: Optional[str] = None,
         speed: Optional[float] = None,
         output_dir: Optional[str] = None,
         confirm: bool = False,
@@ -112,8 +112,8 @@ def build_server(client, doc=None) -> FastMCP:
     @server.tool()
     def venice_sfx(
         prompt: str,
-        model: str = _mcp._sfx.DEFAULT_SFX_MODEL,
-        duration: int = _mcp._sfx.DEFAULT_DURATION,
+        model: Optional[str] = None,
+        duration: Optional[int] = None,
         output_dir: Optional[str] = None,
         confirm: bool = False,
         max_spend: Optional[float] = None,
@@ -132,7 +132,7 @@ def build_server(client, doc=None) -> FastMCP:
     @server.tool()
     def venice_music(
         prompt: str,
-        model: str = _mcp._music.DEFAULT_MUSIC_MODEL,
+        model: Optional[str] = None,
         duration: Optional[int] = None,
         instrumental: Optional[bool] = None,
         lyrics: Optional[str] = None,
@@ -156,7 +156,7 @@ def build_server(client, doc=None) -> FastMCP:
     @server.tool()
     def venice_upscale(
         input_path: str,
-        scale: float = 2.0,
+        scale: Optional[float] = None,
         enhance: Optional[bool] = None,
         enhance_creativity: Optional[float] = None,
         enhance_prompt: Optional[str] = None,
@@ -223,7 +223,7 @@ def build_server(client, doc=None) -> FastMCP:
     def venice_video(
         prompt: str,
         model: Optional[str] = None,
-        duration: str = _mcp._video.DEFAULT_VIDEO_DURATION,
+        duration: Optional[str] = None,
         negative_prompt: Optional[str] = None,
         resolution: Optional[str] = None,
         aspect_ratio: Optional[str] = None,
