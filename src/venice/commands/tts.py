@@ -76,7 +76,9 @@ def register(subparsers) -> None:
     p.add_argument(
         "--model",
         choices=TTS_MODELS,
-        default=DEFAULT_TTS_MODEL,
+        default=None,
+        help=f"TTS model id (default {DEFAULT_TTS_MODEL}). Config-backable via "
+        "defaults.tts.model; an explicit --model still wins.",
     )
     p.add_argument(
         "--voice",
@@ -86,8 +88,9 @@ def register(subparsers) -> None:
     p.add_argument(
         "--format",
         choices=FORMATS,
-        default=DEFAULT_FORMAT,
-        help=f"Output audio format (default {DEFAULT_FORMAT}).",
+        default=None,
+        help=f"Output audio format (default {DEFAULT_FORMAT}). Config-backable "
+        "via defaults.tts.format; an explicit --format still wins.",
     )
     p.add_argument(
         "--speed",
@@ -279,6 +282,8 @@ def _validate_speed(speed: Optional[float]) -> Optional[int]:
 
 def _run(args) -> int:
     userconfig.apply_defaults(args, "tts")
+    # #57 Class C1: the built-in literals, after config has had its turn.
+    userconfig.apply_literals(args, model=DEFAULT_TTS_MODEL, format=DEFAULT_FORMAT)
     rc = _validate_speed(args.speed)
     if rc is not None:
         return rc
