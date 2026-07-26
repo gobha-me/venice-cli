@@ -74,7 +74,11 @@ def register(subparsers) -> None:
         default=None,
         help="Video model id (default: the catalog's 'default'-trait model).",
     )
-    p.add_argument("--duration", choices=DURATION_CHOICES, default=DEFAULT_VIDEO_DURATION)
+    p.add_argument(
+        "--duration", choices=DURATION_CHOICES, default=None,
+        help=f"Clip length (default {DEFAULT_VIDEO_DURATION}). Config-backable "
+        "via defaults.video.duration; an explicit --duration still wins.",
+    )
     p.add_argument("--resolution", choices=RESOLUTION_CHOICES, default=None)
     p.add_argument(
         "--aspect-ratio", choices=ASPECT_CHOICES, default=None, dest="aspect_ratio"
@@ -355,6 +359,8 @@ def _collect_media(args):
 
 def _run_generate(args) -> int:
     userconfig.apply_defaults(args, "video")
+    # #57 Class C1: built-in literal last, before the quote body is built.
+    userconfig.apply_literals(args, duration=DEFAULT_VIDEO_DURATION)
     if not args.prompt:
         print("video: prompt required (or use: venice video-status <id>)", file=sys.stderr)
         return 2

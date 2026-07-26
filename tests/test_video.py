@@ -30,7 +30,8 @@ def _build_args(**overrides):
     base = dict(
         prompt="a koi pond at dawn",
         model=None,
-        duration="5s",
+        # #57 Class C1: None on the parser now; `_run_generate` resolves it.
+        duration=None,
         resolution=None,
         aspect_ratio=None,
         negative_prompt=None,

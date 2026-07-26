@@ -30,6 +30,7 @@ from ._shared import (
 
 ENDPOINT = "/image/upscale"
 MAX_ENHANCE_PROMPT = 1500
+DEFAULT_SCALE = 2.0
 
 
 def register(subparsers) -> None:
@@ -47,10 +48,11 @@ def register(subparsers) -> None:
     p.add_argument(
         "--scale",
         type=float,
-        default=2.0,
+        default=None,
         metavar="N",
-        help="Upscale factor 1-4 (default 2). Scale 1 only runs the enhancer "
-        "and requires --enhance.",
+        help=f"Upscale factor 1-4 (default {DEFAULT_SCALE:g}). Scale 1 only runs "
+        "the enhancer and requires --enhance. Config-backable via "
+        "defaults.upscale.scale; an explicit --scale still wins.",
     )
     p.add_argument(
         "--enhance",
@@ -142,6 +144,10 @@ def _fmt_scale(scale: float) -> str:
 
 def _run(args) -> int:
     userconfig.apply_defaults(args, "upscale")
+    # #57 Class C1: built-in literal last, before `_validate`'s range check,
+    # which cannot compare None. A config-set `scale: 0` deliberately survives
+    # this to reach that check's own out-of-range message.
+    userconfig.apply_literals(args, scale=DEFAULT_SCALE)
     rc = _validate(args)
     if rc is not None:
         return rc

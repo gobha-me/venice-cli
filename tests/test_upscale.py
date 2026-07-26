@@ -19,7 +19,8 @@ UPSCALED_PNG = b"UPSCALEDPNGBYTES"
 def _args(**ov):
     base = dict(
         input=Path("in.png"),
-        scale=2.0,
+        # #57 Class C1: None on the parser now; `_run` resolves it.
+        scale=None,
         enhance=False,
         enhance_creativity=None,
         enhance_prompt=None,

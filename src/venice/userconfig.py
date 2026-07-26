@@ -442,6 +442,10 @@ _COMMAND_MAP = {
         "loop": ("loop", _as_bool),
     },
     "video": {
+        # #57 Class C: literal now lives in `video._run_generate`. `_run_status`
+        # already snapshots/restores args.model around apply_defaults, since
+        # there the model is job identity rather than a preference.
+        "duration": ("duration", _one_of("venice.commands.video", "DURATION_CHOICES")),
         "model": ("model", str),
         "resolution": ("resolution", str),
         "aspect_ratio": ("aspect_ratio", str),
@@ -451,6 +455,8 @@ _COMMAND_MAP = {
         "no_cleanup": ("no_cleanup", _as_bool),
     },
     "upscale": {
+        # #57 Class C: literal now lives in `upscale._run`.
+        "scale": ("scale", float),
         "enhance": ("enhance", _as_bool),  # #57 Class B: tri-stated --enhance
         "enhance_creativity": ("enhance_creativity", float),
         "enhance_prompt": ("enhance_prompt", str),
