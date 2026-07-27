@@ -120,6 +120,9 @@ def _run_generate(args) -> int:
     # which cannot compare None. A config-set `duration: 0` deliberately
     # survives this to reach _clamp_duration's own "must be > 0" warning.
     userconfig.apply_literals(args, model=DEFAULT_SFX_MODEL, duration=DEFAULT_DURATION)
+    # #57 Class C2: the mastering chain's literals. Evaluated lazily by
+    # `master_hook` at post-save time, but filled here so the namespace is whole.
+    audio_post.apply_master_literals(args)
     if not args.prompt:
         print("sfx: prompt required (or use: venice sfx-status <id>)", file=sys.stderr)
         return 2

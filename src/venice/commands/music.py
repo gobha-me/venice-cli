@@ -252,6 +252,9 @@ def _run_generate(args) -> int:
     # Position relative to resolve_instrumental is not load-bearing -- it reads
     # instrumental/lyrics, never model -- so this may move if that changes.
     userconfig.apply_literals(args, model=DEFAULT_MUSIC_MODEL)
+    # #57 Class C2: the mastering chain's literals. Evaluated lazily by
+    # `master_hook` at post-save time, but filled here so the namespace is whole.
+    audio_post.apply_master_literals(args)
     if not args.prompt:
         print("music: prompt required (or use: venice music-status <id>)", file=sys.stderr)
         return 2

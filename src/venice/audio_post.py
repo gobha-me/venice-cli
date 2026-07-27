@@ -14,7 +14,24 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
+from . import userconfig
+
 _CODECS = {16: "pcm_s16le", 24: "pcm_s24le", 32: "pcm_s32le"}
+
+# The `--bit-depth` choices, DERIVED from the codec table rather than repeated,
+# so a depth can never be offered that `master()` has no encoder for. Public
+# because `userconfig._one_of` resolves it by name. (#57 Class C2)
+BIT_DEPTHS = tuple(sorted(_CODECS))
+
+# Built-in defaults for the mastering chain. These live here, not on the parser,
+# so `userconfig.apply_defaults` can reach the dests -- it fills a dest only
+# while it is still None, which a hardcoded argparse default makes impossible.
+# `apply_master_literals` puts them back on last. (#57 Class C2)
+DEFAULT_LUFS = -16.0
+DEFAULT_TRUE_PEAK = -1.0
+DEFAULT_SAMPLE_RATE = 48000
+DEFAULT_BIT_DEPTH = 24
+DEFAULT_LOOP_CROSSFADE = 2.0
 
 # Stand-in measured values for --dry-run display (real ones come from pass 1).
 _PLACEHOLDER_MEASURED = {
@@ -50,20 +67,60 @@ def add_master_flags(parser, *, include_toggle: bool) -> None:
             "ffmpeg). Config-backable via defaults.sfx.master / "
             "defaults.music.master; an explicit --master/--no-master still wins.",
         )
-    parser.add_argument("--lufs", type=float, default=-16.0, metavar="LUFS",
-                        help="Integrated loudness target (default -16).")
-    parser.add_argument("--true-peak", type=float, default=-1.0, dest="true_peak",
-                        metavar="DBTP", help="True-peak ceiling in dBTP (default -1.0).")
-    parser.add_argument("--sample-rate", type=int, default=48000, dest="sample_rate",
-                        metavar="HZ", help="Output sample rate (default 48000).")
-    parser.add_argument("--bit-depth", type=int, choices=(16, 24, 32), default=24,
-                        dest="bit_depth", help="Output PCM bit depth (default 24).")
+    # #57 Class C2: the five valued knobs default to None so config can reach
+    # them; the literals go back on in `apply_master_literals`. They are GLOBAL
+    # config keys, not per-command ones, because this one chain is shared by
+    # three commands -- `defaults.<cmd>.<knob>` still overrides (see _GLOBAL_MAP).
+    parser.add_argument("--lufs", type=float, default=None, metavar="LUFS",
+                        help=f"Integrated loudness target (default {DEFAULT_LUFS:g}). "
+                             "Config-backable via defaults.lufs.")
+    parser.add_argument("--true-peak", type=float, default=None, dest="true_peak",
+                        metavar="DBTP",
+                        help=f"True-peak ceiling in dBTP (default {DEFAULT_TRUE_PEAK:g}). "
+                             "Config-backable via defaults.true_peak.")
+    parser.add_argument("--sample-rate", type=int, default=None, dest="sample_rate",
+                        metavar="HZ",
+                        help=f"Output sample rate (default {DEFAULT_SAMPLE_RATE}). "
+                             "Config-backable via defaults.sample_rate.")
+    parser.add_argument("--bit-depth", type=int, choices=BIT_DEPTHS, default=None,
+                        dest="bit_depth",
+                        help=f"Output PCM bit depth (default {DEFAULT_BIT_DEPTH}). "
+                             "Config-backable via defaults.bit_depth.")
     parser.add_argument("--loop", action=argparse.BooleanOptionalAction, default=None,
                         help="Make it seamlessly loopable (crossfade tail into head). "
                              "Config-backable via defaults.{master,sfx,music}.loop; an "
                              "explicit --loop/--no-loop still wins.")
-    parser.add_argument("--loop-crossfade", type=float, default=2.0, dest="loop_crossfade",
-                        metavar="SEC", help="Loop crossfade length in seconds (default 2).")
+    parser.add_argument("--loop-crossfade", type=float, default=None,
+                        dest="loop_crossfade", metavar="SEC",
+                        help="Loop crossfade length in seconds (default "
+                             f"{DEFAULT_LOOP_CROSSFADE:g}). Config-backable via "
+                             "defaults.loop_crossfade.")
+
+
+def apply_master_literals(args) -> None:
+    """Put the mastering chain's built-in literals back on a parsed namespace.
+
+    Call AFTER `userconfig.apply_defaults` and BEFORE anything evaluates
+    `master_kwargs(args)` -- which reads all six dests unconditionally, so a
+    leftover None reaches ffmpeg. The failure is not uniform and only one mode is
+    loud: `sample_rate=None` stringifies to a literal `-ar None` in the pass-2
+    argv, and because pass 1 succeeds first the media is already downloaded (and
+    on sfx/music already PAID FOR) before it dies as a generic exit 5.
+
+    Deliberately NOT `master=`/`loop=`: those are tri-state booleans whose None
+    is meaningful (`if args.master`, `bool(args.loop)`), and `venice master`
+    registers with include_toggle=False so its namespace has no `master` dest at
+    all -- `apply_literals` raises on an unknown dest, so listing it here would
+    break `venice master` outright. (#57 Class C2)
+    """
+    userconfig.apply_literals(
+        args,
+        lufs=DEFAULT_LUFS,
+        true_peak=DEFAULT_TRUE_PEAK,
+        sample_rate=DEFAULT_SAMPLE_RATE,
+        bit_depth=DEFAULT_BIT_DEPTH,
+        loop_crossfade=DEFAULT_LOOP_CROSSFADE,
+    )
 
 
 def master_kwargs(args) -> dict:
@@ -203,12 +260,12 @@ def master(
     input_path: Path,
     output_path: Path,
     *,
-    sample_rate: int = 48000,
-    bit_depth: int = 24,
-    lufs: float = -16.0,
-    true_peak: float = -1.0,
+    sample_rate: int = DEFAULT_SAMPLE_RATE,
+    bit_depth: int = DEFAULT_BIT_DEPTH,
+    lufs: float = DEFAULT_LUFS,
+    true_peak: float = DEFAULT_TRUE_PEAK,
     loop: bool = False,
-    loop_crossfade: float = 2.0,
+    loop_crossfade: float = DEFAULT_LOOP_CROSSFADE,
     dry_run: bool = False,
 ) -> int:
     """Master `input_path` to a WAV at `output_path`. Returns an exit code

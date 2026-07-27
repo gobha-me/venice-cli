@@ -257,7 +257,7 @@ def _as_list(v):
     return [str(v)]
 
 
-def _one_of(module: str, attr: str):
+def _one_of(module: str, attr: str, cast=str):
     """Coercer factory for a config key whose flag carries argparse ``choices=``.
 
     The config layer does no membership validation, so without this a typo like
@@ -281,18 +281,33 @@ def _one_of(module: str, attr: str):
     re-raised as ValueError: the key degrades to its built-in default and says so
     on stderr, instead of taking the command down. `test_config` resolves every
     row so a stale string fails CI long before it reaches anyone.
+
+    `cast` is the member type of the choices collection, and defaults to `str`
+    because every choice set in the tree was string-valued until `--bit-depth`
+    (`choices=(16, 24, 32)`). Without it this coercer is unusable for an int
+    choice set in two separate ways: `str(24)` never matches the int member `24`,
+    so EVERY legal value is rejected, and building the error message blows up on
+    `', '.join` before it can say so. (#57 Class C2)
     """
     def coerce(v):
         import importlib
 
+        # Resolve BEFORE casting: a bad `cast` must not mask a stale reference,
+        # which is what `test_every_one_of_row_resolves_to_a_real_collection`
+        # probes for -- its throwaway value would otherwise die at the cast and
+        # never touch the module attribute.
         try:
             allowed = getattr(importlib.import_module(module), attr)
         except (ImportError, AttributeError) as e:  # pragma: no cover - see above
             raise ValueError(f"choices {module}.{attr} unavailable ({e})") from None
-        s = str(v)
-        if s not in allowed:
-            raise ValueError(f"expected one of: {', '.join(sorted(allowed))}")
-        return s
+        legal = ", ".join(sorted(str(x) for x in allowed))
+        try:
+            val = cast(v)
+        except (TypeError, ValueError):
+            raise ValueError(f"expected one of: {legal}") from None
+        if val not in allowed:
+            raise ValueError(f"expected one of: {legal}")
+        return val
 
     return coerce
 
@@ -309,6 +324,22 @@ _GLOBAL_MAP = {
     # and `resolve_default` still lets `defaults.<cmd>.no_balance` override this.
     # Deliberately NOT in `_COMMAND_MAP`: no agent tool prints a balance.
     "no_balance": ("no_balance", _as_bool),
+    # #57 Class C2: the shared audio mastering chain. `audio_post.add_master_flags`
+    # registers these five on `master`, `sfx` and `music` alike -- ONE chain in
+    # three places -- so they are globals rather than three duplicated sections,
+    # the same reasoning as `no_balance` above. The `hasattr` guard in
+    # `apply_defaults` skips every command that doesn't declare them (verified:
+    # exactly those three do), and `resolve_default` still lets
+    # `defaults.sfx.lufs` override the global with NO `_COMMAND_MAP` row needed.
+    # Deliberately absent from `_COMMAND_MAP`: no agent tool masters anything,
+    # and `defaults.master` is already the `venice master` command's SECTION.
+    "lufs": ("lufs", float),
+    "true_peak": ("true_peak", float),
+    "sample_rate": ("sample_rate", int),
+    # `--bit-depth` is the only flag in the tree whose `choices=` are ints, hence
+    # the cast -- see `_one_of`.
+    "bit_depth": ("bit_depth", _one_of("venice.audio_post", "BIT_DEPTHS", int)),
+    "loop_crossfade": ("loop_crossfade", float),
 }
 _COMMAND_MAP = {
     "chat": {
