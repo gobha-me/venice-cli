@@ -919,6 +919,12 @@ def job_result_tool(
     type: str,
     model: str,
     download_url: Optional[str] = None,
+    # #57 Class C2: deliberately NOT tri-stated, unlike the generate-path
+    # max_wait. Here 0.0 is a MEANING ("one non-blocking probe"), not a default
+    # standing in for a preference, and this tool is not config-reachable --
+    # `_tool_section("venice_job_result")` is "job_result", which has no
+    # `_COMMAND_MAP` section. A sweep that made every max_wait Optional would
+    # silently turn this into a blocking call. Leave it.
     max_wait: float = 0.0,
 ) -> dict:
     """Fetch a backgrounded media job's file (from a `background=True` call).

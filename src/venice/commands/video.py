@@ -169,8 +169,9 @@ def register(subparsers) -> None:
         help="Refuse to queue if the quote exceeds this USD cap.",
     )
     _shared.add_balance_flag(p)
-    p.add_argument("--poll-interval", type=float, default=config.VIDEO_POLL_INTERVAL_SEC)
-    p.add_argument("--max-wait", type=float, default=config.VIDEO_POLL_MAX_WAIT_SEC)
+    _shared.add_poll_flags(p, section="video",
+                           interval=config.VIDEO_POLL_INTERVAL_SEC,
+                           max_wait=config.VIDEO_POLL_MAX_WAIT_SEC)
     p.set_defaults(handler=_run_generate)
 
 
@@ -198,8 +199,9 @@ def register_status(subparsers) -> None:
     )
     sp.add_argument("--output", "-o", type=Path, default=None)
     _shared.add_cleanup_flag(sp, section="video", endpoint="/video/complete")
-    sp.add_argument("--poll-interval", type=float, default=config.VIDEO_POLL_INTERVAL_SEC)
-    sp.add_argument("--max-wait", type=float, default=config.VIDEO_POLL_MAX_WAIT_SEC)
+    _shared.add_poll_flags(sp, section="video",
+                           interval=config.VIDEO_POLL_INTERVAL_SEC,
+                           max_wait=config.VIDEO_POLL_MAX_WAIT_SEC)
     sp.set_defaults(handler=_run_status)
 
 
@@ -361,6 +363,9 @@ def _run_generate(args) -> int:
     userconfig.apply_defaults(args, "video")
     # #57 Class C1: built-in literal last, before the quote body is built.
     userconfig.apply_literals(args, duration=DEFAULT_VIDEO_DURATION)
+    _shared.apply_poll_defaults(args, label="video",
+                                interval=config.VIDEO_POLL_INTERVAL_SEC,
+                                max_wait=config.VIDEO_POLL_MAX_WAIT_SEC)
     if not args.prompt:
         print("video: prompt required (or use: venice video-status <id>)", file=sys.stderr)
         return 2
@@ -455,6 +460,11 @@ def _run_status(args) -> int:
     queued_model = args.model
     userconfig.apply_defaults(args, "video")
     args.model = queued_model
+    # #57 Class C2: the cadence literals, AFTER the model restore above so the
+    # two config layers can't interleave.
+    _shared.apply_poll_defaults(args, label="video-status",
+                                interval=config.VIDEO_POLL_INTERVAL_SEC,
+                                max_wait=config.VIDEO_POLL_MAX_WAIT_SEC)
     client, rc = _queue.build_client()
     if rc != 0:
         return rc

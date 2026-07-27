@@ -72,6 +72,13 @@ TASKS_FILENAME = "tasks.json"
 SFX_POLL_INTERVAL_SEC = 2.0
 SFX_POLL_MAX_WAIT_SEC = 300
 
+# `venice music` rides the same /audio/* queue as sfx and has always borrowed
+# its cadence. Aliased rather than borrowed by name so music's call sites read
+# honestly next to `defaults.music.poll_interval`, and so diverging the two is a
+# one-line change here instead of a fan-out. (#57 Class C2)
+MUSIC_POLL_INTERVAL_SEC = SFX_POLL_INTERVAL_SEC
+MUSIC_POLL_MAX_WAIT_SEC = SFX_POLL_MAX_WAIT_SEC
+
 # Video generation runs minutes, not seconds -- poll less often, wait longer.
 VIDEO_POLL_INTERVAL_SEC = 5.0
 VIDEO_POLL_MAX_WAIT_SEC = 900

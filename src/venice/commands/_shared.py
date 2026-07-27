@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
-from .. import billing
+from .. import billing, userconfig
 from ..client import VeniceAPIError
 
 
@@ -82,6 +82,60 @@ def add_cleanup_flag(parser, *, section: str, endpoint: str) -> None:
         default=None,
         help=f"Force the completion call on (beats defaults.{section}.no_cleanup).",
     )
+
+
+def add_poll_flags(parser, *, section: str, interval: float, max_wait: float) -> None:
+    """Register the tri-stated `--poll-interval` / `--max-wait` pair (#57 C2).
+
+    Same shape and rationale as :func:`add_cleanup_flag`; `section` names the
+    config table (sfx/music/video). Registered on the generate AND `-status`
+    parsers of each command, so a cadence preference applies whether you wait
+    inline or reattach later. `default=None` is what lets
+    `defaults.<section>.{poll_interval,max_wait}` reach the dests; the literals
+    go back on in the handler's :func:`apply_poll_defaults` call.
+
+    The two are asymmetric on the tool path and that is deliberate: `max_wait`
+    is a parameter of `_mcp.{sfx,music,video}_tool`, so a config row reaches the
+    agent/MCP surface through `config_defaults_for`, while the cadence itself is
+    fixed by those impls and stays CLI-only (the `no_cleanup` precedent).
+    """
+    parser.add_argument(
+        "--poll-interval", type=float, default=None, metavar="SEC",
+        help=f"Seconds between status polls (default {interval:g}). "
+             f"Config-backable via defaults.{section}.poll_interval (CLI only -- "
+             "the agent/MCP tools fix their own cadence).",
+    )
+    parser.add_argument(
+        "--max-wait", type=float, default=None, metavar="SEC",
+        help=f"Give up waiting after this many seconds (default {max_wait:g}). "
+             f"Config-backable via defaults.{section}.max_wait, which the "
+             f"venice_{section} agent/MCP tool honors too.",
+    )
+
+
+def apply_poll_defaults(args, *, label: str, interval: float, max_wait: float) -> None:
+    """Fill the poll cadence's literals, then reject negatives (#57 C2).
+
+    Call AFTER `userconfig.apply_defaults`. Every one of the six poll handlers
+    needs this: a leftover None is a TypeError inside the poll loop -- immediate
+    for `max_wait` (`time.monotonic() + None`), but for `poll_interval` only on
+    the SECOND iteration (`time.sleep(None)`), so a job that finishes fast hides
+    the bug entirely and a slow one crashes after the spend.
+
+    `0` is left alone deliberately -- `max_wait=0` is a single non-blocking
+    probe and `poll_interval=0` a tight loop, both meaningful. A NEGATIVE value
+    is warn-and-fall-back, following `sfx._clamp_duration`: config must not be
+    able to produce a `time.sleep(-1)` traceback or an instant TimeoutError.
+    """
+    userconfig.apply_literals(args, poll_interval=interval, max_wait=max_wait)
+    if args.poll_interval < 0:
+        print(f"{label}: --poll-interval must be >= 0; using {interval:g}",
+              file=sys.stderr)
+        args.poll_interval = interval
+    if args.max_wait < 0:
+        print(f"{label}: --max-wait must be >= 0; using {max_wait:g}",
+              file=sys.stderr)
+        args.max_wait = max_wait
 
 
 def encode_data_url(path: Path, *, default_mime: str = "application/octet-stream") -> str:

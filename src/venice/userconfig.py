@@ -457,6 +457,14 @@ _COMMAND_MAP = {
         "no_cleanup": ("no_cleanup", _as_bool),
         "master": ("master", _as_bool),
         "loop": ("loop", _as_bool),
+        # #57 Class C2: async poll cadence. Sections, not globals: the literals
+        # differ per command (video polls slower by design), and only
+        # `_COMMAND_MAP` feeds `config_defaults_for`, so `max_wait` reaches
+        # `_mcp.sfx_tool` (which declares it) with zero wrapper edits.
+        # `poll_interval` is CLI-only -- the tool impls fix their own cadence --
+        # the same documented asymmetry as `no_cleanup`.
+        "poll_interval": ("poll_interval", float),
+        "max_wait": ("max_wait", float),
     },
     "music": {
         # #57 Class C: literal now lives in `music._run_generate`. Generate
@@ -472,12 +480,23 @@ _COMMAND_MAP = {
         "instrumental": ("instrumental", _as_bool),
         "master": ("master", _as_bool),
         "loop": ("loop", _as_bool),
+        # #57 Class C2: async poll cadence. Sections, not globals: the literals
+        # differ per command (video polls slower by design), and only
+        # `_COMMAND_MAP` feeds `config_defaults_for`, so `max_wait` reaches
+        # `_mcp.music_tool` (which declares it) with zero wrapper edits.
+        # `poll_interval` is CLI-only -- the tool impls fix their own cadence --
+        # the same documented asymmetry as `no_cleanup`.
+        "poll_interval": ("poll_interval", float),
+        "max_wait": ("max_wait", float),
     },
     # #57 Class B: the standalone `venice master` command. Only `loop` -- the
     # valued knobs (--lufs/--true-peak/--sample-rate/--bit-depth/
-    # --loop-crossfade) keep their hardcoded argparse defaults; relocating
-    # those is Class C. No "master" key here: master.py registers the flags
-    # with include_toggle=False, so that namespace has no `master` attr.
+    # --loop-crossfade) are GLOBALS as of Class C2, because `add_master_flags`
+    # puts the same chain on master/sfx/music -- see `_GLOBAL_MAP`. This section
+    # holds only what is specific to this command, and (via `resolve_default`)
+    # may still override any of those globals for `venice master` alone.
+    # No "master" key here: master.py registers the flags with
+    # include_toggle=False, so that namespace has no `master` attr.
     # NOTE `defaults.master` is this SECTION; the sfx/music --master toggle
     # is the KEY defaults.sfx.master / defaults.music.master.
     "master": {
@@ -495,6 +514,14 @@ _COMMAND_MAP = {
         # #57 Class B: tri-stated --no-audio/--with-audio and --no-cleanup.
         "no_audio": ("no_audio", _as_bool),
         "no_cleanup": ("no_cleanup", _as_bool),
+        # #57 Class C2: async poll cadence. Sections, not globals: the literals
+        # differ per command (video polls slower by design), and only
+        # `_COMMAND_MAP` feeds `config_defaults_for`, so `max_wait` reaches
+        # `_mcp.video_tool` (which declares it) with zero wrapper edits.
+        # `poll_interval` is CLI-only -- the tool impls fix their own cadence --
+        # the same documented asymmetry as `no_cleanup`.
+        "poll_interval": ("poll_interval", float),
+        "max_wait": ("max_wait", float),
     },
     "upscale": {
         # #57 Class C: literal now lives in `upscale._run`.

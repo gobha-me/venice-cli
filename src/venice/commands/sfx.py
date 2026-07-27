@@ -56,8 +56,9 @@ def register(subparsers) -> None:
         help="Refuse to queue if the quote exceeds this USD cap.",
     )
     _shared.add_balance_flag(p)
-    p.add_argument("--poll-interval", type=float, default=config.SFX_POLL_INTERVAL_SEC)
-    p.add_argument("--max-wait", type=float, default=config.SFX_POLL_MAX_WAIT_SEC)
+    _shared.add_poll_flags(p, section="sfx",
+                           interval=config.SFX_POLL_INTERVAL_SEC,
+                           max_wait=config.SFX_POLL_MAX_WAIT_SEC)
     audio_post.add_master_flags(p, include_toggle=True)
     p.set_defaults(handler=_run_generate)
 
@@ -79,6 +80,9 @@ def register_status(subparsers) -> None:
     # concrete default is exactly what makes `apply_defaults` skip this dest
     # (it only fills a dest that is still None). Do not "tidy" it to None.
     # Same reasoning as video._run_status's snapshot/restore of args.model.
+    # NOTE the --poll-interval/--max-wait pair registered just below DID become
+    # `default=None` in #57 Class C2, because cadence IS a preference. The
+    # inconsistency with this line is deliberate; do not reconcile them.
     sp.add_argument(
         "--model",
         choices=sorted(SFX_MODELS),
@@ -95,8 +99,9 @@ def register_status(subparsers) -> None:
                              default=None,
                              help="Never play (beats a config default).")
     _shared.add_cleanup_flag(sp, section="sfx", endpoint="/audio/complete")
-    sp.add_argument("--poll-interval", type=float, default=config.SFX_POLL_INTERVAL_SEC)
-    sp.add_argument("--max-wait", type=float, default=config.SFX_POLL_MAX_WAIT_SEC)
+    _shared.add_poll_flags(sp, section="sfx",
+                           interval=config.SFX_POLL_INTERVAL_SEC,
+                           max_wait=config.SFX_POLL_MAX_WAIT_SEC)
     sp.set_defaults(handler=_run_status)
 
 
@@ -123,6 +128,9 @@ def _run_generate(args) -> int:
     # #57 Class C2: the mastering chain's literals. Evaluated lazily by
     # `master_hook` at post-save time, but filled here so the namespace is whole.
     audio_post.apply_master_literals(args)
+    _shared.apply_poll_defaults(args, label="sfx",
+                                interval=config.SFX_POLL_INTERVAL_SEC,
+                                max_wait=config.SFX_POLL_MAX_WAIT_SEC)
     if not args.prompt:
         print("sfx: prompt required (or use: venice sfx-status <id>)", file=sys.stderr)
         return 2
@@ -217,6 +225,11 @@ def _run_status(args) -> int:
     # default like defaults.sfx.no_cleanup applies to `venice sfx`
     # and `venice sfx-status` alike rather than only the former.
     userconfig.apply_defaults(args, "sfx")
+    # #57 Class C2: the cadence literals. This parser has no mastering flags
+    # (status never masters), so only the poll pair needs filling here.
+    _shared.apply_poll_defaults(args, label="sfx-status",
+                                interval=config.SFX_POLL_INTERVAL_SEC,
+                                max_wait=config.SFX_POLL_MAX_WAIT_SEC)
     client, rc = _queue.build_client()
     if rc != 0:
         return rc

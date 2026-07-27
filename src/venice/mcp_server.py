@@ -247,7 +247,12 @@ def build_server(client, doc=None) -> FastMCP:
         output_dir: Optional[str] = None,
         confirm: bool = False,
         max_spend: Optional[float] = None,
-        max_wait: float = _mcp._video.config.VIDEO_POLL_MAX_WAIT_SEC,
+        # #57 Class C2: Optional/None, NOT the concrete constant. `_merged` drops
+        # only None, so a concrete default here is non-None on every call and
+        # silently beats `defaults.video.max_wait` -- while the CLI path looks
+        # perfectly correct. When neither host nor config supplies one,
+        # `_mcp.video_tool`'s own signature default applies.
+        max_wait: Optional[float] = None,
     ) -> dict:
         """Generate a video via Venice's async /video queue and return the file path.
         Text-to-video (prompt) plus optional image/reference conditioning: each *_url
