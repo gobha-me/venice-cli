@@ -427,7 +427,11 @@ venice master track.mp3 --dry-run
 
 The same flags are available on `venice music` / `venice sfx` via `--master`,
 which masters the generated file right after it's saved (writing a sibling
-`*.mastered.wav`). Requires ffmpeg; if it's missing the command errors **before
+`*.mastered.wav`). Because one chain is shared by all three commands, the five
+target knobs are **global** config keys rather than per-command ones —
+`venice config set defaults.lufs -14` retargets `master`, `sfx --master` and
+`music --master` together, while `defaults.sfx.lufs` still overrides it for
+`sfx` alone. Requires ffmpeg; if it's missing the command errors **before
 spending** rather than after generating:
 
 ```sh
@@ -446,7 +450,8 @@ Text-to-video (and image-to-video, see below) on the same async queue as
 `sfx`/`music` (`/video/quote` → `/video/queue` → `/video/retrieve` →
 `/video/complete`), writing an mp4 to `venice-video-<id>.mp4`. Generation runs
 minutes, not seconds, so it polls less often and waits longer by default
-(`--poll-interval` 5s, `--max-wait` 900s). `--model` defaults to the catalog's
+(`--poll-interval` 5s, `--max-wait` 900s -- both config-backable via
+`defaults.video.*`). `--model` defaults to the catalog's
 `default`-trait video model; available durations, resolutions, aspect ratios,
 and the media-input modes below all vary by model.
 
@@ -1493,6 +1498,11 @@ Global keys under `defaults` (`output_dir`, `max_spend`, `yes`, `no_balance`)
 apply to any command that has the flag; a per-command section (e.g.
 `defaults.chat`) overrides them. `no_balance` covers every spend-incurring
 command at once -- `--show-balance` forces the display back on for a single run.
+The audio **mastering chain** (`lufs`, `true_peak`, `sample_rate`, `bit_depth`,
+`loop_crossfade`) is global for the same reason: `venice master`, `venice sfx
+--master` and `venice music --master` share one chain, so `defaults.lufs = -14`
+retargets all three at once. Any of them can still be overridden for a single
+command -- `defaults.sfx.lufs = -18` beats the global on `venice sfx` only.
 **Precedence for any flag is: explicit CLI flag > environment variable > config
 file > built-in default** — so a config default never shadows
 something you pass on the command line or set in the environment.
@@ -1510,22 +1520,32 @@ safety), it should be settable in config." Currently config-backable:
 - `defaults.image_edit.*` — `model`, `aspect_ratio`, `resolution`, `output_format`,
   `safe_mode` (tri-state `--safe-mode`/`--no-safe-mode`)
 - `defaults.tts.*` — `model`, `format`, `voice`, `speed`, `play`
-- `defaults.sfx.*` — `model`, `duration`, `play`, `master`, `loop`, `no_cleanup`
-  (`loop` only takes effect when `master` is also on -- it is a mastering-chain
-  knob). `model` applies to `venice sfx` only: on `venice sfx-status` the model
+- `defaults.sfx.*` — `model`, `duration`, `play`, `master`, `loop`,
+  `no_cleanup`, `poll_interval`, `max_wait` (`loop` only takes effect when
+  `master` is also on -- it is a mastering-chain knob). `model` applies to `venice sfx` only: on `venice sfx-status` the model
   identifies the queued job rather than expressing a preference, so config never
   reaches it. `venice sfx --background` prints the matching `--model` in its
   follow-up hint
 - `defaults.music.*` — `model`, `duration`, `speed`, `play`, `instrumental`,
-  `master`, `loop`, `no_cleanup` (same `loop` caveat as `sfx`, and the same
-  generate-only caveat on `model` as `sfx`)
-- `defaults.master.*` — `loop`. This is the standalone `venice master` command's
-  own section; the `venice sfx`/`venice music` **`--master` toggle** is the key
+  `master`, `loop`, `no_cleanup`, `poll_interval`, `max_wait` (same `loop`
+  caveat as `sfx`, and the same generate-only caveat on `model` as `sfx`)
+- `defaults.master.*` — `loop`, plus a per-command override of any mastering-chain
+  global above. This is the standalone `venice master` command's own section; the
+  `venice sfx`/`venice music` **`--master` toggle** is the key
   `defaults.sfx.master` / `defaults.music.master`, not this table
 - `defaults.video.*` — `model`, `duration`, `resolution`, `aspect_ratio`,
-  `negative_prompt`, `no_audio`, `no_cleanup`
+  `negative_prompt`, `no_audio`, `no_cleanup`, `poll_interval`, `max_wait`
 - `defaults.upscale.*` — `scale`, `enhance`, `enhance_creativity`,
   `enhance_prompt`, `replication`
+- `defaults.contact_sheet.*` — `cols`, `cell`, `label`, `background`, `padding`,
+  `engine`. Note the **underscore**: the command is `contact-sheet`, but config
+  keys are addressed with dots, so the section is `contact_sheet` (as with
+  `image_edit`). `background` here is a **color**, unlike the `--background`
+  toggle on `sfx`/`music`/`video`
+- `defaults.balance.*` — `min` only, a standing "warn me under $X" floor. Be
+  aware this one changes an **exit code**: `venice balance` returns 1 when the
+  balance is below it, so a script that never passed `--min` can start failing.
+  `--json`/`--verbose` are per-invocation output modes and stay CLI-only
 - `defaults.chat.*`, `defaults.code.*`, `defaults.embed.*`, `defaults.index.*`,
   `defaults.search.*` — see each command's section above
 
@@ -1539,14 +1559,21 @@ CLI. `defaults.image_edit.safe_mode`, `defaults.music.instrumental`,
 `defaults.video.no_audio` and `defaults.upscale.enhance` reach the tools the same
 way, as do the generation knobs `defaults.image.{model,format,variants}`,
 `defaults.tts.{model,format}`, `defaults.sfx.{model,duration}`,
-`defaults.music.model`, `defaults.video.duration` and `defaults.upscale.scale`.
-An explicit argument the model puts in the tool call still wins over config.
-`venice mcp-serve` threads the same defaults into its wrappers.
+`defaults.music.model`, `defaults.video.duration`, `defaults.upscale.scale` and
+`defaults.{sfx,music,video}.max_wait`. An explicit argument the model puts in
+the tool call still wins over config. `venice mcp-serve` threads the same
+defaults into its wrappers.
+
+Not everything crosses over, and the gaps are deliberate: `poll_interval` is
+CLI-only because the tool implementations fix their own polling cadence, and
+`contact-sheet`, `balance` and `master` have no agent-tool surface at all, so
+their sections apply only on the command line.
 
 **Any** config value whose flag has a fixed set of choices is validated against
 that set — `defaults.image.format`, `defaults.tts.{model,format}`,
 `defaults.sfx.model`, `defaults.video.{duration,resolution,aspect_ratio}`,
-`defaults.image_edit.{aspect_ratio,output_format}` and `defaults.chat.web_search`.
+`defaults.image_edit.{aspect_ratio,output_format}`, `defaults.chat.web_search`,
+`defaults.bit_depth` and `defaults.contact_sheet.engine`.
 An unrecognized value is reported on stderr, naming the legal values exactly as
 `--flag` would, and skipped — so the command falls back to its built-in default
 rather than sending something the API will reject. This applies on the CLI and on
@@ -1633,7 +1660,7 @@ The player list (`paplay` -> `aplay` -> `ffplay` -> `mpg123` -> `play`
 | `venice video PROMPT [--duration 5s] [--resolution R] [--aspect-ratio A] [--image F] [--reference-image F ...] [--element JSON] [...]` | generate a video (async queue, mp4); text- or image-to-video with reference inputs |
 | `venice video-status QUEUE_ID [--download-url URL]` | fetch a backgrounded video job |
 | `venice master INPUT [--loop] [--lufs N] [--bit-depth N] [...]` | master audio to WAV (48k/24-bit, LUFS/true-peak) |
-| `venice contact-sheet DIR_OR_GLOB [--cols N] [--cell WxH] [--label] [...]` | tile images into one contact sheet (no API call) |
+| `venice contact-sheet DIR_OR_GLOB [--cols N] [--cell WxH] [--label\|--no-label] [...]` | tile images into one contact sheet (no API call) |
 | `venice chat MESSAGE [--system S] [--model M] [--web-search on] [...]` | one-shot chat completion (OpenAI SDK) |
 | `venice chat [-i] [--continue\|--resume ID\|FILE] [--ephemeral]` | interactive multi-turn REPL (auto-saved sessions, `/`-commands, transcripts) |
 | `venice sessions ls\|show\|rm [ID]` | list/inspect/remove auto-saved chat & code sessions (`~/.config/venice/sessions/`, 0600) |
