@@ -46,6 +46,7 @@ def _code_args(**ov):
         exec_timeout=None, interactive=False, resume=None, assets=None,
         auto_compact=None, compact_threshold=None, compact_keep_turns=None,
         session_max_spend=None, cont=None, ephemeral=None,
+        review=None, review_model=None, review_rounds=None,   # #80 part 1a
     )
     base.update(ov)
     return argparse.Namespace(**base)
