@@ -3,8 +3,13 @@
 Built on the official `openai` SDK (Venice is OpenAI-compatible; the SDK is
 lazy-imported so the rest of the stdlib-only CLI works without it). Mirrors the
 shape of `venice chat`: the free `/models?type=embedding` catalog GET (via the
-lean urllib client) validates `--model` and resolves a default before the paid
-embeddings call.
+lean urllib client) validates `--model` before the paid embeddings call.
+
+Venice advertises no `default`-trait embedding model (#27), so the model must
+come from `--model` or `defaults.embed.model`; with neither, the command exits 6
+rather than silently charging for an arbitrary pick. That refusal is deliberate:
+embeddings are only comparable within one model's vector space, so a silent
+default would quietly emit vectors from a different space into an existing store.
 
 Output: by default one embedding is printed per line as a JSON array
 (newline-delimited JSON -- pipes cleanly to `jq`). `--json` dumps the full raw
@@ -48,7 +53,11 @@ def register(subparsers) -> None:
         "--model",
         "-m",
         default=None,
-        help="Embedding model id (default: the catalog's 'default'-trait model).",
+        help=(
+            "Venice embedding model id (required unless --embed-base-url; "
+            "Venice advertises no default embedding model). Config-backable as "
+            "defaults.embed.model."
+        ),
     )
     p.add_argument(
         "--embed-base-url",
@@ -166,7 +175,7 @@ def _resolve_backend(openai, args) -> tuple:
     When --embed-base-url is set, build the SDK client against that alternate
     OpenAI-compatible endpoint and take --embed-model as given -- no Venice auth
     or catalog. Otherwise use the Venice path (auth + free catalog GET that
-    validates --model or picks the 'default'-trait model).
+    validates --model).
     """
     if args.embed_base_url:
         model = args.embed_model
@@ -211,7 +220,8 @@ def _resolve_backend(openai, args) -> tuple:
 
     models = _models.catalog(client, "embedding")
     model, rc = _models.resolve_model(
-        args.model, models, label="embed", noun="embedding model"
+        args.model, models, label="embed", noun="embedding model",
+        config_key="defaults.embed.model",
     )
     if rc is not None:
         return None, None, rc
