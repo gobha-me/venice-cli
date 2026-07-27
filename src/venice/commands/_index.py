@@ -454,7 +454,10 @@ def _resolve_backend(openai, *, embed_base_url, embed_model, model,
         print(str(e), file=sys.stderr)
         return None, None, None, 2
     models = _models.catalog(client, "embedding")
-    resolved, rc = _models.resolve_model(model, models, label="index", noun="embedding model")
+    resolved, rc = _models.resolve_model(
+        model, models, label="index", noun="embedding model",
+        config_key="defaults.index.model",
+    )
     if rc is not None:
         return None, None, None, rc
     return _openai.build_openai(openai, client), resolved, {"backend": "venice", "model": resolved}, None

@@ -453,6 +453,10 @@ def _dispatch_slash(line, messages, state, args, models, oai=None, gen_kwargs=No
             print(_format_persona_list(), file=sys.stderr)
     elif cmd == "model":
         if rest:
+            # #27: deliberately NO config_key. `rest` is always non-empty here,
+            # so only the unknown-model branch (which never hints) is reachable
+            # -- and "set it permanently" is the wrong advice for a typo the
+            # user can just retype at the next prompt.
             new, rc = _models.resolve_model(
                 rest, models, label="chat", noun="text model"
             )

@@ -609,7 +609,8 @@ def chat_tool(
 
     models = _models.catalog(client, "text")
     resolved, rc = _models.resolve_model(
-        model, models, label="chat", noun="text model"
+        model, models, label="chat", noun="text model",
+        config_key="defaults.chat.model",
     )
     if rc is not None:
         return _err(f"chat: could not resolve model (exit {rc})")
@@ -690,6 +691,8 @@ def vision_tool(
 
     models = _models.catalog(client, "text")
     if model:
+        # #27: deliberately NO config_key -- there is no "vision" section in
+        # userconfig._COMMAND_MAP, so defaults.vision.model does not exist.
         resolved, rc = _models.resolve_model(
             model, models, label="vision", noun="text model"
         )
@@ -783,7 +786,8 @@ def video_tool(
 
     models = _models.catalog(client, "video")
     model, rc = _models.resolve_model(
-        model, models, label="video", noun="video model"
+        model, models, label="video", noun="video model",
+        config_key="defaults.video.model",
     )
     if rc is not None:
         return _err(f"video: could not resolve model (exit {rc})")

@@ -377,7 +377,8 @@ def _run_generate(args) -> int:
 
     models = _models.catalog(client, "video")
     model, rc = _models.resolve_model(
-        args.model, models, label="video", noun="video model"
+        args.model, models, label="video", noun="video model",
+        config_key="defaults.video.model",
     )
     if rc is not None:
         return rc
@@ -473,6 +474,9 @@ def _run_status(args) -> int:
     model = args.model
     if not model:
         models = _models.catalog(client, "video")
+        # #27: deliberately NO config_key here. The model restore above means
+        # defaults.video.model can never fill args.model on this path, so
+        # "set one permanently with..." would advertise a key that does nothing.
         model, rc = _models.resolve_model(
             args.model, models, label="video", noun="video model"
         )
