@@ -56,13 +56,20 @@ import threading
 from typing import Dict, List, Optional, Tuple
 
 from . import _agent, _code, _exec
+from ._exec import (  # shared exec rails (#33): one gate for every git shell-out
+    DEFAULT_EXEC_TIMEOUT,
+    MAX_OUTPUT_CHARS,
+    _err,
+    _obj,
+    _p,
+)
 
 # --------------------------------------------------------------------------- #
 # Limits
 # --------------------------------------------------------------------------- #
 #: Total characters of diff handed to the reviewer. ~15k tokens, which sits
 #: comfortably alongside REVIEW_SYSTEM. Per-file output is separately capped by
-#: `_exec.MAX_OUTPUT_CHARS`, so there is exactly one truncation boundary per file
+#: `MAX_OUTPUT_CHARS`, so there is exactly one truncation boundary per file
 #: and one for the whole payload -- never two that can disagree.
 MAX_DIFF_CHARS = 60_000
 
@@ -237,7 +244,7 @@ def _parse_numstat_z(out: str) -> List[Tuple[str, str, str]]:
 
 def collect_diff(root: str, base: str, *, paths=None, context: str = "function",
                  max_chars: int = MAX_DIFF_CHARS,
-                 exec_timeout: int = _exec.DEFAULT_EXEC_TIMEOUT) -> dict:
+                 exec_timeout: int = DEFAULT_EXEC_TIMEOUT) -> dict:
     """Collect the diff to review, scoped and budgeted.
 
     Returns a dict with the payload text plus the provenance and skip bookkeeping
@@ -324,7 +331,7 @@ def collect_diff(root: str, base: str, *, paths=None, context: str = "function",
             got, text = _diff(False)
         if not got or not text:
             continue
-        if len(text) >= _exec.MAX_OUTPUT_CHARS:
+        if len(text) >= MAX_OUTPUT_CHARS:
             truncated_files.append(path)
         collected.append((path, text))
 
@@ -762,14 +769,14 @@ def should_skip(collected: dict, effort: str) -> Optional[str]:
 # --------------------------------------------------------------------------- #
 # The `venice_review` rail tool (#80 part 1a)
 # --------------------------------------------------------------------------- #
-_REVIEW_SCHEMA = _exec._obj({
-    "base": _exec._p("string",
+_REVIEW_SCHEMA = _obj({
+    "base": _p("string",
                      "Git ref to review against (default: the repository's default "
                      "branch, auto-detected). Pass 'HEAD' to review only uncommitted "
                      "edits."),
     "paths": {"type": "array", "items": {"type": "string"},
               "description": "Optional pathspecs narrowing the diff to these files."},
-    "focus": _exec._p("string",
+    "focus": _p("string",
                       "Optional hint: what to weigh most (a subsystem, a risk you "
                       "want checked). Not a hard scope."),
     "rounds": {"type": "integer", "minimum": 1, "maximum": REVIEW_HARD_ROUNDS,
@@ -795,7 +802,7 @@ def review_tool(oai, model: str, root: str, client, base_kwargs, *,
                 default_max_tool_calls: int = REVIEW_MAX_TOOL_CALLS,
                 max_invocations: int = REVIEW_MAX_INVOCATIONS,
                 max_tokens: Optional[int] = None,
-                exec_timeout: int = _exec.DEFAULT_EXEC_TIMEOUT,
+                exec_timeout: int = DEFAULT_EXEC_TIMEOUT,
                 decorrelated: bool = True) -> _agent.Tool:
     """Build the `venice_review` Tool: a cold-context review of the session's own diff.
 
@@ -818,7 +825,7 @@ def review_tool(oai, model: str, root: str, client, base_kwargs, *,
         args = _code._clean(arguments)
         with lock:
             if max_invocations > 0 and used[0] >= max_invocations:
-                return _exec._err(
+                return _err(
                     f"review budget exhausted ({max_invocations} reviews this "
                     "session). Address the findings you already have; a further "
                     "review will not be run."
@@ -837,9 +844,9 @@ def review_tool(oai, model: str, root: str, client, base_kwargs, *,
             base, _note = resolve_base(root, args.get("base") or None, exec_timeout)
             collected = collect_diff(root, base, paths=paths, exec_timeout=exec_timeout)
         except ReviewError as e:
-            return _exec._err(f"review: {e.message}")
+            return _err(f"review: {e.message}")
         except Exception as e:                       # never take the parent loop down
-            return _exec._err(f"review failed: {e}")
+            return _err(f"review failed: {e}")
 
         skip = should_skip(collected, "auto")
         if skip:
@@ -853,7 +860,7 @@ def review_tool(oai, model: str, root: str, client, base_kwargs, *,
                 focus=args.get("focus") or None, include_search=include_search,
             )
         except Exception as e:  # incl. openai.OpenAIError from the nested loop
-            return _exec._err(f"review failed: {e}")
+            return _err(f"review failed: {e}")
         out = envelope(collected, result, model=model, decorrelated=decorrelated,
                        fail_on=DEFAULT_FAIL_ON)
         out["reviews_remaining"] = remaining

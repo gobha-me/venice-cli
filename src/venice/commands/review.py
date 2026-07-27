@@ -29,7 +29,7 @@ import sys
 
 from .. import auth, config, userconfig
 from ..client import build_client_from_auth
-from . import _agent, _models, _openai, _review
+from . import _agent, _exec, _models, _openai, _review
 
 
 def register(subparsers) -> None:
@@ -184,7 +184,7 @@ def _run(args) -> int:
         print(f"review: not a directory: {root}", file=sys.stderr)
         return 2
 
-    exec_timeout = args.exec_timeout or _review._exec.DEFAULT_EXEC_TIMEOUT
+    exec_timeout = args.exec_timeout or _exec.DEFAULT_EXEC_TIMEOUT
 
     # Collect and triage BEFORE touching the network: a docs-only diff must cost zero
     # API calls and must not even require the [openai] extra (aiforge#19 SS5).
