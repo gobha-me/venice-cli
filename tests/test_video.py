@@ -447,6 +447,15 @@ class TestPollCadenceReachesRetrieve(unittest.TestCase):
         )
         _cfg.start()
         self.addCleanup(_cfg.stop)
+        # These drive the real handler, which SAVES the downloaded media into the
+        # cwd. Without the chdir they drop artifacts in the repo root -- one got
+        # committed before this was caught. Every other file-writing class in
+        # this suite does the same.
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        cwd = os.getcwd()
+        os.chdir(self.tmp.name)
+        self.addCleanup(lambda: os.chdir(cwd))
 
     @staticmethod
     def _parse(*argv):

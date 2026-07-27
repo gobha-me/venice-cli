@@ -263,6 +263,32 @@ class TestContactSheetConfig(unittest.TestCase):
         self.assertIn("-background white", argv)
         self.assertNotIn("None", argv)
 
+    def test_engine_literal_and_config_select_the_binary(self):
+        """`engine` is the one relocated knob that never appears in the argv, so
+        the `assertNotIn("None", argv)` tripwire above is structurally blind to
+        it -- deleting its literal left the whole suite green. It survives only
+        because `select_engine(None)` happens to fall through to the auto
+        branch, so assert the resolved value, and that config can force ffmpeg."""
+        from venice.commands import contact_sheet as cs_cmd
+        args = self._parse("contact-sheet", ".")
+        with mock.patch("venice.userconfig.load_config", lambda *a, **k: {}), \
+             mock.patch("venice.image_montage.shutil.which", _which("montage")), \
+             mock.patch("venice.image_montage.subprocess.run", _fake_run([])):
+            cs_cmd._run(args)
+        self.assertEqual(args.engine, image_montage.DEFAULT_ENGINE)
+
+        # With BOTH binaries present, auto picks montage -- so a config value of
+        # "ffmpeg" is the only thing that can flip the argv shape.
+        doc = {"defaults": {"contact_sheet": {"engine": "ffmpeg"}}}
+        calls = []
+        with mock.patch("venice.userconfig.load_config", lambda *a, **k: doc), \
+             mock.patch("venice.image_montage.shutil.which",
+                        _which("montage", "ffmpeg")), \
+             mock.patch("venice.image_montage.subprocess.run", _fake_run(calls)):
+            rc = cs_cmd._run(self._parse("contact-sheet", "."))
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls[0][0], "ffmpeg")
+
     def test_config_section_reaches_the_argv(self):
         """The only test that catches a WRONG SECTION STRING in `_run` -- the
         table tests call `apply_defaults` with the section themselves, so they

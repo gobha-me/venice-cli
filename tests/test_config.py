@@ -847,6 +847,40 @@ class TestClassCParity(unittest.TestCase):
                 self.assertEqual(args.model, literal,
                                  msg="config retargeted a queued job")
 
+    def test_video_status_model_snapshot_is_not_config_backable(self):
+        """Same invariant as above, DIFFERENT mechanism -- which is why it needs
+        its own test. `video-status --model` parses to None and
+        `_COMMAND_MAP["video"]` really does carry a `model` row, so the
+        concrete-default trick sfx/music use cannot work here; `_run_status`
+        instead snapshots `args.model` and restores it around `apply_defaults`
+        (video.py). Without that restore a standing `defaults.video.model` would
+        put the wrong model in the /video/retrieve body of an already-queued,
+        already-charged job.
+
+        The restore only bites when `--model` is OMITTED: with it supplied the
+        dest is non-None and `apply_defaults` skips it regardless. So this drives
+        the bare form, where the model must come from the catalog rather than
+        from config.
+        """
+        from venice.commands import _models
+        from venice.commands import video as video_cmd
+
+        seen = {}
+        doc = {"version": 1, "mcpServers": {},
+               "defaults": {"video": {"model": "retargeted"}}}
+        args = _build_status_parser(video).parse_args(["video-status", "vid12345678"])
+        with mock.patch("venice.userconfig.load_config", lambda *a, **k: doc), \
+             mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch.object(_models, "catalog", lambda *a, **k: ["catalog-default"]), \
+             mock.patch.object(_models, "resolve_model",
+                               lambda *a, **k: ("catalog-default", None)), \
+             mock.patch.object(video_cmd, "_retrieve_and_save",
+                               lambda c, model, *a, **kw: seen.update(model=model) or 0):
+            rc = video_cmd._run_status(args)
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen["model"], "catalog-default",
+                         msg="config picked the model for an already-charged job")
+
     def test_invalid_choice_in_config_is_warned_and_skipped(self):
         """A config key whose flag has `choices=` must not be able to do what the
         command line can't. Without `_one_of`, `defaults.sfx.model = "bogus"`
@@ -1062,6 +1096,25 @@ class TestMasterChainGlobals(unittest.TestCase):
                     coerce(lossy)
                 with self.assertRaises(ValueError):
                     coerce(True)  # bool is an int subclass; never a count
+
+    def test_mastering_range_checks_are_per_key(self):
+        """The chain reaches ffmpeg on the same post-spend path as the cadence:
+        for `sfx --master` the job is queued, CHARGED and downloaded before
+        `master()` runs, so a bad value costs money to discover. The bounds
+        differ per key and that is the point -- `lufs`/`true_peak` are dB targets
+        and are legitimately negative, `loop_crossfade: 0` means no crossfade,
+        but `sample_rate: 0` is just `-ar 0` in the argv."""
+        rows = dict(uc._GLOBAL_MAP)
+        for key, bad in (("sample_rate", 0), ("sample_rate", -48000),
+                         ("loop_crossfade", -3)):
+            with self.subTest(key=key, bad=bad):
+                with self.assertRaises(ValueError):
+                    rows[key][1](bad)
+        # ...and the values that ARE meaningful still pass.
+        self.assertEqual(rows["lufs"][1](-14), -14.0)
+        self.assertEqual(rows["true_peak"][1](-1.5), -1.5)
+        self.assertEqual(rows["loop_crossfade"][1](0), 0.0)
+        self.assertEqual(rows["sample_rate"][1](44100), 44100)
 
     def test_bit_depths_match_the_codec_table(self):
         """The choices are derived from `_CODECS`, so a depth can never be

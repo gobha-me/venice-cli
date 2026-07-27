@@ -298,6 +298,23 @@ def _non_negative(cast):
     return _check
 
 
+def _positive(cast):
+    """Like :func:`_non_negative`, but zero is meaningless too.
+
+    The distinction is per-key and load-bearing: `max_wait=0` is a single
+    non-blocking probe and `loop_crossfade=0` is "no crossfade", both real
+    settings -- but a 0 Hz `sample_rate` is not a setting, it is `-ar 0` in the
+    ffmpeg argv, discovered only after the media is paid for. (#57 Class C2)
+    """
+    def _check(v):
+        val = cast(v)
+        if val <= 0:
+            raise ValueError("must be > 0")
+        return val
+
+    return _check
+
+
 def _one_of(module: str, attr: str, cast=str):
     """Coercer factory for a config key whose flag carries argparse ``choices=``.
 
@@ -374,13 +391,18 @@ _GLOBAL_MAP = {
     # `defaults.sfx.lufs` override the global with NO `_COMMAND_MAP` row needed.
     # Deliberately absent from `_COMMAND_MAP`: no agent tool masters anything,
     # and `defaults.master` is already the `venice master` command's SECTION.
+    # lufs/true_peak are dB targets and are legitimately NEGATIVE, so they get
+    # no sign check. sample_rate and loop_crossfade do: both reach ffmpeg on the
+    # same post-spend path as the poll cadence -- `defaults.sample_rate = 0`
+    # lands in the pass-2 argv as `-ar 0` only AFTER a sfx/music job has been
+    # queued, charged and downloaded. (#57 Class C2)
     "lufs": ("lufs", float),
     "true_peak": ("true_peak", float),
-    "sample_rate": ("sample_rate", _exact_int),
+    "sample_rate": ("sample_rate", _positive(_exact_int)),
     # `--bit-depth` is the only flag in the tree whose `choices=` are ints, hence
     # the cast -- see `_one_of`.
     "bit_depth": ("bit_depth", _one_of("venice.audio_post", "BIT_DEPTHS", _exact_int)),
-    "loop_crossfade": ("loop_crossfade", float),
+    "loop_crossfade": ("loop_crossfade", _non_negative(float)),
 }
 _COMMAND_MAP = {
     "chat": {
@@ -577,10 +599,9 @@ _COMMAND_MAP = {
     # `min` -- `--json`/`--verbose` are per-invocation OUTPUT MODES, not
     # preferences, and stay CLI-only. Caveat worth knowing: `--min` gates the
     # EXIT CODE, so this is the one config key that can make `venice balance`
-    # return 1 in a script that never passed the flag. `resolve_default`'s
-    # top-level fallthrough also lets a bare `defaults.min` land here; `balance`
-    # is the only command in the tree declaring a `min` dest, so nothing else
-    # can be hit by it.
+    # return 1 in a script that never passed the flag. Note a bare top-level
+    # `defaults.min` does NOT reach this: globals are an explicit allow-list
+    # (see `resolve_default`), and `min` is a per-command preference.
     "balance": {
         "min": ("min", float),
     },

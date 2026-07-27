@@ -441,6 +441,15 @@ class TestPollCadenceReachesRetrieve(unittest.TestCase):
         )
         _cfg.start()
         self.addCleanup(_cfg.stop)
+        # These drive the real handler, which SAVES the downloaded media into the
+        # cwd. Without the chdir they drop artifacts in the repo root -- one got
+        # committed before this was caught. Every other file-writing class in
+        # this suite does the same.
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        cwd = os.getcwd()
+        os.chdir(self.tmp.name)
+        self.addCleanup(lambda: os.chdir(cwd))
 
     @staticmethod
     def _parse(*argv):
@@ -557,19 +566,41 @@ class TestPollCadenceReachesRetrieve(unittest.TestCase):
         self.assertEqual(seen["bit_depth"], 16)
 
     def test_config_cadence_reaches_both_halves(self):
+        """Both halves for real. The generate leg is what pins the ORDERING --
+        `resolve_poll` must run AFTER `apply_defaults`, or the literals win and
+        `defaults.music.poll_interval` is silently ignored while CI stays green."""
         from venice.commands import music as cmd
         from venice.commands import _audio, _queue
 
         doc = {"version": 1, "mcpServers": {},
                "defaults": {"music": {"poll_interval": 0.5, "max_wait": 60}}}
+
+        # generate leg
+        responses = iter([
+            FakeResp(200, b'{"data": []}', "application/json"),
+            FakeResp(200, b'{"quote": 0.01}', "application/json"),
+            FakeResp(200, b'{"queue_id":"abcdef1234567890","status":"QUEUED"}',
+                     "application/json"),
+        ])
+        seen, fake = self._spy()
+        with mock.patch("venice.userconfig.load_config", lambda *a, **k: doc), \
+             mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.client.urllib.request.urlopen",
+                        lambda *a, **kw: next(responses)), \
+             mock.patch.object(_audio, "retrieve_and_save", fake):
+            rc = cmd._run_generate(
+                self._parse("music", "a prompt", "--yes", "--no-balance"))
+        self.assertEqual(rc, 0)
+        self.assertEqual((seen["poll_interval"], seen["max_wait"]), (0.5, 60.0))
+
+        # status leg
         seen, fake = self._spy()
         with mock.patch("venice.userconfig.load_config", lambda *a, **k: doc), \
              mock.patch.object(_queue, "build_client", lambda: (object(), 0)), \
              mock.patch.object(_audio, "retrieve_and_save", fake):
             rc = cmd._run_status(self._parse("music-status", "abcdef1234567890"))
         self.assertEqual(rc, 0)
-        self.assertEqual(seen["poll_interval"], 0.5)
-        self.assertEqual(seen["max_wait"], 60.0)
+        self.assertEqual((seen["poll_interval"], seen["max_wait"]), (0.5, 60.0))
 
 
 if __name__ == "__main__":
