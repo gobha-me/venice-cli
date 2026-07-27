@@ -11,11 +11,17 @@ build/
 dist/
 *.egg-info/
 
-# Local audio outputs -- never commit generated SFX
+# Local media outputs -- never commit generated assets. The sfx-only list let a
+# `venice-music-*.mp3` test artifact get committed once; every generator's
+# `name_prefix` belongs here, not just the first one that bit us.
 venice-sfx-*.mp3
 venice-sfx-*.wav
 venice-sfx-*.flac
 venice-sfx-*.bin
+venice-music-*
+venice-video-*
+venice-tts-*
+contact-sheet.png
 
 # Semantic-search index (machine-generated vectors; `venice index` also drops a
 # self-ignoring .venice/.gitignore in any project it indexes)

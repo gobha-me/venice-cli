@@ -312,6 +312,11 @@ def _queue_media(
     name_prefix: str,
     output_dir: Optional[str],
     max_wait: float,
+    # #57 Class C2: passed in rather than hardcoded to the sfx constant. This
+    # helper serves sfx AND music, and the two cadences are separate names now
+    # (config.MUSIC_POLL_*), so borrowing sfx's here would silently pin music
+    # to sfx's cadence the moment anyone diverges them.
+    poll_interval: float,
     background: bool = False,
 ) -> dict:
     """Shared quote-gated queue -> poll -> save for sfx/music (print-free).
@@ -342,7 +347,7 @@ def _queue_media(
     try:
         ctype, audio = _audio.retrieve_bytes(
             client, model, queue_id,
-            poll_interval=_sfx.config.SFX_POLL_INTERVAL_SEC, max_wait=max_wait,
+            poll_interval=poll_interval, max_wait=max_wait,
         )
     except VeniceAPIError as e:
         return _err(f"{label} retrieve failed: {e}")
@@ -414,6 +419,7 @@ def sfx_tool(
         name_prefix="venice-sfx",
         output_dir=output_dir,
         max_wait=max_wait,
+        poll_interval=_sfx.config.SFX_POLL_INTERVAL_SEC,
         background=background,
     )
 
@@ -430,7 +436,7 @@ def music_tool(
     output_dir: Optional[str] = None,
     confirm: bool = False,
     max_spend: Optional[float] = None,
-    max_wait: float = _music.config.SFX_POLL_MAX_WAIT_SEC,
+    max_wait: float = _music.config.MUSIC_POLL_MAX_WAIT_SEC,
     background: bool = False,
 ) -> dict:
     """Generate long-form music/ambience via the async audio queue; return the path.
@@ -486,6 +492,7 @@ def music_tool(
         name_prefix="venice-music",
         output_dir=output_dir,
         max_wait=max_wait,
+        poll_interval=_music.config.MUSIC_POLL_INTERVAL_SEC,
         background=background,
     )
 
@@ -919,6 +926,12 @@ def job_result_tool(
     type: str,
     model: str,
     download_url: Optional[str] = None,
+    # #57 Class C2: deliberately NOT tri-stated, unlike the generate-path
+    # max_wait. Here 0.0 is a MEANING ("one non-blocking probe"), not a default
+    # standing in for a preference, and this tool is not config-reachable --
+    # `_tool_section("venice_job_result")` is "job_result", which has no
+    # `_COMMAND_MAP` section. A sweep that made every max_wait Optional would
+    # silently turn this into a blocking call. Leave it.
     max_wait: float = 0.0,
 ) -> dict:
     """Fetch a backgrounded media job's file (from a `background=True` call).

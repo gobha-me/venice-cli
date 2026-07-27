@@ -84,6 +84,70 @@ def add_cleanup_flag(parser, *, section: str, endpoint: str) -> None:
     )
 
 
+def add_poll_flags(parser, *, section: str, interval: float, max_wait: float) -> None:
+    """Register the tri-stated `--poll-interval` / `--max-wait` pair (#57 C2).
+
+    Same shape and rationale as :func:`add_cleanup_flag`; `section` names the
+    config table (sfx/music/video). Registered on the generate AND `-status`
+    parsers of each command, so a cadence preference applies whether you wait
+    inline or reattach later. `default=None` is what lets
+    `defaults.<section>.{poll_interval,max_wait}` reach the dests; the literals
+    go back on in the handler's :func:`resolve_poll` call.
+
+    The two are asymmetric on the tool path and that is deliberate: `max_wait`
+    is a parameter of `_mcp.{sfx,music,video}_tool`, so a config row reaches the
+    agent/MCP surface through `config_defaults_for`, while the cadence itself is
+    fixed by those impls and stays CLI-only (the `no_cleanup` precedent).
+    """
+    parser.add_argument(
+        "--poll-interval", type=float, default=None, metavar="SEC",
+        help=f"Seconds between status polls (default {interval:g}). "
+             f"Config-backable via defaults.{section}.poll_interval (CLI only -- "
+             "the agent/MCP tools fix their own cadence).",
+    )
+    parser.add_argument(
+        "--max-wait", type=float, default=None, metavar="SEC",
+        help=f"Give up waiting after this many seconds (default {max_wait:g}). "
+             f"Config-backable via defaults.{section}.max_wait, which the "
+             f"venice_{section} agent/MCP tool honors too.",
+    )
+
+
+def resolve_poll(poll_interval, max_wait, *, label: str,
+                 interval: float, max_wait_default: float):
+    """Resolve the poll cadence to `(poll_interval, max_wait)` (#57 C2).
+
+    Call AFTER `userconfig.apply_defaults`. Every one of the six poll handlers
+    needs this: a leftover None is a TypeError inside the poll loop -- immediate
+    for `max_wait` (`time.monotonic() + None`), but for `poll_interval` only on
+    the SECOND iteration (`time.sleep(None)`), so a job that finishes fast hides
+    the bug entirely and a slow one crashes after the spend.
+
+    Takes and returns primitives rather than a namespace, per CONTRIBUTING's
+    house style for `commands/_*.py`, which also keeps this layer free of a
+    dependency on `userconfig`.
+
+    The negative check here covers a value the user TYPED. A negative from
+    CONFIG never reaches this -- `userconfig._non_negative` rejects it at the
+    coercer, which is the only layer that also covers the agent/MCP tool path.
+    `0` is left alone deliberately on both: `max_wait=0` is a single
+    non-blocking probe and `poll_interval=0` a tight loop, both meaningful.
+    """
+    if poll_interval is None:
+        poll_interval = interval
+    if max_wait is None:
+        max_wait = max_wait_default
+    if poll_interval < 0:
+        print(f"{label}: --poll-interval must be >= 0; using {interval:g}",
+              file=sys.stderr)
+        poll_interval = interval
+    if max_wait < 0:
+        print(f"{label}: --max-wait must be >= 0; using {max_wait_default:g}",
+              file=sys.stderr)
+        max_wait = max_wait_default
+    return poll_interval, max_wait
+
+
 def encode_data_url(path: Path, *, default_mime: str = "application/octet-stream") -> str:
     """Read a local file and return a `data:<mime>;base64,<b64>` URL.
 

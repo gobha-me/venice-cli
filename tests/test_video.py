@@ -12,6 +12,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from venice import config
 from tests.test_client import FakeResp
 
 DEFAULT_MODEL = "seedance-2-0-text-to-video"
@@ -427,6 +428,117 @@ class TestVideoMediaInputs(unittest.TestCase):
         rc, calls = self._run_prevalidation(_build_args(element=["{not valid json"]))
         self.assertEqual(rc, 2)
         self.assertTrue(all(not c.endswith("/video/quote") for c in calls))
+
+
+class TestPollCadenceReachesRetrieve(unittest.TestCase):
+    """#57 Class C2: the poll literals live in `_shared.resolve_poll`,
+    called by the handler, not on the parser.
+
+    `_build_args` and every hand-built status Namespace in this file set
+    poll_interval/max_wait themselves, so they all keep passing if a handler
+    drops that call. Only parsing the REAL parser exposes it -- and a leftover
+    None is a TypeError inside the poll loop that a fast job never reaches.
+    """
+
+    def setUp(self):
+        _cfg = mock.patch(
+            "venice.userconfig.load_config",
+            lambda *a, **k: {"version": 1, "mcpServers": {}, "defaults": {}},
+        )
+        _cfg.start()
+        self.addCleanup(_cfg.stop)
+        # These drive the real handler, which SAVES the downloaded media into the
+        # cwd. Without the chdir they drop artifacts in the repo root -- one got
+        # committed before this was caught. Every other file-writing class in
+        # this suite does the same.
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        cwd = os.getcwd()
+        os.chdir(self.tmp.name)
+        self.addCleanup(lambda: os.chdir(cwd))
+
+    @staticmethod
+    def _parse(*argv):
+        from venice import cli
+        return cli.build_parser().parse_args(list(argv))
+
+    def _spy(self):
+        seen = {}
+
+        # (client, model, queue_id, download_url, output, poll, max_wait, cleanup)
+        def fake(client, model, queue_id, download_url, output,
+                 poll_interval, max_wait, *a, **kw):
+            seen.update(poll_interval=poll_interval, max_wait=max_wait)
+            return 0
+
+        return seen, fake
+
+    def test_generate_uses_the_builtin_cadence(self):
+        """The generate half. Without this, reverting `_run_generate`'s
+        `resolve_poll` call left the WHOLE of test_video green."""
+        from venice.commands import video
+
+        responses = iter([
+            _catalog(DEFAULT_MODEL),
+            FakeResp(200, b'{"quote": 0.5}', "application/json"),
+            FakeResp(
+                200,
+                b'{"model":"' + DEFAULT_MODEL.encode() + b'","queue_id":"vid12345678"}',
+                "application/json",
+            ),
+        ])
+        seen, fake = self._spy()
+        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.client.urllib.request.urlopen",
+                        lambda *a, **kw: next(responses)), \
+             mock.patch.object(video, "_retrieve_and_save", fake):
+            rc = video._run_generate(
+                self._parse("video", "a prompt", "--yes", "--no-balance"))
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen["poll_interval"], config.VIDEO_POLL_INTERVAL_SEC)
+        self.assertEqual(seen["max_wait"], config.VIDEO_POLL_MAX_WAIT_SEC)
+
+    def test_status_uses_the_builtin_cadence(self):
+        from venice.commands import video
+
+        seen, fake = self._spy()
+        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch.object(video, "_retrieve_and_save", fake):
+            rc = video._run_status(
+                self._parse("video-status", "vid12345678", "--model", "m"))
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen["poll_interval"], config.VIDEO_POLL_INTERVAL_SEC)
+        self.assertEqual(seen["max_wait"], config.VIDEO_POLL_MAX_WAIT_SEC)
+
+    def test_config_cadence_reaches_status(self):
+        from venice.commands import video
+
+        doc = {"version": 1, "mcpServers": {},
+               "defaults": {"video": {"poll_interval": 1.5, "max_wait": 45}}}
+        seen, fake = self._spy()
+        with mock.patch("venice.userconfig.load_config", lambda *a, **k: doc), \
+             mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch.object(video, "_retrieve_and_save", fake):
+            rc = video._run_status(
+                self._parse("video-status", "vid12345678", "--model", "m"))
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen["poll_interval"], 1.5)
+        self.assertEqual(seen["max_wait"], 45.0)
+
+    def test_explicit_flag_beats_config_cadence(self):
+        from venice.commands import video
+
+        doc = {"version": 1, "mcpServers": {},
+               "defaults": {"video": {"poll_interval": 1.5, "max_wait": 45}}}
+        seen, fake = self._spy()
+        with mock.patch("venice.userconfig.load_config", lambda *a, **k: doc), \
+             mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch.object(video, "_retrieve_and_save", fake):
+            rc = video._run_status(self._parse(
+                "video-status", "vid12345678", "--model", "m", "--max-wait", "7"))
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen["max_wait"], 7.0)
+        self.assertEqual(seen["poll_interval"], 1.5)  # config still fills the other
 
 
 if __name__ == "__main__":

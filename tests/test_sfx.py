@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from venice import config
 from tests.test_client import FakeResp
 
 
@@ -328,6 +329,183 @@ class TestSfxFullFlow(unittest.TestCase):
             finally:
                 empty.cleanup()
         self.assertEqual(rc, 2)
+
+
+class TestPollCadenceReachesRetrieve(unittest.TestCase):
+    """#57 Class C2: the poll cadence literals now live in
+    `_shared.resolve_poll`, called by the handler -- not on the parser.
+
+    Every other test in this file hand-builds a Namespace with
+    `poll_interval`/`max_wait` already set, so all of them keep passing if a
+    handler forgets that call. These parse the REAL parser and let the handler
+    fill, which is the only way the omission is visible. It matters because a
+    leftover None is a TypeError inside the poll loop -- and for
+    `poll_interval` only on the SECOND iteration, so a fast job hides it and a
+    slow one crashes after the spend.
+    """
+
+    def setUp(self):
+        _cfg = mock.patch(
+            "venice.userconfig.load_config",
+            lambda *a, **k: {"version": 1, "mcpServers": {}, "defaults": {}},
+        )
+        _cfg.start()
+        self.addCleanup(_cfg.stop)
+        # These drive the real handler, which SAVES the downloaded media into the
+        # cwd. Without the chdir they drop artifacts in the repo root -- one got
+        # committed before this was caught. Every other file-writing class in
+        # this suite does the same.
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        cwd = os.getcwd()
+        os.chdir(self.tmp.name)
+        self.addCleanup(lambda: os.chdir(cwd))
+
+    @staticmethod
+    def _parse(*argv):
+        from venice import cli
+        return cli.build_parser().parse_args(list(argv))
+
+    def _spy(self):
+        seen = {}
+
+        def fake(client, model, queue_id, output, poll_interval, max_wait,
+                 *a, **kw):
+            seen.update(poll_interval=poll_interval, max_wait=max_wait)
+            return 0
+
+        return seen, fake
+
+    def test_generate_uses_the_builtin_cadence(self):
+        from venice.commands import sfx as cmd
+        from venice.commands import _audio
+
+        responses = iter([
+            FakeResp(200, b'{"quote": 0.01}', "application/json"),
+            FakeResp(200, b'{"queue_id":"abcdef1234567890","status":"QUEUED"}',
+                     "application/json"),
+        ])
+        seen, fake = self._spy()
+        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.client.urllib.request.urlopen",
+                        lambda *a, **kw: next(responses)), \
+             mock.patch.object(_audio, "retrieve_and_save", fake):
+            rc = cmd._run_generate(
+                self._parse("sfx", "a prompt", "--yes", "--no-balance"))
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen["poll_interval"], config.SFX_POLL_INTERVAL_SEC)
+        self.assertEqual(seen["max_wait"], config.SFX_POLL_MAX_WAIT_SEC)
+
+    def test_status_uses_the_builtin_cadence(self):
+        from venice.commands import sfx as cmd
+        from venice.commands import _audio, _queue
+
+        seen, fake = self._spy()
+        with mock.patch.object(_queue, "build_client", lambda: (object(), 0)), \
+             mock.patch.object(_audio, "retrieve_and_save", fake):
+            rc = cmd._run_status(self._parse("sfx-status", "abcdef1234567890"))
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen["poll_interval"], config.SFX_POLL_INTERVAL_SEC)
+        self.assertEqual(seen["max_wait"], config.SFX_POLL_MAX_WAIT_SEC)
+
+    def test_master_chain_literals_reach_the_ffmpeg_kwargs(self):
+        """#57 Class C2. `_build_args` presets all five mastering dests, so it
+        cannot see a missing `apply_master_literals`. Drive the REAL parser with
+        --master instead: without that call every knob is None by the time
+        `master_hook` fires, and `master()` exits 2 on `--bit-depth None` --
+        AFTER the job has been queued, charged and downloaded."""
+        from venice.commands import sfx as cmd
+        from venice import cli
+
+        seen = {}
+        responses = iter([
+            FakeResp(200, b'{"quote": 0.01}', "application/json"),
+            FakeResp(200, b'{"queue_id":"abcdef1234567890","status":"QUEUED"}',
+                     "application/json"),
+            FakeResp(200, b"FAKEAUDIO", "audio/mpeg"),
+            FakeResp(200, b'{"success": true}', "application/json"),
+        ])
+        args = cli.build_parser().parse_args(
+            ["sfx", "a prompt", "--yes", "--no-balance", "--master"])
+        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.client.urllib.request.urlopen",
+                        lambda *a, **kw: next(responses)), \
+             mock.patch("venice.client.time.sleep"), \
+             mock.patch("venice.audio_post.has_ffmpeg", lambda: True), \
+             mock.patch("venice.audio_post.master",
+                        lambda i, o, **kw: seen.update(kw) or 0):
+            rc = cmd._run_generate(args)
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen, dict(sample_rate=48000, bit_depth=24, lufs=-16.0,
+                                    true_peak=-1.0, loop=False, loop_crossfade=2.0))
+        self.assertNotIn(None, seen.values())
+
+    def test_config_globals_reach_the_ffmpeg_kwargs(self):
+        """`defaults.lufs`/`bit_depth` are `_GLOBAL_MAP` rows, so they reach the
+        sfx/music mastering chain with no per-command section."""
+        from venice.commands import sfx as cmd
+        from venice import cli
+
+        doc = {"version": 1, "mcpServers": {},
+               "defaults": {"lufs": -14.0, "bit_depth": 16}}
+        seen = {}
+        responses = iter([
+            FakeResp(200, b'{"quote": 0.01}', "application/json"),
+            FakeResp(200, b'{"queue_id":"abcdef1234567890","status":"QUEUED"}',
+                     "application/json"),
+            FakeResp(200, b"FAKEAUDIO", "audio/mpeg"),
+            FakeResp(200, b'{"success": true}', "application/json"),
+        ])
+        args = cli.build_parser().parse_args(
+            ["sfx", "a prompt", "--yes", "--no-balance", "--master"])
+        with mock.patch("venice.userconfig.load_config", lambda *a, **k: doc), \
+             mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.client.urllib.request.urlopen",
+                        lambda *a, **kw: next(responses)), \
+             mock.patch("venice.client.time.sleep"), \
+             mock.patch("venice.audio_post.has_ffmpeg", lambda: True), \
+             mock.patch("venice.audio_post.master",
+                        lambda i, o, **kw: seen.update(kw) or 0):
+            rc = cmd._run_generate(args)
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen["lufs"], -14.0)
+        self.assertEqual(seen["bit_depth"], 16)
+
+    def test_config_cadence_reaches_both_halves(self):
+        """Both halves for real. The generate leg is what pins the ORDERING --
+        `resolve_poll` must run AFTER `apply_defaults`, or the literals win and
+        `defaults.sfx.poll_interval` is silently ignored while CI stays green."""
+        from venice.commands import sfx as cmd
+        from venice.commands import _audio, _queue
+
+        doc = {"version": 1, "mcpServers": {},
+               "defaults": {"sfx": {"poll_interval": 0.5, "max_wait": 60}}}
+
+        # generate leg
+        responses = iter([
+            FakeResp(200, b'{"quote": 0.01}', "application/json"),
+            FakeResp(200, b'{"queue_id":"abcdef1234567890","status":"QUEUED"}',
+                     "application/json"),
+        ])
+        seen, fake = self._spy()
+        with mock.patch("venice.userconfig.load_config", lambda *a, **k: doc), \
+             mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.client.urllib.request.urlopen",
+                        lambda *a, **kw: next(responses)), \
+             mock.patch.object(_audio, "retrieve_and_save", fake):
+            rc = cmd._run_generate(
+                self._parse("sfx", "a prompt", "--yes", "--no-balance"))
+        self.assertEqual(rc, 0)
+        self.assertEqual((seen["poll_interval"], seen["max_wait"]), (0.5, 60.0))
+
+        # status leg
+        seen, fake = self._spy()
+        with mock.patch("venice.userconfig.load_config", lambda *a, **k: doc), \
+             mock.patch.object(_queue, "build_client", lambda: (object(), 0)), \
+             mock.patch.object(_audio, "retrieve_and_save", fake):
+            rc = cmd._run_status(self._parse("sfx-status", "abcdef1234567890"))
+        self.assertEqual(rc, 0)
+        self.assertEqual((seen["poll_interval"], seen["max_wait"]), (0.5, 60.0))
 
 
 if __name__ == "__main__":

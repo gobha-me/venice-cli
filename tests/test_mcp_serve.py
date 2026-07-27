@@ -140,6 +140,14 @@ class TestConfigDefaultsWiring(unittest.TestCase):
          dict(prompt="p")),
         ("upscale", "venice_upscale", "upscale_tool", "scale", 3.0, 4.0,
          dict(input_path="in.png")),
+        # #57 Class C2. `venice_video.max_wait` was the last wrapper param left
+        # holding a concrete constant, so it was non-None on every call and
+        # `_merged` (which drops only None) let it beat defaults.video.max_wait
+        # while the CLI path looked correct. sfx/music expose no `max_wait`
+        # param at all, so config is their only source and there is nothing to
+        # tri-state -- see test_config's tool-path asymmetry test.
+        ("video", "venice_video", "video_tool", "max_wait", 42.0, 120.0,
+         dict(prompt="p")),
     ]
 
     def test_class_c_config_reaches_impl_when_host_omits_the_arg(self):

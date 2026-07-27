@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import sys
 
-from .. import auth
+from .. import auth, userconfig
 from ..billing import SPEND_ORDER, fetch_balance, format_balance_breakdown, format_usd
 from ..client import VeniceAPIError
 
@@ -37,12 +37,19 @@ def register(subparsers) -> None:
         type=float,
         default=None,
         metavar="USD",
-        help="Exit 1 if balance is below this USD threshold.",
+        help="Exit 1 if balance is below this USD threshold. Config-backable "
+             "via defaults.balance.min -- note that makes it an EXIT CODE a "
+             "standing config can change; an explicit --min still wins.",
     )
     p.set_defaults(handler=_run)
 
 
 def _run(args) -> int:
+    # #57 Class D: `balance` had no config access at all. Only `--min` is
+    # config-backable -- it is a standing "warn me under $X" floor. `--json` and
+    # `--verbose` are per-invocation output modes and stay CLI-only. No
+    # `apply_literals`: `--min` already defaults None, and None means "no floor".
+    userconfig.apply_defaults(args, "balance")
     try:
         from ..client import build_client_from_auth
         client = build_client_from_auth()

@@ -35,6 +35,21 @@ def has_ffmpeg() -> bool:
     return shutil.which("ffmpeg") is not None
 
 
+# The `--engine` choices, and the built-in defaults for the grid knobs. These
+# live here rather than on the parser so `userconfig.apply_defaults` can reach
+# the dests -- it fills a dest only while it is still None, which a hardcoded
+# argparse default makes impossible. `contact_sheet._run` puts them back on via
+# `apply_literals`. ENGINES is public because `userconfig._one_of` resolves it
+# by name. (#57 Class D)
+ENGINES = ("auto", "montage", "ffmpeg")
+DEFAULT_COLS = 4
+DEFAULT_CELL = "256x320"
+DEFAULT_BACKGROUND = "white"
+DEFAULT_PADDING = 4
+DEFAULT_ENGINE = "auto"
+DEFAULT_OUTPUT_NAME = "contact-sheet.png"
+
+
 def select_engine(preferred: str) -> Optional[str]:
     """Resolve which external tool to use. `preferred` is auto|montage|ffmpeg.
 
@@ -48,10 +63,6 @@ def select_engine(preferred: str) -> Optional[str]:
     if has_ffmpeg():
         return "ffmpeg"
     return None
-
-
-def default_output() -> Path:
-    return Path.cwd() / "contact-sheet.png"
 
 
 def collect_inputs(inputs: List[str]) -> List[Path]:
@@ -168,12 +179,12 @@ def contact_sheet(
     inputs: List[str],
     output: Path,
     *,
-    cols: int = 4,
-    cell: str = "256x320",
+    cols: int = DEFAULT_COLS,
+    cell: str = DEFAULT_CELL,
     label: bool = False,
-    background: str = "white",
-    padding: int = 4,
-    engine: str = "auto",
+    background: str = DEFAULT_BACKGROUND,
+    padding: int = DEFAULT_PADDING,
+    engine: str = DEFAULT_ENGINE,
     dry_run: bool = False,
 ) -> int:
     """Build a contact-sheet montage. Returns an exit code

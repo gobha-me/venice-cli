@@ -35,6 +35,9 @@ def register(subparsers) -> None:
 
 def _run(args) -> int:
     userconfig.apply_defaults(args, "master")
+    # #57 Class C2: built-in literals last. Without this every knob reaches
+    # `master_kwargs` below as None -- see `apply_master_literals`.
+    audio_post.apply_master_literals(args)
     if not args.input.exists():
         print(f"master: input not found: {args.input}", file=sys.stderr)
         return 6
