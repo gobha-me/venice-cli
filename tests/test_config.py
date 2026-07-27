@@ -17,11 +17,11 @@ from unittest import mock
 
 import venice.config as cfg
 import venice.userconfig as uc
-from venice import cli
+from venice import audio_post, cli, image_montage
 from venice.commands import config as cfgcmd
 from venice.commands import (
-    bg_remove, chat, code, image, image_edit, index, master, music, sfx, tts,
-    upscale, video,
+    balance, bg_remove, chat, code, contact_sheet, image, image_edit, index,
+    master, music, sfx, tts, upscale, video,
 )
 
 
@@ -305,6 +305,26 @@ def _build_parser(mod):
     return parser
 
 
+def _build_status_parser(mod):
+    """The `-status` half of a command. `_build_parser` registers only the
+    generate parser, but a `-status` parser shares its parent's config section,
+    so parity has to be asserted on both."""
+    parser = argparse.ArgumentParser(prog="venice")
+    mod.register_status(parser.add_subparsers(dest="command"))
+    return parser
+
+
+def _rows_for(key):
+    """The full key->(dest, coercer) mapping `apply_defaults` actually applies to
+    a command: the command-agnostic globals overlaid with its own section. Tests
+    that assert "every configurable dest is covered" must use this, not
+    `_COMMAND_MAP` alone -- the mastering chain lives in `_GLOBAL_MAP` (#57 C2),
+    so a `_COMMAND_MAP`-only check silently exempts it."""
+    mapping = dict(uc._GLOBAL_MAP)
+    mapping.update(uc._COMMAND_MAP.get(key, {}))
+    return mapping
+
+
 _CLASS_A_CASES = [
     dict(
         mod=image, argv=["image"], key="image",
@@ -398,6 +418,21 @@ class TestClassAParity(unittest.TestCase):
                 uc.apply_defaults(args, case["key"], doc)
                 self.assertEqual(getattr(args, case["edest"]), case["eval"])
 
+    def test_balance_min_is_config_backable(self):
+        """#57 Class D: `venice balance` had no `apply_defaults` call at all, so
+        even a pure-Class-A dest like `--min` (already default None) was
+        unreachable. `--json`/`--verbose` stay CLI-only on purpose."""
+        args = _build_parser(balance).parse_args(["balance"])
+        uc.apply_defaults(args, "balance", {"defaults": {"balance": {"min": "5"}}})
+        self.assertEqual(args.min, 5.0)
+        args = _build_parser(balance).parse_args(["balance", "--min", "10"])
+        uc.apply_defaults(args, "balance", {"defaults": {"balance": {"min": "5"}}})
+        self.assertEqual(args.min, 10.0)
+
+    def test_balance_output_modes_stay_cli_only(self):
+        dests = {d for d, _ in uc._COMMAND_MAP["balance"].values()}
+        self.assertEqual(dests, {"min"})
+
     def test_index_exclude_scalar_becomes_list(self):
         parser = _build_parser(index)
         args = parser.parse_args(["index"])
@@ -454,6 +489,10 @@ _CLASS_B_CASES = [
     dict(key="master", mod=master, argv=["master", "in.wav"],
          dest="loop", on="--loop", off="--no-loop",
          cfg=True, want=True, explicit="--no-loop", eval=False),
+    # #57 Class D: contact-sheet's --label was a bare store_true.
+    dict(key="contact_sheet", mod=contact_sheet, argv=["contact-sheet", "."],
+         dest="label", on="--label", off="--no-label",
+         cfg=True, want=True, explicit="--no-label", eval=False),
 ]
 
 # Every command carrying the tri-stated `--no-balance`/`--balance` pair. It lives
@@ -586,20 +625,15 @@ class TestClassBParity(unittest.TestCase):
     def test_status_play_is_tristate_and_config_backable(self):
         """The parent section must reach BOTH halves of a command, not just the
         generate parser -- `--play` was left a bare store_true at first."""
-        def status_parser(mod):
-            parser = argparse.ArgumentParser(prog="venice")
-            mod.register_status(parser.add_subparsers(dest="command"))
-            return parser
-
         for mod, argv, key in ((sfx, ["sfx-status", "j1"], "sfx"),
                                (music, ["music-status", "j1"], "music")):
             with self.subTest(cmd=argv[0]):
                 got = tuple(
-                    status_parser(mod).parse_args(argv + extra).play
+                    _build_status_parser(mod).parse_args(argv + extra).play
                     for extra in ([], ["--play"], ["--no-play"])
                 )
                 self.assertEqual(got, (None, True, False))
-                args = status_parser(mod).parse_args(argv)
+                args = _build_status_parser(mod).parse_args(argv)
                 uc.apply_defaults(args, key, {"defaults": {key: {"play": True}}})
                 self.assertIs(args.play, True)
 
@@ -652,6 +686,66 @@ _CLASS_C_CASES = [
     dict(key="upscale", mod=upscale, argv=["upscale", "in.png"], dest="scale",
          literal=upscale.DEFAULT_SCALE, cfg="3", want=3.0,
          explicit=["--scale", "4"], eval=4.0),
+
+    # #57 Class C2 -- the shared mastering chain. These five live in
+    # `_GLOBAL_MAP`, not a section, because `audio_post.add_master_flags` puts
+    # one chain on three commands. The rows below exercise the SECTION-override
+    # half (`defaults.sfx.lufs`); `TestMasterChainGlobals` covers the bare
+    # global and proves the two layers compose.
+    dict(key="master", mod=master, argv=["master", "in.wav"], dest="lufs",
+         literal=audio_post.DEFAULT_LUFS, cfg="-14", want=-14.0,
+         explicit=["--lufs", "-9"], eval=-9.0),
+    dict(key="sfx", mod=sfx, argv=["sfx", "p"], dest="true_peak",
+         literal=audio_post.DEFAULT_TRUE_PEAK, cfg="-1.5", want=-1.5,
+         explicit=["--true-peak", "-2"], eval=-2.0),
+    dict(key="music", mod=music, argv=["music", "p"], dest="sample_rate",
+         literal=audio_post.DEFAULT_SAMPLE_RATE, cfg="44100", want=44100,
+         explicit=["--sample-rate", "96000"], eval=96000),
+    dict(key="master", mod=master, argv=["master", "in.wav"], dest="bit_depth",
+         literal=audio_post.DEFAULT_BIT_DEPTH, cfg="16", want=16,
+         explicit=["--bit-depth", "32"], eval=32),
+    dict(key="sfx", mod=sfx, argv=["sfx", "p"], dest="loop_crossfade",
+         literal=audio_post.DEFAULT_LOOP_CROSSFADE, cfg="3", want=3.0,
+         explicit=["--loop-crossfade", "4"], eval=4.0),
+
+    # #57 Class C2 -- poll cadence. Sections, not globals: video deliberately
+    # polls slower, so the literals differ per command.
+    dict(key="sfx", mod=sfx, argv=["sfx", "p"], dest="poll_interval",
+         literal=cfg.SFX_POLL_INTERVAL_SEC, cfg="0.5", want=0.5,
+         explicit=["--poll-interval", "1.5"], eval=1.5),
+    dict(key="sfx", mod=sfx, argv=["sfx", "p"], dest="max_wait",
+         literal=cfg.SFX_POLL_MAX_WAIT_SEC, cfg="60", want=60.0,
+         explicit=["--max-wait", "120"], eval=120.0),
+    dict(key="music", mod=music, argv=["music", "p"], dest="poll_interval",
+         literal=cfg.MUSIC_POLL_INTERVAL_SEC, cfg="0.25", want=0.25,
+         explicit=["--poll-interval", "3.5"], eval=3.5),
+    dict(key="music", mod=music, argv=["music", "p"], dest="max_wait",
+         literal=cfg.MUSIC_POLL_MAX_WAIT_SEC, cfg="45", want=45.0,
+         explicit=["--max-wait", "90"], eval=90.0),
+    dict(key="video", mod=video, argv=["video", "p"], dest="poll_interval",
+         literal=cfg.VIDEO_POLL_INTERVAL_SEC, cfg="2.5", want=2.5,
+         explicit=["--poll-interval", "7.5"], eval=7.5),
+    dict(key="video", mod=video, argv=["video", "p"], dest="max_wait",
+         literal=cfg.VIDEO_POLL_MAX_WAIT_SEC, cfg="120", want=120.0,
+         explicit=["--max-wait", "600"], eval=600.0),
+
+    # #57 Class D -- contact-sheet's grid knobs.
+    dict(key="contact_sheet", mod=contact_sheet, argv=["contact-sheet", "."],
+         dest="cols", literal=image_montage.DEFAULT_COLS, cfg="6", want=6,
+         explicit=["--cols", "3"], eval=3),
+    dict(key="contact_sheet", mod=contact_sheet, argv=["contact-sheet", "."],
+         dest="cell", literal=image_montage.DEFAULT_CELL, cfg="512x512",
+         want="512x512", explicit=["--cell", "128x128"], eval="128x128"),
+    dict(key="contact_sheet", mod=contact_sheet, argv=["contact-sheet", "."],
+         dest="background", literal=image_montage.DEFAULT_BACKGROUND,
+         cfg="black", want="black",
+         explicit=["--background", "#202020"], eval="#202020"),
+    dict(key="contact_sheet", mod=contact_sheet, argv=["contact-sheet", "."],
+         dest="padding", literal=image_montage.DEFAULT_PADDING, cfg="8", want=8,
+         explicit=["--padding", "2"], eval=2),
+    dict(key="contact_sheet", mod=contact_sheet, argv=["contact-sheet", "."],
+         dest="engine", literal=image_montage.DEFAULT_ENGINE, cfg="montage",
+         want="montage", explicit=["--engine", "ffmpeg"], eval="ffmpeg"),
 ]
 
 
@@ -703,10 +797,36 @@ class TestClassCParity(unittest.TestCase):
         never becomes so. Pins the half-done state."""
         for case in _CLASS_C_CASES:
             with self.subTest(cmd=case["key"], dest=case["dest"]):
-                dests = {d for d, _ in uc._COMMAND_MAP[case["key"]].values()}
+                dests = {d for d, _ in _rows_for(case["key"]).values()}
                 self.assertIn(case["dest"], dests,
-                              msg=f"no _COMMAND_MAP['{case['key']}'] row fills "
+                              msg=f"no config row fills {case['key']}."
                                   f"{case['dest']}")
+
+    def test_class_c_rows_are_not_vacuous(self):
+        """Each parity assertion must be able to FAIL. v0.72's review found rows
+        seeded with the same value on both sides of a precedence check, so the
+        test held no matter which layer won; this mechanizes the lesson.
+
+        Two constraints, one per assertion:
+          - `want != literal`, or `test_config_fills_none_dest` passes even if
+            config is ignored and the literal is what lands.
+          - `eval != want`, or `test_explicit_cli_beats_config` passes even if
+            config beats the command line.
+
+        `eval == literal` is deliberately allowed: a flag with only two legal
+        choices (`sfx --model`) cannot offer a third value, and the assertion
+        still discriminates, because a broken precedence would yield `want`.
+        """
+        for case in _CLASS_C_CASES:
+            with self.subTest(cmd=case["key"], dest=case["dest"]):
+                self.assertNotEqual(
+                    case["want"], case["literal"],
+                    msg=f"{case['key']}.{case['dest']}: cfg value equals the "
+                        "built-in literal -- test_config_fills_none_dest cannot fail")
+                self.assertNotEqual(
+                    case["eval"], case["want"],
+                    msg=f"{case['key']}.{case['dest']}: explicit value equals the "
+                        "cfg value -- test_explicit_cli_beats_config cannot fail")
 
     def test_status_model_is_not_config_backable(self):
         """`sfx-status`/`music-status` --model is job IDENTITY, not a preference:
@@ -714,19 +834,19 @@ class TestClassCParity(unittest.TestCase):
         reaching it would retarget an already-queued, already-charged job. The
         concrete argparse default is what makes `apply_defaults` skip the dest,
         so "tidying" it to None would silently reintroduce that bug."""
-        def status_parser(mod):
-            parser = argparse.ArgumentParser(prog="venice")
-            sub = parser.add_subparsers(dest="command")
-            mod.register_status(sub)
-            return parser
-
         for mod, argv, key, literal in (
             (sfx, ["sfx-status", "j1"], "sfx", sfx.DEFAULT_SFX_MODEL),
             (music, ["music-status", "j1"], "music", music.DEFAULT_MUSIC_MODEL),
         ):
             with self.subTest(cmd=key):
-                args = status_parser(mod).parse_args(argv)
+                args = _build_status_parser(mod).parse_args(argv)
                 self.assertEqual(args.model, literal)  # NOT None
+                # ...while the two flags registered right beside it DID go
+                # None in Class C2, because cadence IS a preference. Asserting
+                # both here turns the "do not make these consistent" comment in
+                # `register_status` into something CI enforces.
+                self.assertIsNone(args.poll_interval)
+                self.assertIsNone(args.max_wait)
                 uc.apply_defaults(
                     args, key, {"defaults": {key: {"model": "retargeted"}}})
                 self.assertEqual(args.model, literal,
@@ -742,6 +862,11 @@ class TestClassCParity(unittest.TestCase):
             ("tts", tts, ["tts", "hi"], "format", "ogg"),
             ("sfx", sfx, ["sfx", "p"], "model", "bogus"),
             ("video", video, ["video", "p"], "duration", "99s"),
+            # #57 C2/D: the first int choice set, and the first choices row
+            # reached through _GLOBAL_MAP rather than a section.
+            ("master", master, ["master", "in.wav"], "bit_depth", 8),
+            ("contact_sheet", contact_sheet, ["contact-sheet", "."],
+             "engine", "imagemagick"),
         ]
         for key, mod, argv, dest, bad in cases:
             with self.subTest(cmd=key, dest=dest):
@@ -769,7 +894,8 @@ class TestClassCParity(unittest.TestCase):
         `config_defaults_for` do NOT catch (only TypeError/ValueError), breaking
         userconfig's "degrade, never crash" contract. Resolving every row here
         turns that runtime traceback into a CI failure."""
-        for section, rows in uc._COMMAND_MAP.items():
+        sections = [("_GLOBAL_MAP", uc._GLOBAL_MAP)] + list(uc._COMMAND_MAP.items())
+        for section, rows in sections:
             for key, (_dest, coerce) in rows.items():
                 if getattr(coerce, "__name__", "") != "coerce":
                     continue  # not a _one_of closure
@@ -785,12 +911,18 @@ class TestClassCParity(unittest.TestCase):
         carries argparse `choices=` must validate against that set, or config
         silently ships a value argparse would have exited 2 on."""
         mods = {"image": image, "image_edit": image_edit, "tts": tts, "sfx": sfx,
-                "music": music, "video": video, "upscale": upscale, "chat": chat}
+                "music": music, "video": video, "upscale": upscale, "chat": chat,
+                # #57 C2/D. `master` and `contact_sheet` matter most here: their
+                # choices-carrying rows (`bit_depth`, `engine`) are the first
+                # ever routed through `_GLOBAL_MAP` and the first with non-string
+                # choices, so a `_COMMAND_MAP`-only sweep would exempt them.
+                "master": master, "contact_sheet": contact_sheet,
+                "balance": balance}
         for section, mod in mods.items():
             parser = _build_parser(mod)
             sub = list(parser._subparsers._group_actions[0].choices.values())[0]
             by_dest = {a.dest: a for a in sub._actions}
-            for key, (dest, coerce) in uc._COMMAND_MAP.get(section, {}).items():
+            for key, (dest, coerce) in _rows_for(section).items():
                 action = by_dest.get(dest)
                 if action is None or not action.choices:
                     continue
@@ -800,6 +932,174 @@ class TestClassCParity(unittest.TestCase):
                         msg=f"defaults.{section}.{key} maps to a flag with "
                             f"choices={list(action.choices)!r} but is not "
                             "validated -- wrap it in _one_of")
+
+
+# --------------------------------------------------------------------------- #
+# #57 Class C2 -- the shared mastering chain as _GLOBAL_MAP rows.
+#
+# `audio_post.add_master_flags` registers one chain on three commands, so the
+# five valued knobs are globals rather than three duplicated sections. That
+# choice is only correct if two things hold, and both are asserted here: a bare
+# `defaults.lufs` must reach all three commands, and `defaults.<cmd>.lufs` must
+# still override it -- which `resolve_default` gives for free by checking the
+# command section first.
+# --------------------------------------------------------------------------- #
+_MASTER_CHAIN = ("lufs", "true_peak", "sample_rate", "bit_depth", "loop_crossfade")
+_MASTER_CMDS = ((master, ["master", "in.wav"], "master"),
+                (sfx, ["sfx", "p"], "sfx"),
+                (music, ["music", "p"], "music"))
+
+
+class TestMasterChainGlobals(unittest.TestCase):
+    def test_bare_global_reaches_all_three_commands(self):
+        doc = {"defaults": {"lufs": -14.0, "bit_depth": 16, "sample_rate": 44100}}
+        for mod, argv, key in _MASTER_CMDS:
+            with self.subTest(cmd=key):
+                args = _build_parser(mod).parse_args(argv)
+                uc.apply_defaults(args, key, doc)
+                self.assertEqual(args.lufs, -14.0)
+                self.assertEqual(args.bit_depth, 16)
+                self.assertEqual(args.sample_rate, 44100)
+
+    def test_section_overrides_the_global(self):
+        """The whole justification for the globals decision: per-command
+        override with no `_COMMAND_MAP` row, straight out of `resolve_default`."""
+        doc = {"defaults": {"lufs": -14.0, "sfx": {"lufs": -9.0}}}
+        args = _build_parser(sfx).parse_args(["sfx", "p"])
+        uc.apply_defaults(args, "sfx", doc)
+        self.assertEqual(args.lufs, -9.0)
+        args = _build_parser(music).parse_args(["music", "p"])
+        uc.apply_defaults(args, "music", doc)
+        self.assertEqual(args.lufs, -14.0)  # untouched by the sfx override
+
+    def test_literals_restore_the_pre_config_defaults(self):
+        """The UX contract for everyone who never opens config.json: with no
+        config at all, the ladder must land on exactly the old argparse values."""
+        for mod, argv, key in _MASTER_CMDS:
+            with self.subTest(cmd=key):
+                args = _build_parser(mod).parse_args(argv)
+                uc.apply_defaults(args, key, {})
+                audio_post.apply_master_literals(args)
+                self.assertEqual(
+                    audio_post.master_kwargs(args),
+                    dict(sample_rate=48000, bit_depth=24, lufs=-16.0,
+                         true_peak=-1.0, loop=False, loop_crossfade=2.0))
+
+    def test_globals_are_skipped_on_commands_without_the_flags(self):
+        """`apply_defaults`' hasattr guard is what keeps these globals from
+        minting dead attributes on every other command."""
+        args = _build_parser(image).parse_args(["image", "p"])
+        uc.apply_defaults(args, "image", {"defaults": {"lufs": -14.0}})
+        self.assertFalse(hasattr(args, "lufs"))
+
+    def test_the_chain_is_declared_only_by_the_audio_commands(self):
+        """A global reaches ANY command declaring the dest. If some future
+        command grows a `--sample-rate`, it would silently inherit an audio
+        mastering preference -- so pin the current blast radius."""
+        parser = cli.build_parser()
+        subs = parser._subparsers._group_actions[0].choices
+        for dest in _MASTER_CHAIN:
+            with self.subTest(dest=dest):
+                have = {name for name, sp in subs.items()
+                        if dest in {a.dest for a in sp._actions}}
+                self.assertEqual(have, {"master", "sfx", "music"})
+
+    def test_bit_depth_coercer_accepts_ints(self):
+        """`_one_of` was string-only: `str(24)` never matches the int member 24,
+        so every legal value was rejected AND the error message itself raised
+        TypeError on `', '.join`. `--bit-depth` is the tree's only int choice
+        set, so nothing caught it until this row existed."""
+        coerce = dict(uc._GLOBAL_MAP)["bit_depth"][1]
+        self.assertEqual(coerce(16), 16)      # JSON int
+        self.assertEqual(coerce("24"), 24)    # string form
+        self.assertIsInstance(coerce("32"), int)
+        for bad in (8, "nope", "24.5", None):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    coerce(bad)
+
+    def test_bit_depths_match_the_codec_table(self):
+        """The choices are derived from `_CODECS`, so a depth can never be
+        offered that `master()` has no encoder for."""
+        self.assertEqual(set(audio_post.BIT_DEPTHS), set(audio_post._CODECS))
+
+
+# --------------------------------------------------------------------------- #
+# #57 Class C2 -- poll cadence, including the `-status` half and the deliberate
+# CLI-only/tool-visible split between the two flags.
+# --------------------------------------------------------------------------- #
+class TestPollCadenceParity(unittest.TestCase):
+    def test_status_parsers_are_tristate_and_config_backable(self):
+        """A `-status` parser shares its parent's section, so the cadence
+        preference must reach it too -- and it needs its own literal call, or a
+        config-free run leaves None in the poll loop."""
+        for mod, argv, key in ((sfx, ["sfx-status", "j1"], "sfx"),
+                               (music, ["music-status", "j1"], "music"),
+                               (video, ["video-status", "j1"], "video")):
+            with self.subTest(cmd=argv[0]):
+                args = _build_status_parser(mod).parse_args(argv)
+                self.assertIsNone(args.poll_interval)
+                self.assertIsNone(args.max_wait)
+                uc.apply_defaults(args, key, {"defaults": {
+                    key: {"poll_interval": 0.5, "max_wait": 60}}})
+                self.assertEqual(args.poll_interval, 0.5)
+                self.assertEqual(args.max_wait, 60.0)
+
+    def test_max_wait_reaches_the_tool_path_but_poll_interval_does_not(self):
+        """The documented asymmetry: `config_defaults_for` injects only keys the
+        impl accepts, and the tool impls fix their own cadence. Asserted here
+        rather than in test_mcp_serve, which is skipped without the mcp extra."""
+        from venice.commands import _mcp
+        doc = {"defaults": {s: {"poll_interval": 9.0, "max_wait": 42}
+                            for s in ("sfx", "music", "video")}}
+        for section, impl in (("sfx", _mcp.sfx_tool), ("music", _mcp.music_tool),
+                              ("video", _mcp.video_tool)):
+            with self.subTest(section=section):
+                got = uc.config_defaults_for(section, impl, doc)
+                self.assertEqual(got["max_wait"], 42.0)
+                self.assertNotIn("poll_interval", got)
+
+    def test_job_result_max_wait_is_not_config_reachable(self):
+        """`job_result`'s max_wait=0.0 means "one non-blocking probe" -- a
+        meaning, not a stand-in default. A sweep that tri-stated every max_wait
+        would turn it into a blocking call."""
+        import inspect
+
+        from venice.commands import _mcp
+        self.assertNotIn("job_result", uc._COMMAND_MAP)
+        self.assertEqual(
+            inspect.signature(_mcp.job_result_tool).parameters["max_wait"].default,
+            0.0)
+
+    def test_negative_cadence_warns_and_falls_back(self):
+        """Config must not be able to produce `time.sleep(-1)` (ValueError) or
+        an instantly-expired deadline."""
+        from venice.commands import _shared
+        args = _build_parser(sfx).parse_args(["sfx", "p"])
+        uc.apply_defaults(args, "sfx", {"defaults": {
+            "sfx": {"poll_interval": -1, "max_wait": -5}}})
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            _shared.apply_poll_defaults(args, label="sfx", interval=2.0, max_wait=300)
+        self.assertEqual(args.poll_interval, 2.0)
+        self.assertEqual(args.max_wait, 300)
+        self.assertIn("--poll-interval must be >= 0", err.getvalue())
+        self.assertIn("--max-wait must be >= 0", err.getvalue())
+
+    def test_zero_cadence_survives(self):
+        """0 is meaningful on both -- a tight loop and a single probe -- so it
+        must NOT be rewritten to the literal. This is the `is not None`, never
+        `or`, contract."""
+        from venice.commands import _shared
+        args = _build_parser(sfx).parse_args(["sfx", "p"])
+        uc.apply_defaults(args, "sfx", {"defaults": {
+            "sfx": {"poll_interval": 0, "max_wait": 0}}})
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            _shared.apply_poll_defaults(args, label="sfx", interval=2.0, max_wait=300)
+        self.assertEqual(args.poll_interval, 0.0)
+        self.assertEqual(args.max_wait, 0.0)
+        self.assertEqual(err.getvalue(), "")
 
 
 # --------------------------------------------------------------------------- #

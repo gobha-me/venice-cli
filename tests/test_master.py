@@ -266,6 +266,66 @@ class TestMasterCommand(unittest.TestCase):
         self.assertEqual(seen["out"], outdir.resolve() / "in.mastered.wav")
         self.assertFalse(seen["out"].is_dir())
 
+    def _parse(self, *argv):
+        """Parse the REAL parser. `_cmd_args` hand-builds a Namespace with the
+        five mastering values baked in, so it keeps passing even if the argparse
+        defaults and the literal layer disagree -- exactly the drift #57 Class
+        C2 introduces the risk of."""
+        from venice import cli
+        return cli.build_parser().parse_args(list(argv))
+
+    def test_real_parser_defaults_reach_the_ffmpeg_argv(self):
+        """The end-to-end proof that `apply_master_literals` is wired into
+        `master._run`. Without it every knob is None by the time `master_kwargs`
+        runs, and `sample_rate=None` lands in the argv as a literal `-ar None`
+        -- which no Namespace-fixture test can see."""
+        from venice.commands import master as master_cmd
+        Path("in.wav").write_bytes(b"x")
+        calls = []
+        with mock.patch("venice.audio_post.shutil.which", _which_all), \
+             mock.patch("venice.audio_post.subprocess.run", _fake_run(calls)):
+            rc = master_cmd._run(self._parse("master", "in.wav"))
+        self.assertEqual(rc, 0)
+        p2 = " ".join(calls[1])
+        self.assertIn("-ar 48000", p2)
+        self.assertIn("pcm_s24le", p2)
+        self.assertIn("I=-16", p2)
+        self.assertIn("TP=-1", p2)
+        # The tripwire for the silent-corruption mode: str(None) is "None", not
+        # an exception, so a missed literal shows up only as this substring.
+        self.assertNotIn("None", p2)
+
+    def test_config_globals_reach_the_ffmpeg_argv(self):
+        """`defaults.lufs`/`bit_depth`/`sample_rate` are `_GLOBAL_MAP` rows, so
+        they reach `venice master` with no `_COMMAND_MAP` section entry."""
+        from venice.commands import master as master_cmd
+        Path("in.wav").write_bytes(b"x")
+        doc = {"version": 1, "mcpServers": {},
+               "defaults": {"lufs": -14.0, "bit_depth": 16, "sample_rate": 44100}}
+        calls = []
+        with mock.patch("venice.userconfig.load_config", lambda *a, **k: doc), \
+             mock.patch("venice.audio_post.shutil.which", _which_all), \
+             mock.patch("venice.audio_post.subprocess.run", _fake_run(calls)):
+            rc = master_cmd._run(self._parse("master", "in.wav"))
+        self.assertEqual(rc, 0)
+        p2 = " ".join(calls[1])
+        self.assertIn("-ar 44100", p2)
+        self.assertIn("pcm_s16le", p2)
+        self.assertIn("I=-14", p2)
+
+    def test_explicit_flag_beats_the_config_global(self):
+        from venice.commands import master as master_cmd
+        Path("in.wav").write_bytes(b"x")
+        doc = {"version": 1, "mcpServers": {}, "defaults": {"sample_rate": 44100}}
+        calls = []
+        with mock.patch("venice.userconfig.load_config", lambda *a, **k: doc), \
+             mock.patch("venice.audio_post.shutil.which", _which_all), \
+             mock.patch("venice.audio_post.subprocess.run", _fake_run(calls)):
+            rc = master_cmd._run(
+                self._parse("master", "in.wav", "--sample-rate", "96000"))
+        self.assertEqual(rc, 0)
+        self.assertIn("-ar 96000", " ".join(calls[1]))
+
 
 if __name__ == "__main__":
     unittest.main()

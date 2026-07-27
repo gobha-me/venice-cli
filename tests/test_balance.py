@@ -33,6 +33,17 @@ def _patched_env():
 
 
 class TestBalance(unittest.TestCase):
+    def setUp(self):
+        # `balance._run` calls `userconfig.apply_defaults` since #57 Class D, so
+        # without this it would read the developer's real config.json -- and a
+        # `defaults.balance.min` there gates the EXIT CODE, silently flipping
+        # the threshold tests below depending on whose machine ran them.
+        _cfg = mock.patch(
+            "venice.userconfig.load_config",
+            lambda *a, **k: {"version": 1, "mcpServers": {}, "defaults": {}},
+        )
+        _cfg.start()
+        self.addCleanup(_cfg.stop)
 
     def test_default_prints_combined_total_to_stdout(self):
         from venice.commands import balance
@@ -102,6 +113,42 @@ class TestBalance(unittest.TestCase):
             ["DIEM allowance", "monthly credit", "USD cash"],
         )
         self.assertIn("BUNDLED_CREDITS", out["notes"])
+
+    def _run_with(self, doc, **argov):
+        """Run the real handler against `doc`. `_args` builds min=None, so the
+        only way `min` becomes 100 is `apply_defaults` filling it -- which is
+        exactly the call this asserts is present."""
+        from venice.commands import balance
+
+        buf = io.StringIO()
+        with mock.patch("venice.userconfig.load_config", lambda *a, **k: doc), \
+             _patched_env(), \
+             mock.patch(
+                 "venice.client.urllib.request.urlopen",
+                 lambda *a, **kw: FakeResp(
+                     200, json.dumps(_FAKE_DATA).encode(), "application/json"
+                 ),
+             ), \
+             mock.patch.object(sys, "stdout", buf), \
+             mock.patch.object(sys, "stderr", io.StringIO()):
+            return balance._run(_args(**argov))
+
+    def test_config_min_gates_the_exit_code(self):
+        """#57 Class D. Balance is 13.58; a config floor of 100 must fail the
+        run. Note what this means: `defaults.balance.min` is the one config key
+        that can make `venice balance` exit 1 in a script that never passed the
+        flag."""
+        doc = {"version": 1, "mcpServers": {},
+               "defaults": {"balance": {"min": 100.0}}}
+        self.assertEqual(self._run_with(doc), 1)
+
+    def test_explicit_min_beats_config(self):
+        doc = {"version": 1, "mcpServers": {},
+               "defaults": {"balance": {"min": 100.0}}}
+        self.assertEqual(self._run_with(doc, min=5.0), 0)
+
+    def test_no_config_means_no_floor(self):
+        self.assertEqual(self._run_with({"defaults": {}}), 0)
 
     def test_min_threshold_below_returns_exit_1(self):
         from venice.commands import balance

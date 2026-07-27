@@ -16,6 +16,7 @@ import urllib.error
 from pathlib import Path
 from unittest import mock
 
+from venice import config
 from tests.test_client import FakeResp
 
 
@@ -418,6 +419,92 @@ class TestMusicFlow(unittest.TestCase):
             finally:
                 empty.cleanup()
         self.assertEqual(rc, 2)
+
+
+class TestPollCadenceReachesRetrieve(unittest.TestCase):
+    """#57 Class C2: the poll cadence literals now live in
+    `_shared.apply_poll_defaults`, called by the handler -- not on the parser.
+
+    Every other test in this file hand-builds a Namespace with
+    `poll_interval`/`max_wait` already set, so all of them keep passing if a
+    handler forgets that call. These parse the REAL parser and let the handler
+    fill, which is the only way the omission is visible. It matters because a
+    leftover None is a TypeError inside the poll loop -- and for
+    `poll_interval` only on the SECOND iteration, so a fast job hides it and a
+    slow one crashes after the spend.
+    """
+
+    def setUp(self):
+        _cfg = mock.patch(
+            "venice.userconfig.load_config",
+            lambda *a, **k: {"version": 1, "mcpServers": {}, "defaults": {}},
+        )
+        _cfg.start()
+        self.addCleanup(_cfg.stop)
+
+    @staticmethod
+    def _parse(*argv):
+        from venice import cli
+        return cli.build_parser().parse_args(list(argv))
+
+    def _spy(self):
+        seen = {}
+
+        def fake(client, model, queue_id, output, poll_interval, max_wait,
+                 *a, **kw):
+            seen.update(poll_interval=poll_interval, max_wait=max_wait)
+            return 0
+
+        return seen, fake
+
+    def test_generate_uses_the_builtin_cadence(self):
+        from venice.commands import music as cmd
+        from venice.commands import _audio
+
+        responses = iter([
+            # music does a free /models?type=music lookup before the quote.
+            FakeResp(200, b'{"data": []}', "application/json"),
+            FakeResp(200, b'{"quote": 0.01}', "application/json"),
+            FakeResp(200, b'{"queue_id":"abcdef1234567890","status":"QUEUED"}',
+                     "application/json"),
+        ])
+        seen, fake = self._spy()
+        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.client.urllib.request.urlopen",
+                        lambda *a, **kw: next(responses)), \
+             mock.patch.object(_audio, "retrieve_and_save", fake):
+            rc = cmd._run_generate(
+                self._parse("music", "a prompt", "--yes", "--no-balance"))
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen["poll_interval"], config.MUSIC_POLL_INTERVAL_SEC)
+        self.assertEqual(seen["max_wait"], config.MUSIC_POLL_MAX_WAIT_SEC)
+
+    def test_status_uses_the_builtin_cadence(self):
+        from venice.commands import music as cmd
+        from venice.commands import _audio, _queue
+
+        seen, fake = self._spy()
+        with mock.patch.object(_queue, "build_client", lambda: (object(), 0)), \
+             mock.patch.object(_audio, "retrieve_and_save", fake):
+            rc = cmd._run_status(self._parse("music-status", "abcdef1234567890"))
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen["poll_interval"], config.MUSIC_POLL_INTERVAL_SEC)
+        self.assertEqual(seen["max_wait"], config.MUSIC_POLL_MAX_WAIT_SEC)
+
+    def test_config_cadence_reaches_both_halves(self):
+        from venice.commands import music as cmd
+        from venice.commands import _audio, _queue
+
+        doc = {"version": 1, "mcpServers": {},
+               "defaults": {"music": {"poll_interval": 0.5, "max_wait": 60}}}
+        seen, fake = self._spy()
+        with mock.patch("venice.userconfig.load_config", lambda *a, **k: doc), \
+             mock.patch.object(_queue, "build_client", lambda: (object(), 0)), \
+             mock.patch.object(_audio, "retrieve_and_save", fake):
+            rc = cmd._run_status(self._parse("music-status", "abcdef1234567890"))
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen["poll_interval"], 0.5)
+        self.assertEqual(seen["max_wait"], 60.0)
 
 
 if __name__ == "__main__":
