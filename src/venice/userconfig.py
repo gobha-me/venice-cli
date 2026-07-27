@@ -523,6 +523,35 @@ _COMMAND_MAP = {
         "poll_interval": ("poll_interval", float),
         "max_wait": ("max_wait", float),
     },
+    # #57 Class D: `venice balance`, which had no `apply_defaults` call. Only
+    # `min` -- `--json`/`--verbose` are per-invocation OUTPUT MODES, not
+    # preferences, and stay CLI-only. Caveat worth knowing: `--min` gates the
+    # EXIT CODE, so this is the one config key that can make `venice balance`
+    # return 1 in a script that never passed the flag. `resolve_default`'s
+    # top-level fallthrough also lets a bare `defaults.min` land here; `balance`
+    # is the only command in the tree declaring a `min` dest, so nothing else
+    # can be hit by it.
+    "balance": {
+        "min": ("min", float),
+    },
+    # #57 Class D: `venice contact-sheet`, which had no `apply_defaults` call at
+    # all until now. Section name uses an UNDERSCORE (the `image_edit`
+    # precedent): dotted config keys split on `.` only, so a hyphenated section
+    # would be unreachable from `venice config set`.
+    # NOTE `background` here is a COLOR string. The identically-named dest on
+    # sfx/music/video is the `--background` store_true, but they never cross --
+    # those sections carry no `background` key, and `resolve_default` consults a
+    # top-level scalar only for a key some section actually declares.
+    # `output` is deliberately absent: the `output_dir` global already covers it,
+    # via `_shared.resolve_output`. This command has no agent/MCP tool surface.
+    "contact_sheet": {
+        "cols": ("cols", int),
+        "cell": ("cell", str),
+        "label": ("label", _as_bool),
+        "background": ("background", str),
+        "padding": ("padding", int),
+        "engine": ("engine", _one_of("venice.image_montage", "ENGINES")),
+    },
     "upscale": {
         # #57 Class C: literal now lives in `upscale._run`.
         "scale": ("scale", float),
