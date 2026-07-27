@@ -464,6 +464,26 @@ _COMMAND_MAP = {
         "compact_threshold": ("compact_threshold", int),
         "compact_keep_turns": ("compact_keep_turns", int),
         "session_max_spend": ("session_max_spend", float),
+        # #80 part 1a: the cold-context reviewer rail. `review_model` is the
+        # decorrelation knob -- the reviewer should not be the model that authored.
+        "review": ("review", _as_bool),
+        "review_model": ("review_model", str),
+        "review_rounds": ("review_rounds", int),
+    },
+    # #80 part 1a: `venice review`. Every row here is a standing preference (which
+    # model reviews, how hard to look, what counts as a failure); the per-invocation
+    # knobs (--json, --path, the focus positional) stay CLI-only.
+    "review": {
+        "model": ("model", str),
+        "base": ("base", str),
+        "rounds": ("rounds", _positive),
+        "effort": ("effort", _one_of("venice.commands._review", "EFFORT_CHOICES")),
+        "context": ("context", _one_of("venice.commands._review", "CONTEXT_CHOICES")),
+        "fail_on": ("fail_on", _one_of("venice.commands._review", "FAIL_ON_CHOICES")),
+        "max_diff_chars": ("max_diff_chars", _positive),
+        "max_tool_calls": ("max_tool_calls", _positive),
+        "subagent_max_tokens": ("subagent_max_tokens", int),
+        "exec_timeout": ("exec_timeout", _positive),
     },
     "image": {
         # `--hide-watermark` / `--safe-mode` are tri-state (default None) so these

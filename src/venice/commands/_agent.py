@@ -2231,15 +2231,15 @@ def run_scout(
     """Run one disposable, read-only subagent turn-loop and return its report.
 
     A thin read-only wrapper over :func:`_run_disposable`. Invariant (fail loud): every
-    tool must be ``paid=False`` and none may be the scout itself -- a scout can never
-    spend, mutate, or spawn another scout. Raising here is defense-in-depth behind the
-    structural guarantee that ``_code.read_only_tools`` never builds such a tool.
+    tool must be ``paid=False`` and none may be a subagent tool -- a scout can never
+    spend, mutate, or dispatch another subagent. Raising here is defense-in-depth behind
+    the structural guarantee that ``_code.read_only_tools`` never builds such a tool.
     """
-    bad = [t.name for t in tools if t.paid or t.name == SCOUT_TOOL_NAME]
+    bad = [t.name for t in tools if t.paid or t.name in _SUBAGENT_TOOL_NAMES]
     if bad:
         raise ValueError(
             "scout subagent tools must be read-only (paid=False) and must not "
-            f"include the scout itself; got: {bad}"
+            f"include a scout, spawn, merge, or review tool; got: {bad}"
         )
     out = _run_disposable(
         oai, model, task, tools, base_kwargs, system=system,
@@ -2275,10 +2275,28 @@ SPAWN_TOOL_NAME = "venice_spawn"
 #: dispatch record list). A worker must never merge -- merging is the planner's job.
 MERGE_TOOL_NAME = "venice_merge"
 
+#: The cold-context reviewer (#80 part 1a). Named here with the other subagent tool
+#: names for one reason: every recursion guard in this module has to be able to reject
+#: it without importing ``_code`` (which owns the executable Tool). Keeping all four
+#: names co-located is what stops a guard silently forgetting one -- see
+#: :func:`run_scout`, :func:`run_spawn` and :func:`run_review`, which each reject the
+#: other three.
+REVIEW_TOOL_NAME = "venice_review"
+
+#: The four disposable-subagent tool names, as one set. Any of them inside a subagent's
+#: toolset would mean nesting deeper than one level, which is the containment invariant
+#: the #52 arc is built on. Guards reject ``_SUBAGENT_TOOL_NAMES - {their own}``.
+_SUBAGENT_TOOL_NAMES = frozenset({
+    SCOUT_TOOL_NAME, SPAWN_TOOL_NAME, MERGE_TOOL_NAME, REVIEW_TOOL_NAME,
+})
+
 #: Tool names that :func:`run_loop` may dispatch CONCURRENTLY under ``--parallel`` (#52).
 #: Only the two disposable, fresh-context, side-effect-isolated subagent calls qualify --
 #: ``venice_merge`` is deliberately EXCLUDED (it reads the shared ``dispatches`` list, and
 #: a name-based allowlist keeps any future ``category="agent"`` tool serial until opted in).
+#: ``venice_review`` (#80) would qualify -- it is disposable, fresh-context and
+#: side-effect-free -- but a review is normally one terminal call rather than a batch, so
+#: it stays serial in v1 rather than widening ``--parallel``'s semantics for no gain.
 _PARALLELIZABLE = frozenset({SCOUT_TOOL_NAME, SPAWN_TOOL_NAME})
 
 #: Upper bound on subagents dispatched concurrently in one turn. A small constant (not
@@ -2346,18 +2364,15 @@ def run_spawn(
 
     A thin wrapper over :func:`_run_disposable` that -- unlike :func:`run_scout` --
     ALLOWS paid/write tools (that is the point of a worker) but still rejects recursion:
-    no tool may be the spawn or the scout, so subagent nesting is capped at exactly one
-    level (the planner scouts/spawns; a worker does neither). A worker's containment is
+    no tool may be a subagent tool, so nesting is capped at exactly one level (the
+    planner scouts/spawns/reviews; a worker does none of them). A worker's containment is
     structural, not a confirm gate -- see the module note above and ``_code.spawn_tool``.
     """
-    bad = [
-        t.name for t in tools
-        if t.name in (SPAWN_TOOL_NAME, SCOUT_TOOL_NAME, MERGE_TOOL_NAME)
-    ]
+    bad = [t.name for t in tools if t.name in _SUBAGENT_TOOL_NAMES]
     if bad:
         raise ValueError(
-            "worker subagent tools must not include a spawn, scout, or merge tool "
-            f"(no nested subagents; merging is the planner's job); got: {bad}"
+            "worker subagent tools must not include a spawn, scout, merge, or review "
+            f"tool (no nested subagents; merging is the planner's job); got: {bad}"
         )
     if role:
         system = f"{system}\nYour role: {role}.\n"
@@ -2367,4 +2382,110 @@ def run_spawn(
     )
     if out.get("status") == "ok":
         out["fields"] = _parse_sections(out.get("report", ""), SPAWN_SECTIONS)
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Reviewer subagent (#80 part 1a): a disposable, read-only, diff-scoped reviewer.
+#
+# Same firewall as the scout, aimed at a different question. The scout answers "what is
+# true about this code?"; the reviewer answers "what is WRONG with this change?" -- and
+# it must answer it without having written the change, which is the whole point. The
+# evidence in aiforge#19: cold-context review of *merged* termforge work found 10
+# confirmed bugs in v0.1.0 with tests green across 11 build configs. Independent eyes
+# catch what breadth cannot.
+#
+# THE CONSTRAINT THIS PROMPT ENCODES: producing findings and certifying a diff are
+# SEPARATE operations, and this subagent only ever holds the first. A reviewer that
+# could record an approval would be useless as a gate, because the agent that wrote the
+# code holds `apply_patch` and `shell` and would simply write the approval itself --
+# not adversarially, just shortest-path-to-green. So the prompt says so out loud, the
+# toolset is read-only, and `venice review` writes nothing to disk. Gating is #80 part 1b.
+# --------------------------------------------------------------------------- #
+REVIEW_SYSTEM = (
+    "You are a REVIEWER subagent: a disposable, read-only code reviewer spun up to "
+    "review ONE diff, then discarded. You did NOT write this code and you have no "
+    "memory of how it came to be -- judge only what the diff shows. You start from a "
+    "fresh context with ONLY read-only tools (read files, list directories, grep, "
+    "read-only git). You CANNOT and must NOT edit files, run commands, apply a fix, "
+    "or record any approval anywhere. Producing findings is your entire job; deciding "
+    "whether the diff is acceptable is someone else's.\n\n"
+    "The diff below is the review scope. Read beyond it only to judge what the diff "
+    "does -- open a caller, a definition, a test -- and stop as soon as you can "
+    "decide. Do not review code the diff does not touch.\n\n"
+    "Report DEFECTS only: crashes, incorrect results, data loss, resource leaks, "
+    "race conditions, unhandled errors, security holes, broken invariants, missing "
+    "cleanup, off-by-one, and behaviour that contradicts the code's own stated "
+    "contract. Do NOT report formatting, naming, style preferences, or refactors that "
+    "are not defects. A short list of real defects is worth far more than a long list "
+    "of opinions; if the diff is sound, say so.\n\n"
+    "Every finding must be locatable and reproducible. If you cannot name a file, a "
+    "line, and a concrete scenario that triggers it, you do not have a finding yet -- "
+    "either verify it with a read, or leave it out and say so under NOT CHECKED.\n\n"
+    "End with a report using EXACTLY these sections:\n"
+    "SCOPE: the files you actually examined and how far past the diff you read.\n"
+    "FINDINGS: one block per defect, most severe first, or the single word 'none'. "
+    "Each block is exactly four lines, in this shape:\n"
+    "  <path>:<line> [blocker|major|minor] one-line statement of the defect\n"
+    "  WHY: the mechanism -- what the code does that is wrong.\n"
+    "  REPRO: the concrete input, call, or state that triggers it, and what happens "
+    "as a result. If you truly cannot name one, write 'REPRO: none -- <reason>'.\n"
+    "  FIX: the smallest change that would resolve it.\n"
+    "The path must be a path from the diff, exactly as it appears there, and the line "
+    "must be a line number in the NEW version of that file.\n"
+    "NOT CHECKED: what you did not verify, could not reach, or judged out of scope -- "
+    "be honest about gaps.\n"
+    "REVIEW: a final line that is exactly 'REVIEW: CLEAN' if you found no defects, or "
+    "exactly 'REVIEW: FINDINGS' if you listed one or more.\n"
+)
+
+# The section headers REVIEW_SYSTEM mandates, in order (see SCOUT_SECTIONS note). Unlike
+# the scout/spawn pairs this one is NOT honour-system: `test_review.py` asserts every
+# entry here appears literally in REVIEW_SYSTEM, so the prompt and the parser cannot drift.
+REVIEW_SECTIONS = (
+    "SCOPE",
+    "FINDINGS",
+    "NOT CHECKED",
+    "REVIEW",
+)
+
+
+def run_review(
+    oai,
+    model: str,
+    task: str,
+    tools: List[Tool],
+    base_kwargs: dict,
+    *,
+    max_tool_calls: int,
+    budget: Optional[_compact.Budget] = None,
+    ledger: Optional[CostLedger] = None,
+    focus: Optional[str] = None,
+    system: str = REVIEW_SYSTEM,
+) -> dict:
+    """Run one disposable, read-only reviewer subagent and return its report.
+
+    A thin read-only wrapper over :func:`_run_disposable`, shaped exactly like
+    :func:`run_scout`. Invariant (fail loud): every tool must be ``paid=False`` and none
+    may be a subagent tool -- a reviewer can never spend, mutate, or dispatch anything.
+    That is defense-in-depth behind the structural guarantee that the reviewer is built
+    from ``_code.read_only_tools``.
+
+    The returned dict is ``_run_disposable``'s, plus ``fields`` parsed against
+    :data:`REVIEW_SECTIONS`. It carries no verdict of its own and no notion of approval:
+    turning a report into a pass/fail decision is the caller's job (``_review``), and
+    turning a decision into a *gate* is nobody's job yet (#80 part 1b).
+    """
+    bad = [t.name for t in tools if t.paid or t.name in _SUBAGENT_TOOL_NAMES]
+    if bad:
+        raise ValueError(
+            "reviewer subagent tools must be read-only (paid=False) and must not "
+            f"include a scout, spawn, merge, or review tool; got: {bad}"
+        )
+    out = _run_disposable(
+        oai, model, task, tools, base_kwargs, system=system,
+        max_tool_calls=max_tool_calls, budget=budget, ledger=ledger, focus=focus,
+    )
+    if out.get("status") == "ok":
+        out["fields"] = _parse_sections(out.get("report", ""), REVIEW_SECTIONS)
     return out

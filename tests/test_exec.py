@@ -129,6 +129,28 @@ class TestGitCmd(unittest.TestCase):
         self.assertEqual(r["status"], "ok")
         self.assertEqual(run.call_args[0][0], ["git", "remote", "-v"])
 
+    def test_merge_base_is_allowed(self):
+        # #80 part 1a: `venice review` pins its diff range to merge-base(base, HEAD),
+        # so the subcommand has to reach subprocess. It computes a fork point and
+        # writes nothing, which is why it belongs in the read-only set.
+        with mock.patch("venice.commands._exec.subprocess.run") as run:
+            run.return_value = mock.Mock(returncode=0, stdout="abc123\n", stderr="")
+            r = _exec.git_cmd(self.root, "merge-base", args=["origin/master", "HEAD"])
+        self.assertEqual(r["status"], "ok")
+        self.assertEqual(run.call_args[0][0],
+                         ["git", "merge-base", "origin/master", "HEAD"])
+
+    def test_mutating_subcommands_still_refused(self):
+        # Anti-vacuity for the row above: widening the allow-list must not have
+        # widened it to writes. Never reaches subprocess.
+        for sub in ("commit", "checkout", "push", "merge", "reset", "clean"):
+            with self.subTest(sub=sub):
+                with mock.patch("venice.commands._exec.subprocess.run") as run:
+                    r = _exec.git_cmd(self.root, sub)
+                self.assertEqual(r["status"], "error")
+                self.assertIn("only read-only subcommands", r["message"])
+                run.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

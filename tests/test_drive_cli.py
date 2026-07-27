@@ -21,7 +21,10 @@ The pty tests skip without the `[test]` extra; the non-pty ones always run.
 """
 import importlib.util
 import json
+import os
+import shutil
 import stat
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -204,6 +207,90 @@ class TestDriveNonInteractive(_DriveCase):
         # Encodes the intent of the comment at code.py:696 -- it must abort
         # *before* spending a plan turn.
         self.assertNotIn("/chat/completions", self.api.paths)
+
+
+# --------------------------------------------------------------------------
+# C2. venice review (#80 part 1a) -- the real CLI over a real git repo.
+#
+# The unit suite mocks `_agent.run_review`, so nothing there proves the
+# subcommand actually collects a diff from git, reaches the API, and comes back
+# with an exit code. These do, against the loopback fake.
+# --------------------------------------------------------------------------
+
+class TestDriveReview(_DriveCase):
+    """`venice review` end to end: real git, real process, fake API."""
+
+    def _repo(self, extra=None):
+        """A project dir that is a git repo with one committed baseline."""
+        env = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null",
+               "GIT_AUTHOR_NAME": "T", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+               "GIT_COMMITTER_NAME": "T", "GIT_COMMITTER_EMAIL": "t@example.invalid"}
+        full = dict(os.environ)
+        full.update(env)
+
+        def git(*a):
+            subprocess.run(["git", *a], cwd=str(self.project), env=full,
+                           check=True, capture_output=True, text=True)
+
+        git("init", "-q", "-b", "master", ".")
+        (self.project / "app.py").write_text("def add(a, b):\n    return a + b\n")
+        git("add", "-A")
+        git("commit", "-qm", "baseline")
+        for rel, text in (extra or {}).items():
+            p = self.project / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(text)
+
+    @unittest.skipUnless(shutil.which("git"), "git is not installed")
+    @needs_openai
+    def test_review_collects_a_real_diff_and_reports_findings(self):
+        self._repo({"app.py": "def add(a, b):\n    return a - b\n"})
+        self.api.reply(
+            "SCOPE: app.py\n\nFINDINGS:\napp.py:2 [blocker] add() subtracts\n"
+            "WHY: the operator is wrong.\n"
+            "REPRO: add(2, 1) returns 1 instead of 3.\n"
+            "FIX: restore `a + b`.\n\nNOT CHECKED: nothing\n\nREVIEW: FINDINGS"
+        )
+        # The default is 2 rounds, so queue the second pass too: it finds nothing
+        # new, which is what makes the until-dry loop stop at 2 instead of 3.
+        self.api.reply("SCOPE: app.py\n\nFINDINGS: none\n\nNOT CHECKED: nothing\n\n"
+                       "REVIEW: FINDINGS")
+        cp = self.run_cli("review", "--root", str(self.project), "--json")
+        self.assertEqual(cp.returncode, 1, cp.stderr)      # blocker >= --fail-on major
+        env = json.loads(cp.stdout)
+        self.assertEqual(env["verdict"], "findings")
+        self.assertEqual(env["files_reviewed"], ["app.py"])
+        self.assertEqual(env["findings"][0]["severity"], "blocker")
+        self.assertEqual(env["findings"][0]["line"], 2)
+        self.assertRegex(env["base_sha"], r"^[0-9a-f]{40}$")
+        # The fake ships two function-calling models from different families, so
+        # the reviewer must NOT be the catalog default the author would use.
+        self.assertEqual(env["model"], "venice-uncensored")
+        self.assertTrue(env["decorrelated"])
+        # #80's separation constraint, at the process level: a real run that found a
+        # real blocker still leaves nothing behind.
+        self.assertEqual(list(self.project.glob("*.json")), [])
+        self.assertFalse((self.project / ".venice").exists())
+        self.assertEqual(self.sessions(), [])
+
+    @unittest.skipUnless(shutil.which("git"), "git is not installed")
+    def test_docs_only_review_spends_nothing(self):
+        # The cost-discipline claim as a process-level fact: no /chat/completions,
+        # and no /models either -- triage runs before the client is ever built.
+        self._repo({"README.md": "hello\nmore\n"})
+        cp = self.run_cli("review", "--root", str(self.project), "--json")
+        self.assertEqual(cp.returncode, 0, cp.stderr)
+        env = json.loads(cp.stdout)
+        self.assertEqual(env["status"], "skipped")
+        self.assertIsNone(env["verdict"])
+        self.assertNotIn("/chat/completions", self.api.paths)
+        self.assertEqual(self.api.paths, [])
+
+    @unittest.skipUnless(shutil.which("git"), "git is not installed")
+    def test_review_outside_a_git_repo_exits_2(self):
+        cp = self.run_cli("review", "--root", str(self.project))
+        self.assertEqual(cp.returncode, 2)
+        self.assertIn("not a git repository", cp.stderr)
 
 
 # --------------------------------------------------------------------------

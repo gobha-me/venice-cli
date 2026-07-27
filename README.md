@@ -20,8 +20,9 @@ Ships working `venice login`, `venice sfx` (sound-effect generation),
 `venice master` (audio mastering), `venice contact-sheet` (montage grids of
 generated images), `venice chat` (one-shot or interactive chat completions with
 Venice extensions), `venice embed` (text embeddings), `venice index` /
-`venice search` (project semantic search), `venice balance` (budget
-tracking), and `venice models` (catalog browser).
+`venice search` (project semantic search), `venice review` (cold-context code
+review of a diff), `venice balance` (budget tracking), and `venice models`
+(catalog browser).
 
 ## Install
 
@@ -1240,6 +1241,7 @@ complete — a loud stderr warning is printed).
 | `task_add` / `task_update` / `task_list` | a project-only checklist the agent tracks (`pending`/`in_progress`/`done`) — **opt-in with `--memory`** | no |
 | `venice_scout` | delegate a read-only investigation to a disposable subagent with a fresh context; returns a structured report so exploration doesn't pollute the main context — **opt-in with `--scout`** (see [Scout subagent](#scout-subagent---scout)) | no |
 | `venice_web_search` | search the web to **discover** documentation you don't have a URL for; returns a short answer + cited URLs (billed, but bounded by the tool-call budget) — **opt-in with `--web-search`** (see [Web search](#web-search---web-search)) | no |
+| `venice_review` | hand the current diff to a **cold-context reviewer** — a disposable subagent with a fresh context, read-only tools and (where the catalog allows) a different model — and get back defects with `file:line` + a repro. Findings only: it approves and certifies nothing — **opt-in with `--review`** (see [Reviewer rail](#reviewer-rail---review)) | no |
 
 **Safety.** Every filesystem path is resolved and confined to the **writable roots** —
 the startup root (default: cwd, or `--root` / `$VENICE_CODE_ROOT`) plus any added with
@@ -1281,6 +1283,9 @@ it unrestricted (unchanged behavior).
 | `--planner` | planner harness: implies `--scout --spawn --memory`, mandates the decompose → dispatch → track → **merge** protocol, and adds `venice_merge` — a consolidated rollup of every dispatch (see [Planner harness](#planner-harness---planner)) |
 | `--parallel` | dispatch **independent** `venice_scout`/`venice_spawn` subagents **concurrently** (bounded pool) instead of one at a time, so a planner's independent units overlap in wall-clock; opt-in, serial otherwise; config `defaults.code.parallel` (see [Parallel dispatch](#parallel-dispatch---parallel)) |
 | `--web-search` / `--web-search-model MODEL` | expose `venice_web_search` so the agent can **discover** documentation on the web (answer + cited URLs); pairs with `--browser` to then read a cited page under the `browser.*` policy (see [Web search](#web-search---web-search)) |
+| `--review` | expose `venice_review`: hand the current diff to a **cold-context reviewer** (fresh context, read-only tools, a different model where one exists) and fix what it reports before handing work back. Capped at **3 reviews per session**. Findings only — a review is not a merge gate (see [Reviewer rail](#reviewer-rail---review)) |
+| `--review-model MODEL` | model for `--review` (default: a function-calling model from a **different family** than the coding model; falls back to the coding model with a warning); config `defaults.code.review_model` |
+| `--review-rounds N` | passes `venice_review` makes over the same diff (default **1**, max 3); config `defaults.code.review_rounds` |
 | `--auto-compact` | summarize older history once the prompt crosses `--compact-threshold` tokens (default 100 000), keeping the last `--compact-keep-turns` turns (default 10); long runs stay in-context |
 | `-i`, `--json`, `--model`, `--system` | interactive REPL · JSON envelope · model · extra system instructions |
 | `--persona NAME` | load `~/.config/venice/personas/NAME.md` as the system prompt at launch (`/persona` in the REPL) |
@@ -1293,7 +1298,7 @@ model and a sane `--max-tool-calls` when running unattended.
 
 Per-flag config defaults live under `defaults.code.*` (e.g. `model`, `root`, `auto`,
 `assets`, `scout`, `spawn`, `spawn_max_spend`, `subagent_max_tokens`, `planner`,
-`max_tool_calls`).
+`max_tool_calls`, `review`, `review_model`, `review_rounds`).
 
 #### Scout subagent (`--scout`)
 
@@ -1410,6 +1415,152 @@ venice code --planner --parallel --auto "Add unit tests for the parser, the form
 and the CLI — three independent modules. Decompose, dispatch the independent units \
 together, and merge."
 ```
+
+#### Reviewer rail (`--review`)
+
+`--review` adds one tool, `venice_review`, so the coding agent can **hand its own diff
+to a reviewer that did not write it** and fix the findings before handing work back. It
+is the same engine as [`venice review`](#code-review-venice-review) — see there for how
+the diff is scoped, how findings are formatted, and what the reviewer is and is not
+allowed to do.
+
+```bash
+venice code --review --auto "Fix the retry logic in client.py, then review your own \
+work and address anything the reviewer flags."
+```
+
+Two bounds worth knowing, both structural rather than prompt-enforced:
+
+- **3 reviews per session.** A fix→review→fix spiral is the obvious failure mode of
+  handing an agent a reviewer, and prose would not stop it. The 4th call is refused.
+- **The model is operator-controlled.** `--review-model` is resolved once at startup and
+  is *not* in the tool's schema, so the agent cannot escalate itself onto a costlier
+  reviewer — the same discipline `venice_web_search` uses.
+
+The reviewer is also unreachable from a `venice_spawn` worker (it is `category="agent"`,
+which no worker role is granted), so nesting stays capped at one level.
+
+**It cannot certify.** `venice_review` returns findings and has no way to record that a
+diff was reviewed. That is deliberate: the agent holds `apply_patch` and `run`, so any
+approval it *could* write it eventually *would* write — not adversarially, just because
+shortest-path-to-green is ordinary agent behaviour. See the note under
+[Code review](#code-review-venice-review).
+
+## Code review (`venice review`)
+
+A **cold-context reviewer**: a disposable subagent with a fresh context, only read-only
+tools, and — where the catalog offers one — a **different model** than the one that
+writes here. It reads a diff, not the repo, and reports defects.
+
+```bash
+# Review this branch (committed work AND uncommitted edits) against the default branch.
+venice review
+
+# Just what you haven't committed yet.
+venice review --base HEAD
+
+# Machine-readable, for a script or a controlling agent.
+venice review --json
+
+# Weigh one area in particular; fail the shell only on blockers.
+venice review "the retry and backoff paths" --fail-on blocker
+```
+
+**Why cold context.** This is the pilot for a quality pipeline designed after two review
+cycles on a sister C++ project: cold-context review of already-**merged** work found 10
+confirmed bugs in one release and a shipped-unusable feature in the next — all with
+tests green across 11 build configurations. Independent eyes catch what test breadth
+does not. Precise findings (a repro plus `file:line`) produced a 6/6 fix rate, which is
+why the report format is mandated rather than left to the model.
+
+**What gets reviewed.** By default, `git diff -W <merge-base(default-branch, HEAD)>` —
+which compares against your **working tree**, so one default covers both "review my
+branch before I open the PR" and an agent's "review what I just wrote". Untracked new
+files are included too (diffed against `/dev/null`), because a file that was just
+created is exactly the code most worth reviewing. The default branch is auto-detected
+(`origin/HEAD`, then `origin/main`, `origin/master`, `main`, `master`); override with
+`--base`. `-W` is git's own function-context flag, so each hunk arrives with its
+**enclosing function** in whatever language git has a driver for.
+
+**Surface triage.** Each changed file is classified, and by default the model is only
+called when the diff contains **code**:
+
+| bucket | examples | reviewed? |
+| --- | --- | --- |
+| code | `src/pool.cc`, `Makefile`, anything unrecognised | yes |
+| test | `tests/`, `*_test.go`, `*.spec.ts`, `conftest.py` | no |
+| docs | `*.md`, `docs/`, `LICENSE`, `CHANGELOG` | no |
+| generated | `package-lock.json`, `*.min.js`, `Cargo.lock` | no |
+| binary | anything git reports as binary | no |
+
+Triage runs **before** the SDK is imported or a client is built, so a docs-only diff
+costs zero API calls and needs neither the `[openai]` extra nor a key. Note the tradeoff
+this buys: a test-only diff that *deletes assertions* is real risk, and `auto` skips it
+— use `--effort always` to review changes to tests themselves.
+
+**Findings format.** Each defect is four lines, and the reviewer is told that a finding
+it cannot locate and reproduce is not a finding yet:
+
+```
+src/pool.cc:142 [blocker] Freed buffer is reused after release()
+WHY:   release() returns the slab to the freelist but the caller keeps its pointer.
+REPRO: acquire(), release(), then write through the old pointer at app.cc:88 → heap UAF.
+FIX:   null the caller-held pointer in release(), or return by value.
+```
+
+A missing or unrecognised severity is read as `major`, never `minor` — a quiet downgrade
+past `--fail-on` is worse than a noisy over-report. A finding naming a file the diff did
+not touch is reported separately and does **not** affect the exit code.
+
+**Rounds.** `--rounds` (default 2, max 3) re-passes over the *same* diff, telling each
+pass what the previous ones already reported and asking for what they missed. It stops
+early as soon as a pass finds nothing new.
+
+**Model decorrelation.** The reviewer defaults to a function-calling model from a
+**different family** than the catalog default (`qwen3-4b` and `qwen-2.5-coder` count as
+the same family — a different id alone is not decorrelation). If the catalog offers no
+alternative it reviews with the same model and says so loudly; that is never a hard
+error, but the output carries `decorrelated: false` so a caller can tell.
+
+| flag | effect |
+| --- | --- |
+| `--base REF` | review against this ref (default: auto-detected default branch); `--base HEAD` = uncommitted only |
+| `--path PATH` | limit the diff to these paths (repeatable) |
+| `--model M` | reviewer model (default: a different family than the catalog default) |
+| `--rounds N` | passes over the same diff (default 2, max 3); stops early when a pass adds nothing |
+| `--effort auto\|always\|never` | when to spend a model call (default `auto`: only if the diff has code) |
+| `--context function\|hunk` | enclosing-function context via `-W` (default) or plain hunks |
+| `--fail-on none\|minor\|major\|blocker` | severity that makes the command exit 1 (default `major`) |
+| `--max-diff-chars N` | cap the diff handed to the reviewer (default 60 000); files past the cap are named, never silently dropped |
+| `--max-tool-calls N` | cap the reviewer's own reads beyond the diff (default 8, max 20) |
+| `--subagent-max-tokens N` | cap cumulative tokens across all rounds (default off) |
+| `--json` | JSON envelope (findings, verdict, `base_sha`/`head_sha`, model) to stdout |
+
+Exit codes: **0** clean, skipped, or empty diff · **1** findings at or above `--fail-on`
+· **2** not a git repo / unknown `--base` / no key · **6** unknown `--model` · **10** no
+parseable verdict. Per-flag config defaults live under `defaults.review.*`.
+
+Human output splits streams: the findings go to **stdout** (so `venice review >
+findings.md` captures them and nothing else) and the provenance line — base, SHAs, model
+— goes to stderr.
+
+#### What `venice review` deliberately does not do
+
+**It produces findings. It does not certify anything.** There is no receipt, no
+signature, no approval artifact; a review writes **nothing to disk** — no session, no
+state, not one byte. The exit code reports what one run found; it is not a pass, and it
+is not a gate.
+
+That is the design, not a gap. A merge gate has to live somewhere the author cannot
+reach, and a coding agent holds `apply_patch` and `run` — so any receipt it *could*
+write it eventually *would* write, not adversarially but because shortest-path-to-green
+is ordinary agent behaviour. Fusing "find the bugs" with "declare this diff approved"
+would make the second operation worthless. They are kept apart so that real enforcement
+stays possible later; the `base_sha`/`head_sha` pair in the envelope exists so a future
+gate can bind a decision to a specific diff.
+
+Consistent with that, `status` distinguishes `"skipped"` from `"clean"`: "we did not
+look" must never be able to masquerade as "we looked and found nothing".
 
 ## MCP server
 
@@ -1570,6 +1721,9 @@ safety), it should be settable in config." Currently config-backable:
   catalog model and is effectively required (Venice advertises no default
   embedding model), while `embed_model` is the model name sent to an alternate
   `--embed-base-url` backend — different keys, and only one applies per run
+- `defaults.review.*` — `model`, `base`, `rounds`, `effort`, `context`, `fail_on`,
+  `max_diff_chars`, `max_tool_calls`, `subagent_max_tokens`, `exec_timeout`.
+  Setting `model` is the usual way to make reviewer/author decorrelation permanent
 - `defaults.chat.*`, `defaults.code.*`, `defaults.index.*`,
   `defaults.search.*` — see each command's section above
 
@@ -1637,8 +1791,12 @@ Veo 3.1, Kling, Runway Gen4, LTX-2, Wan 2.7, Seedance 2.0, and more.
 | 7 | poll timeout |
 | 8 | network / connection error |
 | 9 | disk write error |
-| 10 | acceptance verdict unparseable / ambiguous (`venice code`) |
+| 10 | verdict unparseable / ambiguous — acceptance (`venice code`) or review (`venice review`) |
 | 130 | Ctrl-C |
+
+`venice review` also uses **1** for "findings at or above `--fail-on` were reported".
+That reports what a run found; it is not a certification — see
+[what `venice review` deliberately does not do](#what-venice-review-deliberately-does-not-do).
 
 ## Audio playback caveat
 
@@ -1691,6 +1849,7 @@ The player list (`paplay` -> `aplay` -> `ffplay` -> `mpg123` -> `play`
 | `venice embed [TEXT] [--from-file PATH] [--model M] [--dimensions N] [--json] [--embed-base-url URL --embed-model M [--embed-ca-bundle PATH \| --embed-insecure]]` | text embeddings (OpenAI SDK; alt/local backend) |
 | `venice index [PATH] [--model M] [--embed-base-url URL --embed-model M [--embed-ca-bundle PATH \| --embed-insecure]] [...]` / `venice search QUERY [-k N] [--json] [--embed-ca-bundle PATH \| --embed-insecure]` | build / query a local semantic index of a project tree |
 | `venice code [TASK] [--auto\|--manual] [--plan-only] [-i] [--root DIR] [--continue\|--resume ID\|FILE] [--ephemeral] [--json] [...]` | coding agent: plan → accept → edit/run a project (needs `[openai]` + tool-calling model) |
+| `venice review [FOCUS] [--base REF] [--rounds N] [--effort auto\|always\|never] [--fail-on LEVEL] [--json]` | cold-context review of the current diff (fresh context, read-only, different model where available); **findings only — no gate, writes nothing** |
 | `venice mcp-serve` | run an MCP server (stdio) exposing venice tools (needs `[mcp]`) |
 | `venice config add\|list\|remove\|show` | manage the MCP server registry |
 | `venice config get\|set\|unset KEY [VALUE]` | manage default flag values |
@@ -1716,6 +1875,12 @@ that's where interactive breakage hides. It needs the test extra
 (`pip install -e ".[all,test]"`); without it the pty cases skip cleanly under
 `make test`, while `make drive` tells you the dep is missing rather than
 reporting a green run of nothing.
+
+The `venice review` tests build throwaway **git repositories** with real commits,
+because the reviewer shells out to git and a mocked git would only test the mock --
+`-z` rename records and `-W` function context are exactly what a fake gets wrong.
+They skip cleanly where no `git` binary is on `PATH`, and neutralize
+`GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` so they can never read your gitconfig.
 
 ## Uninstall
 

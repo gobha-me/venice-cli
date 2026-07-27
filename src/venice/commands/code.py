@@ -40,7 +40,8 @@ from typing import List, Optional
 
 from .. import auth, config, userconfig
 from ..client import build_client_from_auth
-from . import _agent, _code, _compact, _mailbox, _models, _openai, _repl, _session, _steer
+from . import (_agent, _code, _compact, _mailbox, _models, _openai, _repl, _review,
+               _session, _steer)
 
 _DEFAULT_MAX_TOOL_CALLS = 25
 
@@ -320,6 +321,30 @@ def register(subparsers) -> None:
         "context-window size limit (re-sent history makes prompt tokens grow super-"
         "linearly), and is distinct from --max-tokens (per-turn output). Config: "
         "defaults.code.subagent_max_tokens (#52).",
+    )
+    grp.add_argument(
+        "--review", action="store_true", default=None, dest="review",
+        help="Expose venice_review: hand the current diff to a COLD-CONTEXT reviewer "
+        "-- a disposable subagent with a FRESH context, only read-only tools, and (where "
+        "the catalog allows) a different model, so it did not write the code it judges. "
+        "It returns defects with file:line, severity and a repro; the agent fixes them "
+        "before handing work back. FINDINGS ONLY: it cannot approve, certify, or record "
+        "anything, and a review is not a merge gate (#80). Capped at "
+        f"{_review.REVIEW_MAX_INVOCATIONS} reviews per session. Config: "
+        "defaults.code.review.",
+    )
+    grp.add_argument(
+        "--review-model", default=None, dest="review_model", metavar="MODEL",
+        help="Model for --review. Default: a function-calling model from a DIFFERENT "
+        "family than the coding model, so the reviewer's blind spots are not the "
+        "author's; falls back to the coding model with a warning when the catalog "
+        "offers no alternative. Config: defaults.code.review_model (#80).",
+    )
+    grp.add_argument(
+        "--review-rounds", type=int, default=None, dest="review_rounds", metavar="N",
+        help=f"Passes venice_review makes over the same diff (default "
+        f"{_review.REVIEW_TOOL_ROUNDS}, max {_review.REVIEW_HARD_ROUNDS}); each is a "
+        f"full model run. Config: defaults.code.review_rounds (#80).",
     )
     grp.add_argument(
         "--planner", action="store_true", default=None, dest="planner",
@@ -652,6 +677,26 @@ def _run(args) -> int:
                                       max_spend=getattr(args, "spawn_max_spend", None),
                                       max_tokens=subagent_max_tokens,
                                       dispatches=dispatches))
+    if bool(getattr(args, "review", None)):  # #80 part 1a: cold-context reviewer rail
+        # The reviewer's model is resolved ONCE here and never advertised in the tool
+        # schema (mirroring web_search_tool), so the agent cannot escalate itself onto
+        # a costlier model. A reviewer from a different family than the author is the
+        # point of the rail -- same-family is allowed but warned about, because
+        # refusing would make --review useless on a single-model catalog.
+        review_model, decorrelated = _review.resolve_reviewer_model(
+            models, getattr(args, "review_model", None), model)
+        if not decorrelated:
+            print(f"code: --review will use {review_model}, the same model family "
+                  "that is authoring -- blind spots are correlated. Pass "
+                  "--review-model to decorrelate.", file=sys.stderr)
+        tools.append(_review.review_tool(
+            oai, review_model, root, client, gen_kwargs, include_search=True,
+            default_rounds=getattr(args, "review_rounds", None)
+            or _review.REVIEW_TOOL_ROUNDS,
+            max_tokens=subagent_max_tokens,
+            exec_timeout=args.exec_timeout or _code.DEFAULT_EXEC_TIMEOUT,
+            decorrelated=decorrelated,
+        ))
     if ws_tool is not None:  # #77: parent (planner included) gets web discovery directly
         tools.append(ws_tool)
     if planner:

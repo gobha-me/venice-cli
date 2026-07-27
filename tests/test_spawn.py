@@ -281,6 +281,60 @@ class TestRunScout(_ScoutBase):
         with self.assertRaises(ValueError):
             _agent.run_scout(None, "m", "t", [scout_named], {}, max_tool_calls=3)
 
+    def test_recursion_guard_rejects_every_subagent_tool(self):
+        # #80: the guards used to name their siblings by hand, so each new subagent
+        # rail was one more place to forget. They now share `_SUBAGENT_TOOL_NAMES`;
+        # this drives every name through every guard so a future fifth rail that is
+        # added to the set but missed by a guard fails here.
+        schema = {"type": "object", "properties": {}}
+        guards = {
+            "run_scout": _agent.run_scout,
+            "run_spawn": _agent.run_spawn,
+            "run_review": _agent.run_review,
+        }
+        self.assertIn(_agent.REVIEW_TOOL_NAME, _agent._SUBAGENT_TOOL_NAMES)
+        for name in sorted(_agent._SUBAGENT_TOOL_NAMES):
+            tool = _agent.Tool(name, "d", schema,
+                               lambda a, *, confirm=False: {"status": "ok"},
+                               paid=False)
+            for label, fn in guards.items():
+                with self.subTest(tool=name, guard=label):
+                    with self.assertRaises(ValueError):
+                        fn(None, "m", "t", [tool], {}, max_tool_calls=3)
+
+    def test_review_guard_rejects_paid_tools(self):
+        # The reviewer is read-only like the scout: it may never spend or mutate.
+        # (run_spawn deliberately ALLOWS paid tools, so it is not in this loop.)
+        schema = {"type": "object", "properties": {}}
+        paid = _agent.Tool("write_file", "d", schema,
+                           lambda a, *, confirm=False: {"status": "ok"},
+                           paid=True, category="fs", tags=("write",))
+        with self.assertRaises(ValueError):
+            _agent.run_review(None, "m", "t", [paid], {}, max_tool_calls=3)
+
+    def test_review_sections_appear_verbatim_in_the_prompt(self):
+        # The scout/spawn SECTIONS tuples are kept in lockstep with their prompt text
+        # by a comment only -- nothing catches a rename. Pin it for the reviewer, where
+        # a drifted header means `_parse_sections` silently returns {} and every
+        # structured field disappears without any error.
+        for header in _agent.REVIEW_SECTIONS:
+            with self.subTest(header=header):
+                self.assertIn(header, _agent.REVIEW_SYSTEM)
+
+    def test_review_prompt_forbids_recording_approval(self):
+        # #80's separation constraint, at the prompt layer: the reviewer produces
+        # findings and must not believe certifying is part of its job. The structural
+        # halves of this (read-only toolset, nothing written to disk) are pinned in
+        # tests/test_review.py; this is the instruction that has to agree with them.
+        self.assertIn("record any approval anywhere", _agent.REVIEW_SYSTEM)
+        self.assertIn("Producing findings is your entire job", _agent.REVIEW_SYSTEM)
+        self.assertIn("deciding whether the diff is acceptable is someone else's",
+                      _agent.REVIEW_SYSTEM)
+        # ...and it must not be told it can edit. Lowercased so the assertion pins the
+        # prohibition rather than the prompt's emphasis styling.
+        low = _agent.REVIEW_SYSTEM.lower()
+        self.assertIn("cannot and must not edit files", low)
+
 
 class TestReadOnlyTools(_ScoutBase):
     def test_inner_toolset_is_read_only_and_scout_free(self):
