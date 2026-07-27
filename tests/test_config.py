@@ -8,6 +8,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import stat
 import sys
 import tempfile
@@ -18,10 +19,11 @@ from unittest import mock
 import venice.config as cfg
 import venice.userconfig as uc
 from venice import audio_post, cli, image_montage
+from venice.commands import _models
 from venice.commands import config as cfgcmd
 from venice.commands import (
-    balance, bg_remove, chat, code, contact_sheet, image, image_edit, index,
-    master, music, sfx, tts, upscale, video,
+    balance, bg_remove, chat, code, contact_sheet, embed, image, image_edit,
+    index, master, music, sfx, tts, upscale, video,
 )
 
 
@@ -389,7 +391,73 @@ _CLASS_A_CASES = [
         explicit=["index", "--exclude", "cli-pat"], edest="exclude",
         eval=["cli-pat"],
     ),
+    # #27: embed was in no parity table. `model` is the load-bearing key --
+    # Venice advertises no default-trait embedding model, so defaults.embed.model
+    # is the documented way to stop passing --model every time.
+    dict(
+        mod=embed, argv=["embed"], key="embed",
+        config={"model": "cfg-embed-model", "dimensions": 256,
+                "encoding_format": "base64", "embed_base_url": "http://cfg/v1",
+                "embed_model": "cfg-local", "embed_ca_bundle": "/cfg-ca.pem"},
+        expected={"model": "cfg-embed-model", "dimensions": 256,
+                  "encoding_format": "base64", "embed_base_url": "http://cfg/v1",
+                  "embed_model": "cfg-local", "embed_ca_bundle": "/cfg-ca.pem"},
+        explicit=["embed", "--model", "cli-embed-model"], edest="model",
+        eval="cli-embed-model",
+    ),
 ]
+
+
+# #27: the dotted keys `_models._print_config_hint` can print are hand-written
+# string literals at each call site, so nothing else stops one drifting from the
+# row it advertises. Scrape them out of the source rather than listing them here
+# -- a hand-kept list in a test can only ever agree with itself, and would not
+# notice a typo'd `defaults.embed.models` at the call site.
+_CONFIG_KEY_RE = re.compile(r'config_key="([^"]+)"')
+_COMMANDS_DIR = Path(_models.__file__).parent
+
+
+def _hinted_config_keys():
+    """{dotted key: [modules that pass it]} across every command module."""
+    found = {}
+    for path in sorted(_COMMANDS_DIR.glob("*.py")):
+        for key in _CONFIG_KEY_RE.findall(path.read_text()):
+            found.setdefault(key, []).append(path.name)
+    return found
+
+
+class TestHintedConfigKeys(unittest.TestCase):
+
+    def test_every_hinted_key_resolves_to_a_real_config_row(self):
+        keys = _hinted_config_keys()
+        # Anti-vacuity: if the scrape ever finds nothing (renamed kwarg, moved
+        # package) this test must fail rather than pass over an empty loop.
+        self.assertGreaterEqual(len(keys), 5, msg=f"scraped only {keys}")
+        for key, mods in sorted(keys.items()):
+            with self.subTest(key=key, mods=mods):
+                parts = key.split(".")
+                self.assertEqual(parts[0], "defaults", msg=key)
+                self.assertEqual(len(parts), 3, msg=key)
+                section, dest = parts[1], parts[2]
+                rows = _rows_for(section)
+                self.assertIn(
+                    dest, rows,
+                    msg=f"{key} (in {mods}) names no row in _COMMAND_MAP",
+                )
+
+    def test_hint_is_printed_verbatim_for_a_live_key(self):
+        """Ties a scraped key to what the helper actually emits, so the source
+        literal and the printed advice can't drift apart."""
+        err = io.StringIO()
+        with mock.patch.object(sys, "stderr", err):
+            _models.resolve_model(
+                None, [], label="embed", noun="embedding model",
+                config_key="defaults.embed.model",
+            )
+        self.assertIn(
+            "venice config set defaults.embed.model <id>", err.getvalue()
+        )
+        self.assertIn("defaults.embed.model", _hinted_config_keys())
 
 
 class TestClassAParity(unittest.TestCase):

@@ -3,8 +3,9 @@
 Extracted from `chat` so it, `embed`, and `video` share one copy of the free
 `/models?type=...` GET plus the default-trait/validation logic rather than each
 carrying its own. These helpers take primitive args (a model type, the requested
-id, a label and noun for messages) so they stay independent of any one command's
-argument shape.
+id, a label and noun for messages, and an optional config key naming the
+`defaults.<cmd>.model` that would make the choice permanent) so they stay
+independent of any one command's argument shape.
 
 The catalog GET is free, so commands call it before the paid request to validate
 `--model` and resolve a default without spending.
@@ -66,18 +67,45 @@ def supports_capability(models, model_id, key) -> Optional[bool]:
     return None
 
 
+def _print_config_hint(label: str, config_key: Optional[str]) -> None:
+    """Name the durable fix on the two "pass --model" failures, when the caller
+    has one.
+
+    Opt-in per call site and deliberately NEVER derived from `label`: `venice
+    video-status` restores `args.model` over `apply_defaults` on purpose (there
+    the model is job identity, not a preference), and the MCP `vision` tool has
+    no config section at all -- an auto-derived `defaults.<label>.model` would
+    advertise a key that does nothing in both cases.
+    """
+    if config_key:
+        print(
+            f"{label}: set one permanently with: "
+            f"venice config set {config_key} <id>",
+            file=sys.stderr,
+        )
+
+
 def resolve_model(
     requested: Optional[str],
     models: Optional[List[dict]],
     *,
     label: str,
     noun: str,
+    config_key: Optional[str] = None,
 ) -> Tuple[Optional[str], Optional[int]]:
     """Validate `requested` against the catalog, or pick the default.
 
     Returns (model_id, exit_code). exit_code is None on success. `label` prefixes
     error messages (e.g. "chat") and `noun` names the model kind in them (e.g.
     "text model").
+
+    `config_key` is the dotted key (e.g. "defaults.embed.model") that would make
+    a choice permanent. When given it adds a trailing hint to the two failures a
+    config value would actually fix -- an unfetchable catalog and a catalog with
+    no default advertised. The unknown-model failure deliberately gets no hint:
+    it already prints every legal id, and pointing at the config key would be
+    right for a stale `defaults.*.model` but wrong for a mistyped `--model`,
+    which this function has no way to tell apart.
     """
     if models is None:
         # Catalog unavailable: can't validate or pick a default.
@@ -87,6 +115,7 @@ def resolve_model(
             f"{label}: could not fetch the model catalog; pass --model explicitly",
             file=sys.stderr,
         )
+        _print_config_hint(label, config_key)
         return None, 2
 
     ids = [m.get("id") for m in models if isinstance(m, dict) and m.get("id")]
@@ -105,4 +134,5 @@ def resolve_model(
         "available: " + ", ".join(ids),
         file=sys.stderr,
     )
+    _print_config_hint(label, config_key)
     return None, 6

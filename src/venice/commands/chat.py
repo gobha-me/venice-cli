@@ -426,7 +426,8 @@ def _run(args) -> int:
 
     models = _models.catalog(client, "text")
     model, rc = _models.resolve_model(
-        args.model, models, label="chat", noun="text model"
+        args.model, models, label="chat", noun="text model",
+        config_key="defaults.chat.model",
     )
     if rc is not None:
         return rc

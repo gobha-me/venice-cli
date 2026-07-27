@@ -1008,9 +1008,13 @@ venice chat --mcp fs "Summarize the TODOs across the source files."
 ## Embeddings
 
 Turn text into embedding vectors with a Venice embedding model (`/embeddings`,
-via the OpenAI SDK). The model defaults to the catalog's `default`-trait
-embedding model; pass `--model` to pick another (see
-`venice models --type embedding`).
+via the OpenAI SDK). Venice advertises no `default`-trait embedding model, so
+`--model` is required (see `venice models --type embedding`); set
+`defaults.embed.model` to stop repeating it. The CLI refuses to pick one for you
+rather than silently charging for an arbitrary choice — embeddings are only
+comparable within one model's vector space, so a silent default would emit
+vectors from a different space into an existing store. With neither a `--model`
+nor a config default, `venice embed` exits 6 and names the config key.
 
 ```sh
 # Single input -> one JSON array on stdout.
@@ -1027,6 +1031,9 @@ venice embed "hello" | jq 'length'
 
 # Truncate dimensions (if the model supports it) and pick a model.
 venice embed "hello" --model text-embedding-qwen3-8b --dimensions 256
+
+# Or set the model once and stop passing --model.
+venice config set defaults.embed.model text-embedding-bge-m3
 
 # Full raw response object (model, data, usage) instead of bare vectors.
 venice embed "hello" --json | jq '.usage'
@@ -1558,7 +1565,12 @@ safety), it should be settable in config." Currently config-backable:
   aware this one changes an **exit code**: `venice balance` returns 1 when the
   balance is below it, so a script that never passed `--min` can start failing.
   `--json`/`--verbose` are per-invocation output modes and stay CLI-only
-- `defaults.chat.*`, `defaults.code.*`, `defaults.embed.*`, `defaults.index.*`,
+- `defaults.embed.*` — `model`, `dimensions`, `encoding_format`,
+  `embed_base_url`, `embed_model`, `embed_ca_bundle`. `model` is the **Venice**
+  catalog model and is effectively required (Venice advertises no default
+  embedding model), while `embed_model` is the model name sent to an alternate
+  `--embed-base-url` backend — different keys, and only one applies per run
+- `defaults.chat.*`, `defaults.code.*`, `defaults.index.*`,
   `defaults.search.*` — see each command's section above
 
 Per-invocation flags (`--dry-run`, `--json`, `--resume`, `--seed`, inputs and
@@ -1621,7 +1633,7 @@ Veo 3.1, Kling, Runway Gen4, LTX-2, Wan 2.7, Seedance 2.0, and more.
 | 3 | content policy block (422) |
 | 4 | rate limit (429) |
 | 5 | Venice 5xx |
-| 6 | job not found / expired (404) |
+| 6 | not found — job not found/expired (404), or a model missing from the catalog (unknown `--model`, or no default advertised) |
 | 7 | poll timeout |
 | 8 | network / connection error |
 | 9 | disk write error |

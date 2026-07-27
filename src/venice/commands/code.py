@@ -572,7 +572,8 @@ def _run(args) -> int:
 
     models = _models.catalog(client, "text")
     model, rc = _models.resolve_model(
-        args.model, models, label="code", noun="text model"
+        args.model, models, label="code", noun="text model",
+        config_key="defaults.code.model",
     )
     if rc is not None:
         return rc

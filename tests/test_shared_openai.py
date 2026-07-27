@@ -67,11 +67,11 @@ class TestDefaultModel(unittest.TestCase):
 
 class TestResolveModel(unittest.TestCase):
 
-    def _resolve(self, requested, models):
+    def _resolve(self, requested, models, **kw):
         err = io.StringIO()
         with mock.patch.object(sys, "stderr", err):
             mid, rc = _models.resolve_model(
-                requested, models, label="chat", noun="text model"
+                requested, models, label="chat", noun="text model", **kw
             )
         return mid, rc, err.getvalue()
 
@@ -103,6 +103,42 @@ class TestResolveModel(unittest.TestCase):
         self.assertEqual((mid, rc), (None, 6))
         self.assertIn("chat: no default text model advertised", err)
         self.assertIn("available: a, b", err)
+
+    # --- #27: the opt-in `defaults.<cmd>.model` hint ---
+    #
+    # Two separate hint tests on purpose: they pin the two _print_config_hint
+    # call sites independently, so deleting either one goes red on its own.
+
+    def test_config_hint_on_no_default(self):
+        mid, rc, err = self._resolve(
+            None, [_model("a")], config_key="defaults.embed.model"
+        )
+        self.assertEqual((mid, rc), (None, 6))
+        self.assertIn("venice config set defaults.embed.model <id>", err)
+
+    def test_config_hint_on_missing_catalog(self):
+        mid, rc, err = self._resolve(None, None, config_key="defaults.embed.model")
+        self.assertEqual((mid, rc), (None, 2))
+        self.assertIn("venice config set defaults.embed.model <id>", err)
+
+    def test_no_config_hint_when_key_absent(self):
+        """The anti-vacuity guard: without it, dropping `if config_key:` and
+        printing the bare None would still pass both tests above."""
+        self.assertNotIn("venice config set", self._resolve(None, None)[2])
+        self.assertNotIn(
+            "venice config set", self._resolve(None, [_model("a")])[2]
+        )
+
+    def test_unknown_model_gets_no_config_hint(self):
+        """Pins the deliberate omission (see resolve_model's docstring): the
+        unknown-model message already lists every legal id, and the hint would
+        be wrong for a mistyped --model."""
+        mid, rc, err = self._resolve(
+            "nope", [_model("a")], config_key="defaults.embed.model"
+        )
+        self.assertEqual((mid, rc), (None, 6))
+        self.assertIn("unknown text model 'nope'", err)
+        self.assertNotIn("venice config set", err)
 
     def test_label_and_noun_reach_the_messages(self):
         err = io.StringIO()
