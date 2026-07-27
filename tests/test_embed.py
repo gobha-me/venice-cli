@@ -71,9 +71,25 @@ def _embedding_payload():
     }).encode()
 
 
-def _urlopen_ok():
+def _embedding_payload_no_default():
+    """The catalog Venice actually serves since #27: no `default` trait on any
+    embedding model, so default_model() returns None."""
+    return json.dumps({
+        "object": "list",
+        "data": [
+            {"id": "text-embedding-bge-m3", "type": "embedding",
+             "model_spec": {"traits": []}},
+            {"id": "text-embedding-qwen3-8b", "type": "embedding",
+             "model_spec": {"traits": []}},
+        ],
+    }).encode()
+
+
+def _urlopen_ok(payload=None):
+    body = _embedding_payload() if payload is None else payload
+
     def _u(req, timeout=None):
-        return FakeResp(200, _embedding_payload(), "application/json")
+        return FakeResp(200, body, "application/json")
     return _u
 
 
@@ -93,12 +109,15 @@ def _fake_openai(result):
 
 class TestEmbed(unittest.TestCase):
 
-    def _run(self, args, result, stdout=None, stderr=None):
+    def _run(self, args, result, stdout=None, stderr=None,
+             payload=None, doc=None):
         from venice.commands import embed
         fake, captured = _fake_openai(result)
         with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
-             mock.patch("venice.userconfig.load_config", return_value=_clean_doc()), \
-             mock.patch("venice.client.urllib.request.urlopen", _urlopen_ok()), \
+             mock.patch("venice.userconfig.load_config",
+                        return_value=doc or _clean_doc()), \
+             mock.patch("venice.client.urllib.request.urlopen",
+                        _urlopen_ok(payload)), \
              mock.patch("openai.OpenAI", return_value=fake), \
              mock.patch.object(sys, "stdout", stdout or io.StringIO()), \
              mock.patch.object(sys, "stderr", stderr or io.StringIO()):
@@ -226,6 +245,53 @@ class TestEmbed(unittest.TestCase):
         self.assertEqual(rc, 6)
         self.assertEqual(fake.embeddings.create.call_count, 0)
         self.assertIn("no-such-model", err.getvalue())
+
+    # --- #27: Venice advertises no `default`-trait embedding model ---
+
+    def test_no_default_in_catalog_exits_6_before_the_paid_call(self):
+        err = io.StringIO()
+        rc, fake, captured = self._run(
+            _args(text="hi"), FakeEmbeddings([(0, [1.0])]), stderr=err,
+            payload=_embedding_payload_no_default(),
+        )
+        self.assertEqual(rc, 6)
+        # The load-bearing half: refusing costs nothing. A fallback to an
+        # arbitrary catalog id (issue #27 option 2) would make this 1.
+        self.assertEqual(fake.embeddings.create.call_count, 0)
+        self.assertIn("no default embedding model advertised", err.getvalue())
+        # Assert the WHOLE command including "<id>": a bare
+        # assertIn("...defaults.embed.model") also matches a typo'd
+        # "defaults.embed.models", which would point at a key that isn't real.
+        self.assertIn(
+            "venice config set defaults.embed.model <id>", err.getvalue()
+        )
+
+    def test_config_default_model_reaches_the_catalog_validation(self):
+        """defaults.embed.model is the documented fix for the above. Uses the
+        NON-default-trait id against the no-default catalog, so the assertion
+        cannot be satisfied by an accidental default-trait pick."""
+        doc = _clean_doc()
+        doc["defaults"] = {"embed": {"model": "text-embedding-qwen3-8b"}}
+        rc, fake, captured = self._run(
+            _args(text="hi"), FakeEmbeddings([(0, [1.0])]),
+            payload=_embedding_payload_no_default(), doc=doc,
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(captured["model"], "text-embedding-qwen3-8b")
+
+    def test_config_model_is_still_validated_against_the_catalog(self):
+        """A config-sourced model is not trusted blindly -- it takes the same
+        catalog check as --model, so a stale key fails before spending."""
+        err = io.StringIO()
+        doc = _clean_doc()
+        doc["defaults"] = {"embed": {"model": "no-such-model"}}
+        rc, fake, captured = self._run(
+            _args(text="hi"), FakeEmbeddings([(0, [1.0])]), stderr=err,
+            payload=_embedding_payload_no_default(), doc=doc,
+        )
+        self.assertEqual(rc, 6)
+        self.assertEqual(fake.embeddings.create.call_count, 0)
+        self.assertIn("unknown embedding model 'no-such-model'", err.getvalue())
 
     def test_no_input_exit_2(self):
         fake_stdin = mock.MagicMock()
