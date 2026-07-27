@@ -189,6 +189,9 @@ def run_cmd(root: str, command, *, timeout=None, exec_timeout: int = DEFAULT_EXE
 _GIT_READONLY = frozenset({
     "status", "diff", "log", "show", "branch", "ls-files", "blame", "remote",
     "rev-parse", "describe", "shortlog",
+    # `merge-base` computes the fork point of two refs and writes nothing (#80
+    # part 1a: `venice review` pins its diff range to merge-base(base, HEAD)).
+    "merge-base",
 })
 
 
