@@ -431,7 +431,7 @@ class TestVideoMediaInputs(unittest.TestCase):
 
 
 class TestPollCadenceReachesRetrieve(unittest.TestCase):
-    """#57 Class C2: the poll literals live in `_shared.apply_poll_defaults`,
+    """#57 Class C2: the poll literals live in `_shared.resolve_poll`,
     called by the handler, not on the parser.
 
     `_build_args` and every hand-built status Namespace in this file set
@@ -466,7 +466,7 @@ class TestPollCadenceReachesRetrieve(unittest.TestCase):
 
     def test_generate_uses_the_builtin_cadence(self):
         """The generate half. Without this, reverting `_run_generate`'s
-        `apply_poll_defaults` call left the WHOLE of test_video green."""
+        `resolve_poll` call left the WHOLE of test_video green."""
         from venice.commands import video
 
         responses = iter([

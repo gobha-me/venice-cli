@@ -1503,6 +1503,18 @@ The audio **mastering chain** (`lufs`, `true_peak`, `sample_rate`, `bit_depth`,
 --master` and `venice music --master` share one chain, so `defaults.lufs = -14`
 retargets all three at once. Any of them can still be overridden for a single
 command -- `defaults.sfx.lufs = -18` beats the global on `venice sfx` only.
+
+`output_dir` must name a directory that already **exists** — it is treated as a
+directory only when it is one, so a path that doesn't exist yet is used as the
+output *file* instead. (For `contact-sheet` that means an extension-less target,
+which ImageMagick/ffmpeg reject.)
+
+Those nine keys are the **complete** list of globals: everything else must be
+written under its command's section. A per-command key set at the top level
+(`defaults.max_wait`, `defaults.model`) is ignored rather than applied
+everywhere, because "everywhere" is rarely what it means — `defaults.max_wait =
+60` would have capped `venice video`, whose renders take minutes, so each one
+queued, charged, and then gave up waiting.
 **Precedence for any flag is: explicit CLI flag > environment variable > config
 file > built-in default** — so a config default never shadows
 something you pass on the command line or set in the environment.

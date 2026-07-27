@@ -128,9 +128,10 @@ def _run_generate(args) -> int:
     # #57 Class C2: the mastering chain's literals. Evaluated lazily by
     # `master_hook` at post-save time, but filled here so the namespace is whole.
     audio_post.apply_master_literals(args)
-    _shared.apply_poll_defaults(args, label="sfx",
-                                interval=config.SFX_POLL_INTERVAL_SEC,
-                                max_wait=config.SFX_POLL_MAX_WAIT_SEC)
+    args.poll_interval, args.max_wait = _shared.resolve_poll(
+        args.poll_interval, args.max_wait, label="sfx",
+        interval=config.SFX_POLL_INTERVAL_SEC,
+        max_wait_default=config.SFX_POLL_MAX_WAIT_SEC)
     if not args.prompt:
         print("sfx: prompt required (or use: venice sfx-status <id>)", file=sys.stderr)
         return 2
@@ -227,9 +228,10 @@ def _run_status(args) -> int:
     userconfig.apply_defaults(args, "sfx")
     # #57 Class C2: the cadence literals. This parser has no mastering flags
     # (status never masters), so only the poll pair needs filling here.
-    _shared.apply_poll_defaults(args, label="sfx-status",
-                                interval=config.SFX_POLL_INTERVAL_SEC,
-                                max_wait=config.SFX_POLL_MAX_WAIT_SEC)
+    args.poll_interval, args.max_wait = _shared.resolve_poll(
+        args.poll_interval, args.max_wait, label="sfx-status",
+        interval=config.SFX_POLL_INTERVAL_SEC,
+        max_wait_default=config.SFX_POLL_MAX_WAIT_SEC)
     client, rc = _queue.build_client()
     if rc != 0:
         return rc

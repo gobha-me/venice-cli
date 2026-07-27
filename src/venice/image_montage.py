@@ -65,10 +65,6 @@ def select_engine(preferred: str) -> Optional[str]:
     return None
 
 
-def default_output() -> Path:
-    return Path.cwd() / DEFAULT_OUTPUT_NAME
-
-
 def collect_inputs(inputs: List[str]) -> List[Path]:
     """Expand the positional arg(s) into a sorted list of image files.
 

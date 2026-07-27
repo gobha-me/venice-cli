@@ -257,6 +257,47 @@ def _as_list(v):
     return [str(v)]
 
 
+def _exact_int(v):
+    """int(), but refusing a value that would lose information.
+
+    Plain `int` silently truncates: `int(24.9)` is 24, so a config
+    `bit_depth: 24.9` would master at 24-bit while `--bit-depth 24.9` exits 2 on
+    argparse's `type=int`. That inverts this layer's rule -- config must never be
+    able to set a value the command line would refuse. A float that IS integral
+    (`24.0`, which is what a JSON writer may emit) is still accepted. (#57 C2)
+    """
+    if isinstance(v, bool):  # bool is an int subclass; never a sensible count
+        raise ValueError("expected an integer")
+    val = int(v)  # raises TypeError/ValueError for junk, as callers expect
+    if isinstance(v, float) and val != v:
+        raise ValueError(f"expected a whole number, got {v!r}")
+    return val
+
+
+def _non_negative(cast):
+    """Coercer for a numeric key where a negative value is never meaningful.
+
+    This belongs in the coercer layer, NOT in a handler, because the two config
+    surfaces are separate: a range check on the argparse path protects only the
+    CLI, while `config_defaults_for` feeds these SAME rows to the agent/MCP tool
+    impls. A negative `max_wait` there is expensive rather than merely wrong --
+    `_queue_media` has already POSTed `/audio/queue`, so the job is queued and
+    CHARGED, and `poll_retrieve`'s deadline is then already in the past, so the
+    first poll abandons it. A negative `poll_interval` reaches `time.sleep()`.
+
+    Raising ValueError routes into the warn-and-skip path both callers already
+    have, leaving the dest None so the built-in default applies -- the same
+    "degrade, never crash" contract as `_one_of`. (#57 Class C2)
+    """
+    def _check(v):
+        val = cast(v)
+        if val < 0:
+            raise ValueError("must be >= 0")
+        return val
+
+    return _check
+
+
 def _one_of(module: str, attr: str, cast=str):
     """Coercer factory for a config key whose flag carries argparse ``choices=``.
 
@@ -335,10 +376,10 @@ _GLOBAL_MAP = {
     # and `defaults.master` is already the `venice master` command's SECTION.
     "lufs": ("lufs", float),
     "true_peak": ("true_peak", float),
-    "sample_rate": ("sample_rate", int),
+    "sample_rate": ("sample_rate", _exact_int),
     # `--bit-depth` is the only flag in the tree whose `choices=` are ints, hence
     # the cast -- see `_one_of`.
-    "bit_depth": ("bit_depth", _one_of("venice.audio_post", "BIT_DEPTHS", int)),
+    "bit_depth": ("bit_depth", _one_of("venice.audio_post", "BIT_DEPTHS", _exact_int)),
     "loop_crossfade": ("loop_crossfade", float),
 }
 _COMMAND_MAP = {
@@ -463,8 +504,11 @@ _COMMAND_MAP = {
         # `_mcp.sfx_tool` (which declares it) with zero wrapper edits.
         # `poll_interval` is CLI-only -- the tool impls fix their own cadence --
         # the same documented asymmetry as `no_cleanup`.
-        "poll_interval": ("poll_interval", float),
-        "max_wait": ("max_wait", float),
+        # `_non_negative`, not bare float: these rows also feed the agent/MCP
+        # tool impls via `config_defaults_for`, where a negative max_wait
+        # abandons an already-charged job.
+        "poll_interval": ("poll_interval", _non_negative(float)),
+        "max_wait": ("max_wait", _non_negative(float)),
     },
     "music": {
         # #57 Class C: literal now lives in `music._run_generate`. Generate
@@ -486,8 +530,11 @@ _COMMAND_MAP = {
         # `_mcp.music_tool` (which declares it) with zero wrapper edits.
         # `poll_interval` is CLI-only -- the tool impls fix their own cadence --
         # the same documented asymmetry as `no_cleanup`.
-        "poll_interval": ("poll_interval", float),
-        "max_wait": ("max_wait", float),
+        # `_non_negative`, not bare float: these rows also feed the agent/MCP
+        # tool impls via `config_defaults_for`, where a negative max_wait
+        # abandons an already-charged job.
+        "poll_interval": ("poll_interval", _non_negative(float)),
+        "max_wait": ("max_wait", _non_negative(float)),
     },
     # #57 Class B: the standalone `venice master` command. Only `loop` -- the
     # valued knobs (--lufs/--true-peak/--sample-rate/--bit-depth/
@@ -520,8 +567,11 @@ _COMMAND_MAP = {
         # `_mcp.video_tool` (which declares it) with zero wrapper edits.
         # `poll_interval` is CLI-only -- the tool impls fix their own cadence --
         # the same documented asymmetry as `no_cleanup`.
-        "poll_interval": ("poll_interval", float),
-        "max_wait": ("max_wait", float),
+        # `_non_negative`, not bare float: these rows also feed the agent/MCP
+        # tool impls via `config_defaults_for`, where a negative max_wait
+        # abandons an already-charged job.
+        "poll_interval": ("poll_interval", _non_negative(float)),
+        "max_wait": ("max_wait", _non_negative(float)),
     },
     # #57 Class D: `venice balance`, which had no `apply_defaults` call. Only
     # `min` -- `--json`/`--verbose` are per-invocation OUTPUT MODES, not
@@ -545,11 +595,11 @@ _COMMAND_MAP = {
     # `output` is deliberately absent: the `output_dir` global already covers it,
     # via `_shared.resolve_output`. This command has no agent/MCP tool surface.
     "contact_sheet": {
-        "cols": ("cols", int),
+        "cols": ("cols", _exact_int),
         "cell": ("cell", str),
         "label": ("label", _as_bool),
         "background": ("background", str),
-        "padding": ("padding", int),
+        "padding": ("padding", _exact_int),
         "engine": ("engine", _one_of("venice.image_montage", "ENGINES")),
     },
     "upscale": {
@@ -583,13 +633,19 @@ def resolve_default(command: str, key: str, doc=None):
     section = defaults.get(command)
     if isinstance(section, dict) and key in section:
         return section[key]
-    if key in _COMMAND_MAP:
-        # `key` names a command section (e.g. "master"), so a top-level
-        # `defaults.master` is that command's table -- never a global scalar for
-        # a same-named FLAG like sfx/music's `--master`. Without this, a scalar
-        # `defaults.master = true` would leak into every command declaring a
-        # `master` dest while simultaneously making `defaults.master.loop`
-        # unreachable. (#57 Class B)
+    if key not in _GLOBAL_MAP:
+        # Globals are an explicit ALLOW-LIST: only a `_GLOBAL_MAP` key may be
+        # written as a top-level scalar. Anything a command section declares is
+        # a per-command preference and is reachable only as
+        # `defaults.<cmd>.<key>`. (#57 Class C2)
+        #
+        # This used to fall through for any key that didn't NAME a section, so a
+        # bare `defaults.max_wait = 60` reached sfx, music AND video alike --
+        # silently replacing video's deliberately-longer 900s built-in, which
+        # queues and CHARGES for a render and then abandons it. The same
+        # fallthrough let a bare `defaults.model` retarget every command with a
+        # `model` row. Both were undocumented; the section form still works and
+        # is what the README has always shown.
         return None
     val = defaults.get(key)
     if isinstance(val, dict):  # a command section, not a global scalar
@@ -638,14 +694,27 @@ def config_defaults_for(section: str, impl, doc=None) -> dict:
     return out
 
 
+def rows_for(command: str) -> dict:
+    """The key -> (dest, coercer) mapping that applies to `command`: the
+    command-agnostic globals, overlaid with the command's own section.
+
+    Public because tests assert "every configurable dest is covered" and must
+    ask the real resolver rather than rebuild this by hand -- a hand-copy silently
+    exempts any layer added later, which is exactly how the mastering chain
+    escaped the pre-C2 `_COMMAND_MAP`-only sweep. (#57 Class C2)
+    """
+    mapping = dict(_GLOBAL_MAP)
+    mapping.update(_COMMAND_MAP.get(command, {}))
+    return mapping
+
+
 def apply_defaults(args, command: str, doc=None) -> None:
     """Fill config-backed defaults onto `args`, but only where the dest is still
     None (so an explicit CLI flag always wins -- mirrors image._resolve_preset).
     Never raises: a bad config value is warned about and skipped."""
     if doc is None:
         doc = load_config()
-    mapping = dict(_GLOBAL_MAP)
-    mapping.update(_COMMAND_MAP.get(command, {}))
+    mapping = rows_for(command)
     for key, (dest, coerce) in mapping.items():
         if not hasattr(args, dest):
             continue  # this command doesn't declare the flag

@@ -314,15 +314,10 @@ def _build_status_parser(mod):
     return parser
 
 
-def _rows_for(key):
-    """The full key->(dest, coercer) mapping `apply_defaults` actually applies to
-    a command: the command-agnostic globals overlaid with its own section. Tests
-    that assert "every configurable dest is covered" must use this, not
-    `_COMMAND_MAP` alone -- the mastering chain lives in `_GLOBAL_MAP` (#57 C2),
-    so a `_COMMAND_MAP`-only check silently exempts it."""
-    mapping = dict(uc._GLOBAL_MAP)
-    mapping.update(uc._COMMAND_MAP.get(key, {}))
-    return mapping
+# The real resolver, not a copy of it: a hand-rebuilt mapping would silently
+# exempt any layer added later -- which is how the mastering chain escaped the
+# pre-C2 `_COMMAND_MAP`-only sweep in the first place. (#57 C2)
+_rows_for = uc.rows_for
 
 
 _CLASS_A_CASES = [
@@ -1004,6 +999,37 @@ class TestMasterChainGlobals(unittest.TestCase):
                         if dest in {a.dest for a in sp._actions}}
                 self.assertEqual(have, {"master", "sfx", "music"})
 
+    def test_only_global_map_keys_act_as_top_level_scalars(self):
+        """Globals are an explicit ALLOW-LIST (#57 C2). `resolve_default` used to
+        fall through to a top-level scalar for any key that didn't NAME a
+        section, so a bare `defaults.max_wait = 60` reached sfx, music AND video
+        -- silently replacing video's deliberately-longer 900s built-in, which
+        queues and CHARGES for a render and then abandons it. A bare
+        `defaults.model` retargeted every command with a `model` row the same
+        way. The per-command section form is unaffected."""
+        for key in ("max_wait", "poll_interval", "model", "duration", "cols"):
+            with self.subTest(key=key):
+                self.assertIsNone(
+                    uc.resolve_default("video", key, {"defaults": {key: 60}}),
+                    msg=f"bare defaults.{key} still acts as a global")
+        # ...while every real global still does.
+        self.assertEqual(
+            uc.resolve_default("video", "max_spend", {"defaults": {"max_spend": 2}}), 2)
+        self.assertEqual(
+            uc.resolve_default("sfx", "lufs", {"defaults": {"lufs": -14}}), -14)
+        # ...and the section form is untouched.
+        self.assertEqual(
+            uc.resolve_default("video", "max_wait",
+                               {"defaults": {"video": {"max_wait": 60}}}), 60)
+
+    def test_video_keeps_its_longer_builtin_wait(self):
+        """The concrete regression: the bare global must not shorten a video
+        render's deadline, because the job is queued and paid before the first
+        poll and the timeout abandons it."""
+        args = _build_parser(video).parse_args(["video", "p"])
+        uc.apply_defaults(args, "video", {"defaults": {"max_wait": 60}})
+        self.assertIsNone(args.max_wait)  # untouched -> the 900s literal applies
+
     def test_bit_depth_coercer_accepts_ints(self):
         """`_one_of` was string-only: `str(24)` never matches the int member 24,
         so every legal value was rejected AND the error message itself raised
@@ -1017,6 +1043,25 @@ class TestMasterChainGlobals(unittest.TestCase):
             with self.subTest(bad=bad):
                 with self.assertRaises(ValueError):
                     coerce(bad)
+
+    def test_int_rows_reject_a_lossy_value(self):
+        """Config must never set a value the CLI would refuse. Plain `int`
+        truncates -- `int(24.9) == 24` -- so `defaults.bit_depth = 24.9` would
+        have mastered at 24-bit while `--bit-depth 24.9` exits 2. An integral
+        float (`24.0`, which a JSON writer may emit) is still fine."""
+        rows = dict(uc._GLOBAL_MAP)
+        for key, good, integral_float, lossy in (
+            ("bit_depth", "16", 24.0, 24.9),
+            ("sample_rate", "48000", 44100.0, 44100.9),
+        ):
+            coerce = rows[key][1]
+            with self.subTest(key=key):
+                self.assertEqual(coerce(good), int(good))
+                self.assertEqual(coerce(integral_float), int(integral_float))
+                with self.assertRaises(ValueError):
+                    coerce(lossy)
+                with self.assertRaises(ValueError):
+                    coerce(True)  # bool is an int subclass; never a count
 
     def test_bit_depths_match_the_codec_table(self):
         """The choices are derived from `_CODECS`, so a depth can never be
@@ -1071,18 +1116,37 @@ class TestPollCadenceParity(unittest.TestCase):
             inspect.signature(_mcp.job_result_tool).parameters["max_wait"].default,
             0.0)
 
-    def test_negative_cadence_warns_and_falls_back(self):
-        """Config must not be able to produce `time.sleep(-1)` (ValueError) or
-        an instantly-expired deadline."""
-        from venice.commands import _shared
+    def test_negative_cadence_from_config_is_rejected_at_the_coercer(self):
+        """The guard has to live in the COERCER, not the handler: these rows also
+        feed the agent/MCP tool impls through `config_defaults_for`, where a
+        negative max_wait abandons a job that `_queue_media` has already queued
+        and CHARGED. A handler-side clamp protects only the CLI."""
+        from venice.commands import _mcp
+        doc = {"defaults": {"sfx": {"poll_interval": -1, "max_wait": -5}}}
+
+        # CLI surface: warn-and-skip leaves the dests None, so the literal wins.
         args = _build_parser(sfx).parse_args(["sfx", "p"])
-        uc.apply_defaults(args, "sfx", {"defaults": {
-            "sfx": {"poll_interval": -1, "max_wait": -5}}})
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            _shared.apply_poll_defaults(args, label="sfx", interval=2.0, max_wait=300)
-        self.assertEqual(args.poll_interval, 2.0)
-        self.assertEqual(args.max_wait, 300)
+            uc.apply_defaults(args, "sfx", doc)
+        self.assertIsNone(args.poll_interval)
+        self.assertIsNone(args.max_wait)
+        self.assertIn("must be >= 0", err.getvalue())
+
+        # Tool surface: the key is dropped entirely, so the impl default wins.
+        with contextlib.redirect_stderr(io.StringIO()):
+            got = uc.config_defaults_for("sfx", _mcp.sfx_tool, doc)
+        self.assertNotIn("max_wait", got)
+
+    def test_negative_cadence_typed_on_the_cli_falls_back(self):
+        """A value the user TYPED never passes through a coercer, so the handler
+        still clamps it -- `time.sleep(-1)` is a ValueError traceback."""
+        from venice.commands import _shared
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            interval, max_wait = _shared.resolve_poll(
+                -1.0, -5.0, label="sfx", interval=2.0, max_wait_default=300)
+        self.assertEqual((interval, max_wait), (2.0, 300))
         self.assertIn("--poll-interval must be >= 0", err.getvalue())
         self.assertIn("--max-wait must be >= 0", err.getvalue())
 
@@ -1094,11 +1158,13 @@ class TestPollCadenceParity(unittest.TestCase):
         args = _build_parser(sfx).parse_args(["sfx", "p"])
         uc.apply_defaults(args, "sfx", {"defaults": {
             "sfx": {"poll_interval": 0, "max_wait": 0}}})
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err):
-            _shared.apply_poll_defaults(args, label="sfx", interval=2.0, max_wait=300)
         self.assertEqual(args.poll_interval, 0.0)
         self.assertEqual(args.max_wait, 0.0)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            got = _shared.resolve_poll(args.poll_interval, args.max_wait,
+                                       label="sfx", interval=2.0, max_wait_default=300)
+        self.assertEqual(got, (0.0, 0.0))
         self.assertEqual(err.getvalue(), "")
 
 

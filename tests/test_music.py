@@ -423,7 +423,7 @@ class TestMusicFlow(unittest.TestCase):
 
 class TestPollCadenceReachesRetrieve(unittest.TestCase):
     """#57 Class C2: the poll cadence literals now live in
-    `_shared.apply_poll_defaults`, called by the handler -- not on the parser.
+    `_shared.resolve_poll`, called by the handler -- not on the parser.
 
     Every other test in this file hand-builds a Namespace with
     `poll_interval`/`max_wait` already set, so all of them keep passing if a
@@ -490,6 +490,71 @@ class TestPollCadenceReachesRetrieve(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(seen["poll_interval"], config.MUSIC_POLL_INTERVAL_SEC)
         self.assertEqual(seen["max_wait"], config.MUSIC_POLL_MAX_WAIT_SEC)
+
+    def test_master_chain_literals_reach_the_ffmpeg_kwargs(self):
+        """#57 Class C2. `_build_args` presets all five mastering dests, so it
+        cannot see a missing `apply_master_literals`. Drive the REAL parser with
+        --master instead: without that call every knob is None by the time
+        `master_hook` fires, and `master()` exits 2 on `--bit-depth None` --
+        AFTER the job has been queued, charged and downloaded."""
+        from venice.commands import music as cmd
+        from venice import cli
+
+        seen = {}
+        responses = iter([
+            FakeResp(200, b'{"data": []}', "application/json"),
+            FakeResp(200, b'{"quote": 0.01}', "application/json"),
+            FakeResp(200, b'{"queue_id":"abcdef1234567890","status":"QUEUED"}',
+                     "application/json"),
+            FakeResp(200, b"FAKEAUDIO", "audio/mpeg"),
+            FakeResp(200, b'{"success": true}', "application/json"),
+        ])
+        args = cli.build_parser().parse_args(
+            ["music", "a prompt", "--yes", "--no-balance", "--master"])
+        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.client.urllib.request.urlopen",
+                        lambda *a, **kw: next(responses)), \
+             mock.patch("venice.client.time.sleep"), \
+             mock.patch("venice.audio_post.has_ffmpeg", lambda: True), \
+             mock.patch("venice.audio_post.master",
+                        lambda i, o, **kw: seen.update(kw) or 0):
+            rc = cmd._run_generate(args)
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen, dict(sample_rate=48000, bit_depth=24, lufs=-16.0,
+                                    true_peak=-1.0, loop=False, loop_crossfade=2.0))
+        self.assertNotIn(None, seen.values())
+
+    def test_config_globals_reach_the_ffmpeg_kwargs(self):
+        """`defaults.lufs`/`bit_depth` are `_GLOBAL_MAP` rows, so they reach the
+        sfx/music mastering chain with no per-command section."""
+        from venice.commands import music as cmd
+        from venice import cli
+
+        doc = {"version": 1, "mcpServers": {},
+               "defaults": {"lufs": -14.0, "bit_depth": 16}}
+        seen = {}
+        responses = iter([
+            FakeResp(200, b'{"data": []}', "application/json"),
+            FakeResp(200, b'{"quote": 0.01}', "application/json"),
+            FakeResp(200, b'{"queue_id":"abcdef1234567890","status":"QUEUED"}',
+                     "application/json"),
+            FakeResp(200, b"FAKEAUDIO", "audio/mpeg"),
+            FakeResp(200, b'{"success": true}', "application/json"),
+        ])
+        args = cli.build_parser().parse_args(
+            ["music", "a prompt", "--yes", "--no-balance", "--master"])
+        with mock.patch("venice.userconfig.load_config", lambda *a, **k: doc), \
+             mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.client.urllib.request.urlopen",
+                        lambda *a, **kw: next(responses)), \
+             mock.patch("venice.client.time.sleep"), \
+             mock.patch("venice.audio_post.has_ffmpeg", lambda: True), \
+             mock.patch("venice.audio_post.master",
+                        lambda i, o, **kw: seen.update(kw) or 0):
+            rc = cmd._run_generate(args)
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen["lufs"], -14.0)
+        self.assertEqual(seen["bit_depth"], 16)
 
     def test_config_cadence_reaches_both_halves(self):
         from venice.commands import music as cmd
