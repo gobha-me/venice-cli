@@ -524,7 +524,9 @@ def _family(model_id: str) -> str:
     `qwen3-4b` and `qwen-2.5-coder` share family `qwen`, so picking a different *id*
     is not by itself decorrelation -- same family, largely the same blind spots.
     """
-    return re.split(r"[-._0-9]", (model_id or "").strip().lower(), 1)[0]
+    # `maxsplit=` by keyword: 3.13 deprecates passing it positionally, and the
+    # keyword form has been valid since long before the 3.9 floor.
+    return re.split(r"[-._0-9]", (model_id or "").strip().lower(), maxsplit=1)[0]
 
 
 def resolve_reviewer_model(models, requested: Optional[str],
