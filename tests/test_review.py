@@ -696,6 +696,27 @@ class TestRunCycle(_RepoBase):
                                     rounds=1)
         self.assertEqual(out["verdict"], "clean")
 
+    def test_verdict_retry_tokens_are_counted(self):
+        # The retry runs outside `_run_disposable`, so nothing else records it. An
+        # uncounted call is also an UNCAPPED one -- `--max-tokens` was silently not
+        # covering a call it was meant to bound.
+        oai = mock.MagicMock()
+        oai.chat.completions.create.return_value = FakeToolCompletion(
+            content="REVIEW: CLEAN",
+            usage={"prompt_tokens": 700, "completion_tokens": 7},
+        )
+
+        def _stub(*a, **kw):
+            kw["ledger"].record({"prompt_tokens": 10, "completion_tokens": 1})
+            return {"status": "ok", "tool_calls": 0, "truncated": False,
+                    "report": "SCOPE: x\nFINDINGS: none\n(forgot the line)"}
+
+        with mock.patch.object(_agent, "run_review", _stub):
+            out = _review.run_cycle(oai, "m", self.collected, {}, root=self.root,
+                                    rounds=1)
+        self.assertEqual(out["verdict"], "clean")   # the retry did its job...
+        self.assertEqual(out["tokens"], 718)        # ...and paid for it: 11 + 707
+
     def test_later_unreadable_round_does_not_erase_an_earlier_verdict(self):
         # Regression pin for a bug the drive suite caught: with the default 2 rounds,
         # a second pass that forgot the sentinel overwrote round 1's verdict with
