@@ -31,6 +31,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import List, Optional
 
@@ -318,7 +319,40 @@ def _stream_turn(oai, chat, model: str, messages: List[dict], gen_kwargs: dict):
 
 
 def _do_turn(oai, openai, chat, text, messages, gen_kwargs, state, args) -> None:
-    """Run one turn. Any failure/interrupt rolls the turn's messages back so the
+    """Run one turn and stamp the wall-clock window it blocked the prompt for (#81).
+
+    This is the "input -> able to type again" seam: `input(_PROMPT)` sits outside it
+    in `run`, so time spent thinking at the prompt is excluded for free, and all three
+    call sites are covered at once. It is also strictly more accurate than stamping
+    inside `run_loop` -- auto-compaction makes its own uncounted completion, and it
+    falls inside this window automatically.
+
+    The stamp lands in `finally` so the gate-skip, both rollback paths and an
+    unexpected exception are all timed; a turn that cost you 40 seconds and then
+    raised still cost you 40 seconds. `_autosave` then runs *after*, on a committed
+    turn only -- which is why the turn body lives in :func:`_turn` rather than being
+    wrapped in place. Python runs a try's `else` clause BEFORE its `finally`, so
+    autosaving inside the timed body would persist every session's elapsed exactly
+    one turn behind while its token counts were current. The atomic local rewrite
+    `_autosave` performs is not meaningfully part of the wait.
+    """
+    ledger = state.get("ledger")
+    t0 = time.monotonic()
+    try:
+        committed = _turn(oai, openai, chat, text, messages, gen_kwargs, state, args)
+    finally:
+        if ledger is not None:
+            ledger.record_turn(time.monotonic() - t0)
+    if committed:
+        # Committed turn only (the rollback paths return False): persist the
+        # session (#47), now including this turn's wall-clock.
+        _autosave(state, messages, gen_kwargs)
+
+
+def _turn(oai, openai, chat, text, messages, gen_kwargs, state, args) -> bool:
+    """One turn's body; True when it committed (see :func:`_do_turn` for the window).
+
+    Any failure/interrupt rolls the turn's messages back so the
     persistent history stays a valid, replayable conversation, and the session
     survives (only `/exit`/EOF ends the REPL).
 
@@ -342,7 +376,7 @@ def _do_turn(oai, openai, chat, text, messages, gen_kwargs, state, args) -> None
     if ledger is not None and ledger.over():
         print(f"(max-spend reached: {ledger.summary()}; turn skipped)",
               file=sys.stderr)
-        return
+        return False
     # Mid-run steering: a tool-loop turn drains this session's mailbox at each
     # checkpoint (#78, detached). On an interactive tty, #79 also makes the first Ctrl+C
     # pause and prompt for a steering line at the checkpoint; a second Ctrl+C (or Ctrl+C
@@ -378,12 +412,12 @@ def _do_turn(oai, openai, chat, text, messages, gen_kwargs, state, args) -> None
         # the first paused and prompted at the checkpoint without ending the turn.
         del messages[mark:]
         print("\n[turn aborted]", file=sys.stderr)
+        return False
     except openai.OpenAIError as e:
         del messages[mark:]
         chat._openai.status_to_exit(openai, e, "chat")  # prints; session survives
-    else:
-        # Committed turn only (the except clauses roll back): persist the session (#47).
-        _autosave(state, messages, gen_kwargs)
+        return False
+    return True
 
 
 def _autosave(state, messages, gen_kwargs) -> None:
