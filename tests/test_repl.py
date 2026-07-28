@@ -7,6 +7,7 @@ module's fakes so the two stay in lock-step.
 import contextlib
 import copy
 import io
+import itertools
 import json
 import os
 import sys
@@ -51,6 +52,20 @@ def tearDownModule():
     os.environ.pop("VENICE_MEMORY_DIR", None)
     if _SESSIONS_TMP:
         __import__("shutil").rmtree(_SESSIONS_TMP, ignore_errors=True)
+
+
+def _fake_clock(step=1.5):
+    """Patch `_repl`'s monotonic clock with a deterministic counter (#81).
+
+    A *callable*, not a `side_effect` list: the number of clock reads is an
+    implementation detail, and a list would raise StopIteration the moment the
+    production code took one more or one fewer -- turning a timing test into a
+    tripwire on unrelated refactors. A counter just yields a different (still
+    non-zero, still monotonic) duration.
+    """
+    ticks = itertools.count(0.0, step)
+    return mock.patch("venice.commands._repl.time.monotonic",
+                      side_effect=lambda: next(ticks))
 
 
 def _run_repl(args, results, inputs, *, stdout=None, stderr=None,
@@ -446,6 +461,186 @@ class TestRepl(unittest.TestCase):
         )
         self.assertEqual(rc, 0)
         self.assertIn("no usage recorded yet", err.getvalue())
+
+    # -- wall-clock per turn (#81) ------------------------------------------ #
+
+    def test_turn_records_its_wall_clock_window(self):
+        # `_do_turn` brackets "input -> able to type again"; /usage reports the total.
+        err = io.StringIO()
+        with _fake_clock():
+            rc, fake, calls = _run_repl(
+                _args(interactive=True),
+                [[FakeChunk("hi"),
+                  FakeChunk(usage={"prompt_tokens": 10, "completion_tokens": 2})]],
+                ["hey", "/usage", "/exit"], stderr=err, urlopen=_urlopen_ok(),
+            )
+        self.assertEqual(rc, 0)
+        out = err.getvalue()
+        self.assertIn("wall", out)
+        self.assertIn("over 1 turn(s)", out)
+
+    def test_aborted_turn_is_still_timed(self):
+        # The stamp lives in `finally`, not `else`: a turn that burned time and then
+        # raised still burned it, and those are the turns worth knowing about.
+        # Inline harness (not _run_repl) because the shared fake returns its queued
+        # items rather than raising -- same shape as test_ctrl_c_aborts_turn_keeps_session.
+        from venice.commands import chat
+        fake = mock.MagicMock()
+
+        def _create(**kw):
+            raise KeyboardInterrupt()
+
+        fake.chat.completions.create.side_effect = _create
+        err = io.StringIO()
+        with _fake_clock(), \
+             mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.userconfig.load_config", lambda *a, **k: _EMPTY_CFG), \
+             mock.patch("venice.client.urllib.request.urlopen", _urlopen_ok()), \
+             mock.patch("openai.OpenAI", return_value=fake), \
+             mock.patch("builtins.input", side_effect=["boom", "/usage", "/exit"]), \
+             mock.patch.object(sys, "stdin", io.StringIO("")), \
+             mock.patch.object(sys, "stdout", io.StringIO()), \
+             mock.patch.object(sys, "stderr", err):
+            rc = chat._run(_args(interactive=True))
+        self.assertEqual(rc, 0)
+        out = err.getvalue()
+        self.assertIn("[turn aborted]", out)
+        self.assertIn("over 1 turn(s)", out)
+
+    def test_spend_gated_turn_is_still_timed(self):
+        # The gate returns early, BEFORE the try -- so only a `finally` on the outer
+        # wrapper covers it. Driven through `_do_turn` directly (the harness the #79
+        # steering test uses) because the shared fake catalog is unpriced, so a
+        # cap can't be tripped through the full REPL.
+        import openai
+        from venice.commands import chat, _agent as _ag
+
+        led = _ag.CostLedger(max_spend=0.01)
+        led.bind_pricing({"input": {"usd": 1000.0}, "output": {"usd": 1000.0}})
+        led.record({"prompt_tokens": 100000, "completion_tokens": 100000})
+        self.assertTrue(led.over())          # precondition, not the assertion
+
+        fake = mock.MagicMock()
+        state = {"model": "m", "tools": [], "tools_on": False, "yes": True,
+                 "max_tool_calls": 0, "session": None, "ledger": led}
+        err = io.StringIO()
+        with _fake_clock(), mock.patch.object(sys, "stderr", err):
+            _repl._do_turn(fake, openai, chat, "do it", [], {}, state,
+                           _args(interactive=True))
+        self.assertIn("max-spend reached", err.getvalue())     # the turn was skipped
+        fake.chat.completions.create.assert_not_called()       # ...genuinely skipped
+        self.assertEqual(led.turns, 1)                         # ...and still counted
+        self.assertGreater(led.elapsed_seconds, 0)
+
+    def _turn_state(self, ledger, session=None):
+        return {"model": "m", "tools": [], "tools_on": False, "yes": True,
+                "max_tool_calls": 0, "session": session, "ledger": ledger}
+
+    def test_unexpected_exception_still_records_the_time_it_burned(self):
+        # THIS is what the `finally` buys. The two `except` clauses in `_turn` return
+        # normally, so they'd be timed by a plain sequential stamp too; only an
+        # exception no handler catches proves the stamp is unconditional. A turn that
+        # burned 40s and then blew up still burned 40s.
+        import openai
+        from venice.commands import chat, _agent as _ag
+
+        led = _ag.CostLedger()
+        fake = mock.MagicMock()
+        fake.chat.completions.create.side_effect = RuntimeError("boom")
+        with _fake_clock(), mock.patch.object(sys, "stderr", io.StringIO()):
+            with self.assertRaises(RuntimeError):        # propagates, as before
+                _repl._do_turn(fake, openai, chat, "do it", [], {},
+                               self._turn_state(led), _args(interactive=True))
+        self.assertEqual(led.turns, 1)
+        self.assertGreater(led.elapsed_seconds, 0)
+
+    def test_committed_turn_persists_its_own_elapsed_not_the_previous_one(self):
+        # The guard for the `_turn`/`_do_turn` split. Python runs a try's `else`
+        # BEFORE its `finally`, so autosaving inside the timed body would persist
+        # every session's elapsed exactly one turn behind its token counts.
+        # Driven per-turn rather than through the REPL because `/exit` autosaves
+        # too, which would mask a one-turn lag at the only moment we could see it.
+        import openai
+        from venice.commands import chat, _agent as _ag, _session
+
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.dict(os.environ, {"VENICE_SESSIONS_DIR": d}):
+                led = _ag.CostLedger()
+                sess = _session.new_session("chat", model="m")
+                state = self._turn_state(led, session=sess)
+                fake = mock.MagicMock()
+                fake.chat.completions.create.side_effect = lambda **kw: iter(
+                    [FakeChunk("ok"), FakeChunk(usage={"prompt_tokens": 3,
+                                                       "completion_tokens": 1})]
+                )
+                with _fake_clock(), mock.patch.object(sys, "stdout", io.StringIO()), \
+                        mock.patch.object(sys, "stderr", io.StringIO()):
+                    _repl._do_turn(fake, openai, chat, "one", [], {}, state,
+                                   _args(interactive=True))
+                # After turn ONE the file must already carry turn one's clock.
+                usage = json.loads((Path(d) / (sess.id + ".json")).read_text())["usage"]
+                self.assertEqual(usage["turns"], 1)
+                self.assertGreater(usage["elapsed_seconds"], 0)
+
+    def test_aborted_turn_is_not_autosaved(self):
+        # The other half of the `else` -> `return False` conversion: an aborted turn
+        # rolls its messages back, so persisting it would write a session for a turn
+        # that left no trace. Pre-#81 the `else` clause gave this for free.
+        import openai
+        from venice.commands import chat, _agent as _ag, _session
+
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.dict(os.environ, {"VENICE_SESSIONS_DIR": d}):
+                fake = mock.MagicMock()
+                fake.chat.completions.create.side_effect = KeyboardInterrupt()
+                sess = _session.new_session("chat", model="m")
+                err = io.StringIO()
+                with _fake_clock(), mock.patch.object(sys, "stderr", err):
+                    _repl._do_turn(fake, openai, chat, "do it", [], {},
+                                   self._turn_state(_ag.CostLedger(), session=sess),
+                                   _args(interactive=True))
+                self.assertIn("[turn aborted]", err.getvalue())
+                self.assertEqual(list(Path(d).glob("*.json")), [])
+
+    def test_spend_gated_turn_is_not_autosaved(self):
+        # The gate's `return False` keeps a skipped turn out of the session, matching
+        # the pre-#81 behaviour where the gate returned before the try's `else`.
+        import openai
+        from venice.commands import chat, _agent as _ag, _session
+
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.dict(os.environ, {"VENICE_SESSIONS_DIR": d}):
+                led = _ag.CostLedger(max_spend=0.01)
+                led.bind_pricing({"input": {"usd": 1000.0}, "output": {"usd": 1000.0}})
+                led.record({"prompt_tokens": 100000, "completion_tokens": 100000})
+                sess = _session.new_session("chat", model="m")
+                with _fake_clock(), mock.patch.object(sys, "stderr", io.StringIO()):
+                    _repl._do_turn(mock.MagicMock(), openai, chat, "do it", [], {},
+                                   self._turn_state(led, session=sess),
+                                   _args(interactive=True))
+                self.assertEqual(list(Path(d).glob("*.json")), [])
+
+    def test_resumed_session_accumulates_wall_clock(self):
+        # restore() is additive, so `--resume` reports the total time this session
+        # has kept you waiting -- not just the latest leg.
+        with tempfile.TemporaryDirectory() as d:
+            with _fake_clock():
+                rc, _, _ = _run_repl(
+                    _args(interactive=True),
+                    [[FakeChunk("noted")]], ["remember X", "/exit"],
+                    sessions_dir=d, stderr=io.StringIO(),
+                )
+            self.assertEqual(rc, 0)
+            sid = json.loads(list(Path(d).glob("*.json"))[0].read_text())["id"]
+            err = io.StringIO()
+            with _fake_clock():
+                rc2, _, _ = _run_repl(
+                    _args(interactive=True, resume=sid),
+                    [[FakeChunk("you said X")]], ["what did I say", "/usage", "/exit"],
+                    sessions_dir=d, stderr=err,
+                )
+            self.assertEqual(rc2, 0)
+            self.assertIn("over 2 turn(s)", err.getvalue())
 
     def test_slash_compact_then_turn_sees_summary(self):
         with tempfile.TemporaryDirectory() as d:
