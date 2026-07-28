@@ -481,6 +481,33 @@ PROFILE = _agent.AgentProfile(
 )
 
 
+def _finish(ledger, t0, human, *, json_out: bool) -> None:
+    """Close the run's wall-clock window, once, and print the footer (#81).
+
+    A one-shot `venice code` reported neither time nor cost when it finished. This
+    is that report: one stderr line, on every exit that spent a model call --
+    including the Ctrl+C and API-error paths, which are exactly the runs whose cost
+    you most want to see and the ones a happy-path-only footer would hide.
+
+    stderr, not stdout: the final answer is the deliverable and `venice code | ...`
+    must stay clean. Not TTY-gated either -- this is a single line in the same class
+    as "code: aborted" and the acceptance report, not a redraw surface like
+    `_Spinner`, so gating it would only hide the number from logs and pipelines.
+
+    Idempotent via `ledger.turns`: a one-shot ledger is built fresh in `_run_oneshot`
+    and never `restore()`d, so a non-zero turn count means "already stamped". That
+    coupling is load-bearing -- if a future `--resume` ever seeds this ledger from a
+    prior session's usage, this guard silently stops stamping and needs replacing
+    with an explicit flag.
+    """
+    if ledger is None or ledger.turns:
+        return
+    ledger.record_turn(time.monotonic() - t0 - human[0])
+    if not json_out:
+        print(f"code: {_agent.format_duration(ledger.elapsed_seconds)} wall -- "
+              f"{ledger.summary()}", file=sys.stderr)
+
+
 @contextlib.contextmanager
 def _human_pause(acc):
     """Bank the seconds a prompt spent waiting on the operator (#81).
@@ -560,12 +587,12 @@ def _prompt_accept(*, no_plan: bool = False) -> str:
         print("Please answer a, s, e, or n.", file=sys.stderr)
 
 
-def _emit_plan_only(args, root, task, plan_text) -> int:
+def _emit_plan_only(args, root, task, plan_text, *, usage=None) -> int:
     if args.json:
-        json.dump(
-            {"root": root, "task": task, "plan": plan_text, "mode": "plan_only"},
-            sys.stdout, indent=2, default=str,
-        )
+        doc = {"root": root, "task": task, "plan": plan_text, "mode": "plan_only"}
+        if usage is not None:
+            doc["usage"] = usage  # #81: a plan turn is a real call and a real wait
+        json.dump(doc, sys.stdout, indent=2, default=str)
         sys.stdout.write("\n")
     else:
         print(plan_text)  # the plan is the deliverable -> stdout
@@ -791,11 +818,14 @@ def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task
                 plan_text = _no_tool_turn(oai, model, plan_messages, gen_kwargs,
                                           oai_tools, ledger=ledger)
             except openai.OpenAIError as e:
+                _finish(ledger, t0, human, json_out=args.json)
                 return _openai.status_to_exit(openai, e, "code")
             messages.append({"role": "assistant", "content": plan_text})
 
             if args.plan_only:
-                return _emit_plan_only(args, root, task, plan_text)
+                _finish(ledger, t0, human, json_out=args.json)
+                return _emit_plan_only(args, root, task, plan_text,
+                                       usage=ledger.to_dict())
             if not args.json:
                 _show_plan(plan_text)
 
@@ -814,11 +844,13 @@ def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task
                     fb = ""
                 if not fb:
                     print("code: aborted", file=sys.stderr)
+                    _finish(ledger, t0, human, json_out=args.json)
                     return 1
                 messages.append({"role": "user", "content": "Revise the plan: " + fb})
                 continue
             if decision == "abort":
                 print("code: plan not accepted; aborting", file=sys.stderr)
+                _finish(ledger, t0, human, json_out=args.json)
                 return 1
             mode = decision
             break
@@ -889,12 +921,16 @@ def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task
                                 budget=budget, ledger=ledger, steer_drain=steer_drain,
                                 parallel=parallel)
     except openai.OpenAIError as e:
+        _finish(ledger, t0, human, json_out=args.json)
         return _openai.status_to_exit(openai, e, "code")
     except KeyboardInterrupt:
         # #79: abort (a 2nd Ctrl+C, or Ctrl+C at the steer prompt). Save the partial
         # transcript so the run stays inspectable/resumable -- side effects already ran --
         # then exit 130 (the documented Ctrl-C code) instead of an uncaught traceback.
         print("\ncode: aborted", file=sys.stderr)
+        # Stamp BEFORE the snapshot below, or the persisted usage carries 0 seconds
+        # for a run the operator just sat through.
+        _finish(ledger, t0, human, json_out=args.json)
         if active is not None:
             if ledger is not None:
                 try:
@@ -924,6 +960,7 @@ def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task
                 report = f"{report}\n{retry}" if report else retry
                 parsed = _parse_verdict(retry)
         except openai.OpenAIError as e:
+            _finish(ledger, t0, human, json_out=args.json)
             return _openai.status_to_exit(openai, e, "code")
         verdict = parsed or "unknown"
         if not args.json:
@@ -944,6 +981,9 @@ def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task
         for _u in unprocessed:
             print(f"  - {_u.splitlines()[0][:200] if _u.strip() else '(empty)'}",
                   file=sys.stderr)
+    # #81: stamp before the snapshot and before the envelope, so the persisted usage
+    # and the --json surface both carry the run's wall-clock.
+    _finish(ledger, t0, human, json_out=args.json)
     if active is not None:
         if ledger is not None:
             try:
@@ -959,6 +999,10 @@ def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task
         envelope = {
             "root": root, "task": task, "plan": plan_text, "mode": mode,
             "final": final_text,
+            # #81: `to_dict()` verbatim, so `venice code --json | jq .usage` and
+            # `jq .usage <session>.json` are the same shape and cannot drift apart.
+            # Numbers here, `format_duration` only on the human line.
+            "usage": ledger.to_dict(),
         }
         if report is not None:
             envelope["acceptance"] = {
