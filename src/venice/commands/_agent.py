@@ -212,6 +212,24 @@ def _detail(usage: dict, section: str, key: str):
     return None
 
 
+def format_duration(seconds) -> str:
+    """A compact human duration: ``4.5s``, ``2m 14s``, ``1h 03m`` (#81).
+
+    Sub-minute keeps a decimal -- a REPL turn is usefully "4.5s", not "4s". Above a
+    minute the decimal is noise, and past an hour the seconds are. `_queue.progress_tick`
+    keeps its own ``{:5.1f}s`` because the fixed width is what stops its carriage-return
+    line jittering; a one-shot `venice code` run reporting "1247.3s" just fails to answer
+    the question being asked. Garbage/negative -> "0.0s" (mirrors :func:`_as_float`: a bad
+    value must never make a report unreadable).
+    """
+    s = _as_float(seconds)
+    if s < 60:
+        return f"{s:.1f}s"
+    if s < 3600:
+        return f"{int(s // 60)}m {int(s % 60):02d}s"
+    return f"{int(s // 3600)}h {int((s % 3600) // 60):02d}m"
+
+
 class CostLedger:
     """Accumulates estimated USD spend for one agent run.
 
@@ -240,6 +258,14 @@ class CostLedger:
         self.cache_write_tokens = 0
         self.reasoning_tokens = 0
         self.unpriced = False  # saw a turn whose model price was unknown
+        # #81: the operator's wall-clock. `elapsed_seconds` is BLOCKED time only --
+        # the caller stamps the window and passes the delta, so the ledger never reads
+        # a clock and every ledger test stays a pure-function assertion. `turns` counts
+        # the windows, so `/usage` can show an average. A "turn" is one time the CLI
+        # made you wait (one REPL `_do_turn`, one one-shot `code` run) -- NOT one API
+        # call, which `record()` counts and which would make the average meaningless.
+        self.elapsed_seconds = 0.0
+        self.turns = 0
         self._in = None          # per-token input rate (USD)
         self._out = None         # per-token output rate (USD)
         self._cache_in = None    # per-token cache-read rate (USD); None -> use _in
@@ -271,6 +297,8 @@ class CostLedger:
             "cache_write_tokens": self.cache_write_tokens,
             "reasoning_tokens": self.reasoning_tokens,
             "unpriced": self.unpriced,
+            "elapsed_seconds": self.elapsed_seconds,  # #81
+            "turns": self.turns,
         }
 
     def restore(self, d) -> None:
@@ -293,8 +321,26 @@ class CostLedger:
             d.get("cache_write_tokens", d.get("cache_creation_input_tokens"))
         )
         self.reasoning_tokens += _as_int(d.get("reasoning_tokens"))
+        # #81: additive like the token tallies, so `--resume` reports the total time
+        # this session has kept you waiting. Pre-#81 envelopes have neither key and
+        # degrade to 0 -- no SESSION_VERSION bump, no `_session.py` change.
+        self.elapsed_seconds += _as_float(d.get("elapsed_seconds"))
+        self.turns += _as_int(d.get("turns"))
         if d.get("unpriced"):
             self.unpriced = True
+
+    def record_turn(self, seconds) -> None:
+        """Add one blocked window's wall-clock and count the turn (#81).
+
+        PURE by construction: the caller reads the clock and passes the delta, so this
+        needs no clock-mocking to test and `record()` stays untouched. A garbage or
+        negative delta counts as 0 seconds but still counts as a turn -- a monotonic
+        clock cannot run backwards, so that guard only ever catches a caller bug, and
+        silently dropping the turn would corrupt the average too. Rounded on the way in
+        so the persisted envelope and the `--json` surface carry a tidy number.
+        """
+        self.elapsed_seconds = round(self.elapsed_seconds + _as_float(seconds), 3)
+        self.turns += 1
 
     def record(self, usage) -> float:
         """Add one turn's `usage` (dict or SDK obj); return this turn's cost.
@@ -390,7 +436,13 @@ class CostLedger:
         handling; returns a one-line placeholder before any turn is recorded.
         """
         if self.prompt_tokens == 0 and self.completion_tokens == 0:
-            return "(no usage recorded yet)"
+            if not self.turns:
+                return "(no usage recorded yet)"
+            # #81: time was spent but the provider reported no tokens -- a turn that
+            # raised, or one aborted mid-flight. Report the clock honestly rather than
+            # claiming nothing happened, but don't fabricate a 0-token cache breakdown
+            # and a "cache hit rate: 0.0%" that would read as a real measurement.
+            return "session usage:\n  (no tokens reported)\n" + self._timing_line()
         uncached = self.prompt_tokens - self.cache_read_tokens - self.cache_write_tokens
         hit = (
             self.cache_read_tokens / self.prompt_tokens * 100.0
@@ -416,7 +468,20 @@ class CostLedger:
             if self.unpriced:
                 cost += "  [partially unpriced]"
             lines.append(cost)
+        if self.turns:  # #81
+            lines.append(self._timing_line())
         return "\n".join(lines)
+
+    def _timing_line(self) -> str:
+        """The `/usage` wall-clock row (#81).
+
+        Only ever rendered when a window was actually stamped, so a ledger that has
+        only seen `record()` -- `run_loop` in isolation, every per-subagent ledger --
+        reports exactly what it reported before this existed.
+        """
+        avg = self.elapsed_seconds / self.turns if self.turns else 0.0
+        return (f"  wall    {format_duration(self.elapsed_seconds):>10}  "
+                f"over {self.turns} turn(s)  (avg {format_duration(avg)})")
 
 
 def _pricing_for(models, model_id):
