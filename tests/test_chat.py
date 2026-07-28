@@ -668,7 +668,12 @@ class TestChatAgent(unittest.TestCase):
         self.assertIsInstance(captured["ledger"], _agent.CostLedger)
         self.assertEqual(captured["ledger"].max_spend, 1.25)
 
-    def test_tools_without_session_max_spend_passes_no_ledger(self):
+    def test_tools_without_session_max_spend_passes_an_uncapped_ledger(self):
+        # #86 inverted this: it used to assert `ledger is None`, which is exactly
+        # why a default `chat --tools` run metered nothing. The ledger is now
+        # always-on -- but the invariant the old test really cared about still
+        # holds and is what's pinned here: no flag => no cap => no spend gating.
+        # `over()` short-circuits on a None cap, so metering costs nothing.
         from venice.commands import _agent
         captured = {}
 
@@ -681,7 +686,10 @@ class TestChatAgent(unittest.TestCase):
                 _args(message="hi", tools=True, stream=False), [],
             )
         self.assertEqual(rc, 0)
-        self.assertIsNone(captured["ledger"])
+        self.assertIsInstance(captured["ledger"], _agent.CostLedger)
+        self.assertIsNone(captured["ledger"].max_spend)
+        self.assertFalse(captured["ledger"].over())
+        self.assertFalse(captured["ledger"].over_tokens())
 
     def test_capability_degrade_to_plain_chat(self):
         err = io.StringIO()
@@ -857,6 +865,198 @@ def _fake_attach_cm(tools):
         yield tools
     _attach.specs = None
     return _attach
+
+
+class TestChatUsageSurface(unittest.TestCase):
+    """A one-shot `venice chat --tools` run reports what it cost (#86).
+
+    Sister to `TestCodeUsageSurface` in test_code_command.py (#81). The gap: the
+    ledger was `ledger_from_args`, i.e. None unless `--session-max-spend`, so a
+    default run metered nothing and had no object to report from.
+    """
+
+    def setUp(self):
+        _cfg = mock.patch(
+            "venice.userconfig.load_config",
+            lambda *a, **k: {"version": 1, "mcpServers": {}, "defaults": {}},
+        )
+        _cfg.start()
+        self.addCleanup(_cfg.stop)
+        self._out = io.StringIO()
+        self._errbuf = io.StringIO()
+
+    @property
+    def _err(self):
+        return self._errbuf.getvalue()
+
+    def _run(self, args, results, *, urlopen=None, side_effect=None):
+        from venice.commands import chat
+        fake, calls = _fake_openai_seq(results)
+        if side_effect is not None:
+            fake.chat.completions.create.side_effect = side_effect
+        stdin = mock.MagicMock()
+        stdin.isatty.return_value = False  # `wants_interactive` reads this
+        with contextlib.ExitStack() as st:
+            st.enter_context(mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}))
+            st.enter_context(mock.patch("venice.client.urllib.request.urlopen",
+                                        urlopen or _urlopen_ok()))
+            st.enter_context(mock.patch("openai.OpenAI", return_value=fake))
+            st.enter_context(mock.patch.object(sys, "stdin", stdin))
+            st.enter_context(mock.patch.object(sys, "stdout", self._out))
+            st.enter_context(mock.patch.object(sys, "stderr", self._errbuf))
+            rc = chat._run(args)
+        return rc, fake, calls
+
+    @staticmethod
+    def _usage(n):
+        """Distinct per-call blobs, so a failure names *which* call went missing."""
+        return {"prompt_tokens": n * 100, "completion_tokens": n}
+
+    def _tool_seq(self, *ns):
+        """A tool-calling run of len(ns) turns, the last one final."""
+        seq = []
+        for i, n in enumerate(ns):
+            last = i == len(ns) - 1
+            seq.append(FakeToolCompletion(
+                content="final answer" if last else None,
+                tool_calls=None if last else [
+                    _FnCall(f"call_{i}", "venice_chat", '{"message": "hi"}')],
+                usage=self._usage(n),
+            ))
+        return seq
+
+    @staticmethod
+    @contextlib.contextmanager
+    def _stub_tool():
+        with mock.patch("venice.commands._mcp.chat_tool",
+                        return_value={"status": "ok", "content": "hola", "model": "m"}):
+            yield
+
+    # --- the fix itself ---
+
+    def test_default_tools_run_meters_without_a_spend_cap(self):
+        """THE regression test: `usage_ledger`, not `ledger_from_args`."""
+        args = _args(message="hi", tools=True, stream=False)
+        self.assertIsNone(getattr(args, "session_max_spend", None))  # the precondition
+        with self._stub_tool():
+            rc, _f, _c = self._run(args, self._tool_seq(1, 2))
+        self.assertEqual(rc, 0)
+        self.assertRegex(self._err, r"chat: .*wall")
+        self.assertRegex(self._err, r"prompt=300\b")
+
+    def test_footer_totals_every_turn_not_just_the_final(self):
+        """700/7 across three turns -- not the raw final-turn usage (which is 400/4)."""
+        with self._stub_tool():
+            rc, _f, _c = self._run(
+                _args(message="hi", tools=True, stream=False), self._tool_seq(1, 2, 4))
+        self.assertEqual(rc, 0)
+        # `assertIn("completion=7", ...)` would also pass on "completion=700" --
+        # and the unpriced summary has no closing paren to anchor on. Use \b.
+        self.assertRegex(self._err, r"prompt=700\b")
+        self.assertRegex(self._err, r"completion=7\b")
+
+    def test_footer_on_stderr_and_stdout_stays_clean(self):
+        with self._stub_tool():
+            rc, _f, _c = self._run(
+                _args(message="hi", tools=True, stream=False), self._tool_seq(1, 2))
+        self.assertEqual(rc, 0)
+        self.assertRegex(self._err, r"chat: .*wall")
+        self.assertEqual(self._out.getvalue().strip(), "final answer")
+        self.assertNotIn("wall", self._out.getvalue())
+
+    def test_footer_still_printed_under_json(self):
+        """Chat diverges from code here on purpose -- see `_finish`'s docstring."""
+        with self._stub_tool():
+            rc, _f, _c = self._run(
+                _args(message="hi", tools=True, stream=False, json=True),
+                self._tool_seq(1, 2))
+        self.assertEqual(rc, 0)
+        self.assertRegex(self._err, r"chat: .*wall")
+        json.loads(self._out.getvalue())  # stdout still parses
+
+    def test_json_stdout_shape_is_unchanged(self):
+        """No envelope, no new key: `--json` stays the raw SDK dump."""
+        with self._stub_tool():
+            self._run(_args(message="hi", tools=True, stream=False, json=True),
+                      self._tool_seq(1, 2))
+        doc = json.loads(self._out.getvalue())
+        self.assertIn("choices", doc)
+        self.assertNotIn("final", doc)   # not code.py's envelope
+        self.assertNotIn("venice_usage", doc)
+
+    # --- the exits that must still report ---
+
+    def test_api_error_run_still_reports_time(self):
+        import openai
+        rc, _f, _c = self._run(_args(message="hi", tools=True, stream=False), [],
+                               side_effect=openai.OpenAIError("boom"))
+        self.assertEqual(rc, 5)
+        self.assertRegex(self._err, r"chat: .*wall")
+
+    def test_ctrlc_reports_time_and_exits_130(self):
+        # One paid tool-calling turn, then Ctrl+C mid-loop -- the run whose cost you
+        # most want to see. Before #86 this was an uncaught traceback.
+        seq = [FakeToolCompletion(
+            tool_calls=[_FnCall("call_0", "venice_chat", '{"message": "hi"}')],
+            usage=self._usage(3))]
+
+        def _create(**kwargs):
+            if seq:
+                return seq.pop(0)
+            raise KeyboardInterrupt
+
+        with self._stub_tool():
+            rc, _f, _c = self._run(_args(message="hi", tools=True, stream=False),
+                                   [], side_effect=_create)
+        self.assertEqual(rc, 130)
+        self.assertIn("chat: aborted", self._err)
+        self.assertRegex(self._err, r"chat: .*wall")
+        self.assertRegex(self._err, r"prompt=300\b")  # the turn you did pay for
+
+    # --- deliberate absence: no model call => no footer ---
+
+    def test_degraded_run_reports_nothing(self):
+        """No ledger is minted on the degrade path, so no orphan 0.0s footer."""
+        rc, _f, _c = self._run(
+            _args(message="hi", tools=True, stream=False),
+            [FakeToolCompletion("plain answer")], urlopen=_urlopen_ok(fc=False))
+        self.assertEqual(rc, 0)
+        self.assertNotIn("wall", self._err)
+
+    def test_bad_tool_subset_reports_nothing(self):
+        rc, _f, _c = self._run(
+            _args(message="hi", tools=True, tool=["nope"], stream=False), [])
+        self.assertEqual(rc, 2)
+        self.assertNotIn("wall", self._err)
+
+    def test_plain_chat_gets_no_footer(self):
+        """`_print_usage` is untouched; the ledger never reaches the plain path."""
+        chunks = [FakeChunk("hi"), FakeChunk(None, usage={
+            "prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7})]
+        rc, _f, _c = self._run(_args(message="hi", stream=True), [chunks])
+        self.assertEqual(rc, 0)
+        self.assertIn("usage: prompt=5", self._err)
+        self.assertNotIn("wall", self._err)
+
+    # --- the guard itself ---
+
+    def test_finish_is_idempotent(self):
+        import time as _time
+
+        from venice.commands import _agent, chat
+        led = _agent.CostLedger()
+        t0 = _time.monotonic()
+        with mock.patch.object(sys, "stderr", self._errbuf):
+            chat._finish(led, t0)
+            chat._finish(led, t0)
+        self.assertEqual(led.turns, 1)
+        self.assertEqual(self._err.count("wall"), 1)  # and only one footer
+
+    def test_finish_is_inert_without_a_ledger(self):
+        from venice.commands import chat
+        with mock.patch.object(sys, "stderr", self._errbuf):
+            chat._finish(None, 0.0)
+        self.assertEqual(self._err, "")
 
 
 class TestChatMcp(unittest.TestCase):

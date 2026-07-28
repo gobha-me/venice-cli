@@ -807,6 +807,23 @@ Details and safety:
   `defaults.code.session_max_spend`. Distinct from `--max-spend` (the per-call
   tool cap). A model with unknown pricing is counted (tokens) but not charged.
 - `--output DIR` sets where generated files are written (default: cwd).
+- **What the run cost.** A finished `--tools` run prints one line to **stderr** —
+  `chat: 8.3s wall -- cost: $0.0041 (tokens prompt=3120 completion=284)` — so stdout
+  stays exactly the deliverable and `venice chat --tools … | …` is unaffected. It
+  totals *every* turn of the loop, not just the last one, and it prints on the
+  Ctrl+C and API-error exits too, which are the runs most worth costing out. A run
+  that never reaches a model call (an unknown `--tool`, a model that can't do
+  function calling, a failed `--mcp` attach) prints nothing.
+  Unlike `venice code`, the line is **not** suppressed under `--json`: `code` has an
+  envelope to carry the numbers, whereas chat's `--json` is the raw completion object
+  written from inside the loop, so there is nowhere to put a run total that isn't
+  already stale. stdout under `--json` is unchanged. Beware that that object's own
+  `usage` key is the **final turn only** — it is not the run total, and on a
+  multi-turn tool run the two legitimately differ.
+  Before v0.77 a default `--tools` run metered nothing at all: the ledger only
+  existed when `--session-max-spend` was set.
+- **Ctrl+C** during a `--tools` run prints `chat: aborted`, reports what the turns so
+  far cost, and exits 130 (it used to raise a traceback).
 - **Non-streamed in v1.** The tool path buffers each turn, so `--stream` is ignored
   when `--tools` is on; `--json` prints the final completion object.
 

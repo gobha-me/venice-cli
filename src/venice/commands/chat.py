@@ -15,6 +15,7 @@ import contextlib
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -381,6 +382,44 @@ def _print_usage(usage) -> None:
         print(f"usage: prompt={pt} completion={ct} total={tt}", file=sys.stderr)
 
 
+def _finish(ledger, t0) -> None:
+    """Close the tool-loop run's wall-clock window, once, and print the footer (#86).
+
+    A one-shot `venice chat --tools` reported neither time nor cost: the ledger was
+    `ledger_from_args`, i.e. None unless the run was spend-capped. This is the same
+    report #81 gave `venice code`, on every exit that spent a model call -- including
+    the Ctrl+C and API-error paths, which are exactly the runs whose cost you most
+    want to see and the ones a happy-path-only footer would hide.
+
+    stderr, not stdout: the answer is the deliverable and `venice chat --tools ... |`
+    must stay clean. Not TTY-gated -- one line in the same class as "chat: attached N
+    MCP tool(s)", not a redraw surface like `_Spinner`, so gating it would only hide
+    the number from logs and pipelines.
+
+    Two deliberate divergences from `code._finish`:
+
+    * No `human` accumulator. Chat has no plan/edit prompt to subtract, and the
+      paid-tool confirm gate lives inside `run_loop` where this can't see it -- the
+      same hole `code` has, so not a regression.
+    * Not suppressed under `--json`. `code` has an envelope to carry the number;
+      chat's `--json` is the raw SDK object, written by `_agent._emit_final` *inside*
+      `run_loop`, so anything threaded in there would be stamped 0.0s by construction.
+      stderr is the only surface left, and this path already writes to it unguarded
+      (the MCP-attached notice above). stdout stays byte-identical.
+
+    Idempotent via `ledger.turns`: a non-zero turn count means "already stamped".
+    Sound here because a one-shot ledger is never `restore()`d -- `_agent.wants_interactive`
+    routes every `--resume`/`--continue`/`-i` run to `_repl.run`, so this function only
+    ever sees a fresh ledger. If that routing changes, this guard silently stops
+    stamping and needs replacing with an explicit flag.
+    """
+    if ledger is None or ledger.turns:
+        return
+    ledger.record_turn(time.monotonic() - t0)
+    print(f"chat: {_agent.format_duration(ledger.elapsed_seconds)} wall -- "
+          f"{ledger.summary()}", file=sys.stderr)
+
+
 def _run(args) -> int:
     # Resolve a resumed session (#47) BEFORE apply_defaults so restored settings
     # (model/temperature/max_tokens/max_tool_calls) outrank config defaults: both
@@ -581,16 +620,28 @@ def _run_agent(args, oai, openai, client, models, model, kwargs) -> Optional[int
     """Run the tool-calling loop. Returns an exit code, or None to signal the
     caller to fall through to plain (non-tool) chat because the model can't do
     function calling."""
-    with _tools_session(args, client, models, model) as (tools, rc):
-        if tools is None:
-            return rc  # None -> degrade to plain chat; 2 -> invalid subset / MCP error
+    # Outside the `with` on purpose: attaching a cold MCP server is real time the
+    # operator spent waiting on us, and `_finish` is inert until a ledger exists.
+    t0 = time.monotonic()
+    ledger = None
+    try:
+        with _tools_session(args, client, models, model) as (tools, rc):
+            if tools is None:
+                return rc  # None -> degrade to plain chat; 2 -> invalid subset / MCP error
 
-        if args.stream and not args.json:
-            print("chat: tools imply non-streamed output for now", file=sys.stderr)
+            if args.stream and not args.json:
+                print("chat: tools imply non-streamed output for now", file=sys.stderr)
 
-        messages = kwargs.pop("messages")
-        kwargs.pop("model", None)
-        try:
+            messages = kwargs.pop("messages")
+            kwargs.pop("model", None)
+            # Minted here, past the `tools is None` guard, so every non-spending exit
+            # (bad --tool subset, MCP failure, degrade) returns while it's still None
+            # and `_finish` no-ops. Suppression is structural, not a list of exits to
+            # remember. #86: was `ledger_from_args` -> None unless --session-max-spend,
+            # so a default run metered nothing. `usage_ledger` is always on and adds no
+            # gating: `_build_ledger` leaves max_tokens None and both `over()` and
+            # `over_tokens()` short-circuit on a None cap. --session-max-spend still caps.
+            ledger = _agent.usage_ledger(args, models, model)  # #66 spend cap, #86 metering
             return _agent.run_loop(
                 oai, model, messages, kwargs, tools,
                 max_tool_calls=(args.max_tool_calls if args.max_tool_calls is not None
@@ -598,10 +649,22 @@ def _run_agent(args, oai, openai, client, models, model, kwargs) -> Optional[int
                 yes=bool(args.yes),
                 json_out=args.json,
                 budget=_compact.budget_from_args(args),  # #48 auto-compact parity
-                ledger=_agent.ledger_from_args(args, models, model),  # #66 spend cap
+                ledger=ledger,
             )
-        except openai.OpenAIError as e:
-            return _openai.status_to_exit(openai, e, "chat")
+    except openai.OpenAIError as e:
+        return _openai.status_to_exit(openai, e, "chat")
+    except KeyboardInterrupt:
+        # chat was the last command with no handler at all -- Ctrl+C gave a traceback.
+        # 130 is what CPython already exits with; this just makes it deliberate, and
+        # lets the `finally` cost the turns you did pay for before killing the run.
+        print("\nchat: aborted", file=sys.stderr)
+        return 130
+    finally:
+        # After the error handlers so their message lands first, and after `run_loop`
+        # has written its output. If a future ticket gives chat a `to_dict()` envelope
+        # or a session save, this placement becomes wrong -- the stamp has to precede
+        # the snapshot or the blob carries turns=0.
+        _finish(ledger, t0)
 
 
 def _run_once(oai, kwargs: dict, as_json: bool) -> int:
