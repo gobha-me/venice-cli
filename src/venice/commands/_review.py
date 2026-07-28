@@ -569,12 +569,18 @@ def resolve_reviewer_model(models, requested: Optional[str],
 # --------------------------------------------------------------------------- #
 # The review cycle
 # --------------------------------------------------------------------------- #
-def _retry_for_verdict(oai, model: str, report: str, base_kwargs: dict) -> str:
+def _retry_for_verdict(oai, model: str, report: str, base_kwargs: dict,
+                       *, ledger=None) -> str:
     """One extra completion asking only for the sentinel line.
 
     Mirrors `code.py`'s single re-prompt, but as a FRESH one-shot rather than a
     continuation, so `_agent._run_disposable` stays byte-identical (the
     behavior-preserving rule the #52 arc is built on).
+
+    Records onto the cycle ledger (#81): this call runs outside `_run_disposable`,
+    so without it the `tokens` figure the reviewer already advertises under-reports
+    every run that needed a verdict re-prompt -- and it also escapes the token cap
+    it is supposed to be bounded by.
     """
     resp = oai.chat.completions.create(
         model=model,
@@ -585,6 +591,8 @@ def _retry_for_verdict(oai, model: str, report: str, base_kwargs: dict) -> str:
         ],
         **base_kwargs,
     )
+    if ledger is not None:
+        ledger.record(getattr(resp, "usage", None))
     if getattr(resp, "choices", None):
         return resp.choices[0].message.content or ""
     return ""
@@ -639,7 +647,8 @@ def run_cycle(oai, model: str, collected: dict, base_kwargs: dict, *,
         tool_calls += int(out.get("tool_calls") or 0)
         v = parse_verdict(report)
         if v is None:
-            report = f"{report}\n{_retry_for_verdict(oai, model, report, base_kwargs)}"
+            report = (f"{report}\n"
+                      f"{_retry_for_verdict(oai, model, report, base_kwargs, ledger=ledger)}")
             reports[-1] = report
             v = parse_verdict(report)
         # Keep the last PARSEABLE verdict. A later round that forgets the sentinel

@@ -574,7 +574,10 @@ message, keeping the last `N` turns verbatim),
 `/cost` (this session's estimated spend so far; `--session-max-spend` adds a
 cap), `/usage` (a token + cost breakdown for the session, keeping the
 cache-read/cache-write/uncached input split distinct so cache-heavy sessions
-cost out correctly), `/reset` (clear history, keep the system prompt),
+cost out correctly, plus a **wall-clock** row — total, turn count and average
+for the time the CLI kept you waiting, measured from submitting a turn to
+getting the prompt back, so thinking time at the prompt is never counted; it
+accumulates across `--resume`), `/reset` (clear history, keep the system prompt),
 `/save [file]` (write the transcript JSON; defaults to the `--resume` file),
 `/paste` (compose a multi-line message a line at a time, ending with `/end` —
 `/cancel` aborts), `/edit [text]` (compose your next message in `$EDITOR`, like
@@ -1220,6 +1223,18 @@ lacks it, so a correct run whose model phrased its verdict loosely still exits 0
 **exit code reflects it**: 0 = all met (or check skipped), 1 = not met, 10 = the model
 never emitted a parseable verdict even after the re-prompt (the work may still be
 complete — a loud stderr warning is printed).
+
+**What the run cost.** A finished run prints one line to **stderr** —
+`code: 2m 14s wall -- cost: $0.0431 (tokens prompt=48201 completion=3904)` — so
+stdout stays exactly the deliverable and `venice code … | …` is unaffected. It
+prints on the Ctrl+C and API-error exits too, which are the runs most worth
+costing out. Under `--json` the line is suppressed and the numbers ride the
+envelope's `usage` key instead, in the same shape the session file stores, so
+`venice code --json | jq .usage` and `jq .usage <session>.json` agree. The total
+covers the plan turn and the acceptance turns as well as the tool loop; the
+wall-clock excludes time spent at the plan-accept prompt. Note that runs now
+always carry a `usage` blob in their session file — previously only
+`--session-max-spend` runs metered at all.
 
 **Tools** (path-sandboxed to the project root; mutating tools confirm unless `--auto`):
 

@@ -5,6 +5,7 @@ catalog GET mocked (via urlopen) -- no network, no real key. Reuses the tool-cal
 fakes from `test_chat`. File writes land in a per-test tmpdir project root.
 """
 import argparse
+import contextlib
 import io
 import json
 import os
@@ -774,6 +775,186 @@ class TestAttachedCtrlCSteering(unittest.TestCase):
         self.assertEqual(rc, 130)                 # documented Ctrl-C exit code
         self.assertIn("aborted", self._err)
         self.assertEqual(len(self._sessions()), 1)  # partial transcript still saved
+
+
+# --------------------------------------------------------------------------- #
+# #81: the usage + wall-clock surface
+# --------------------------------------------------------------------------- #
+class TestCodeUsageSurface(unittest.TestCase):
+    """`venice code` reports what a run cost and how long it kept you waiting."""
+
+    def setUp(self):
+        _cfg = mock.patch(
+            "venice.userconfig.load_config",
+            lambda *a, **k: {"version": 1, "mcpServers": {}, "defaults": {}},
+        )
+        _cfg.start()
+        self.addCleanup(_cfg.stop)
+        self.tmp = tempfile.mkdtemp()
+        self.root = os.path.realpath(self.tmp)
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, ignore_errors=True))
+        self._sess_dir = tempfile.mkdtemp()
+        self.addCleanup(
+            lambda: __import__("shutil").rmtree(self._sess_dir, ignore_errors=True))
+
+    def _run(self, args, seq, steer=None):
+        from venice.commands import code
+        fake, calls = _fake_openai_seq(seq)
+        stdin = mock.MagicMock()
+        stdin.isatty.return_value = False
+        self._out, self._errbuf = io.StringIO(), io.StringIO()
+        with contextlib.ExitStack() as st:
+            st.enter_context(mock.patch.dict(
+                os.environ, {"VENICE_API_KEY": "fake",
+                             "VENICE_SESSIONS_DIR": self._sess_dir}))
+            st.enter_context(mock.patch("venice.client.urllib.request.urlopen",
+                                        _urlopen_ok()))
+            st.enter_context(mock.patch("openai.OpenAI", return_value=fake))
+            st.enter_context(mock.patch.object(sys, "stdin", stdin))
+            st.enter_context(mock.patch.object(sys, "stdout", self._out))
+            st.enter_context(mock.patch.object(sys, "stderr", self._errbuf))
+            if steer is not None:
+                st.enter_context(mock.patch(
+                    "venice.commands._steer.pause_and_steer", steer))
+            rc = code._run(args)
+        self._err = self._errbuf.getvalue()
+        return rc, calls
+
+    def _sessions(self):
+        import glob
+        return sorted(glob.glob(os.path.join(self._sess_dir, "*.json")))
+
+    def _usage(self, n):
+        """A usage blob on the nth API call, so per-call totals are distinguishable."""
+        return {"prompt_tokens": n * 100, "completion_tokens": n}
+
+    def _full_seq(self):
+        return [
+            FakeToolCompletion("plan text", usage=self._usage(1)),     # plan turn
+            FakeToolCompletion("done", usage=self._usage(2)),          # exec final
+            FakeToolCompletion("ACCEPTANCE: PASS", usage=self._usage(4)),  # verify
+        ]
+
+    def test_json_envelope_carries_usage(self):
+        rc, _ = self._run(
+            _code_args(task="x", root=self.root, auto=True, json=True), self._full_seq())
+        self.assertEqual(rc, 0)
+        usage = json.loads(self._out.getvalue())["usage"]
+        self.assertEqual(usage["turns"], 1)          # one run == one blocked window
+        self.assertGreaterEqual(usage["elapsed_seconds"], 0)
+
+    def test_plan_and_acceptance_turns_are_counted(self):
+        # They run outside `run_loop` and carry the whole transcript as prompt, so a
+        # total that skipped them would understate the run badly. 100 + 200 + 400.
+        rc, _ = self._run(
+            _code_args(task="x", root=self.root, auto=True, json=True), self._full_seq())
+        self.assertEqual(rc, 0)
+        usage = json.loads(self._out.getvalue())["usage"]
+        self.assertEqual(usage["prompt_tokens"], 700)
+        self.assertEqual(usage["completion_tokens"], 7)
+
+    def test_default_run_meters_without_a_spend_cap(self):
+        # The gap this closed: `ledger_from_args` returns None unless
+        # --session-max-spend is set, so a plain run metered nothing at all.
+        args = _code_args(task="x", root=self.root, auto=True, json=True)
+        self.assertIsNone(getattr(args, "session_max_spend", None))
+        rc, _ = self._run(args, self._full_seq())
+        self.assertEqual(rc, 0)
+        self.assertGreater(json.loads(self._out.getvalue())["usage"]["prompt_tokens"], 0)
+
+    def test_footer_on_stderr_and_stdout_stays_clean(self):
+        rc, _ = self._run(
+            _code_args(task="x", root=self.root, auto=True), self._full_seq())
+        self.assertEqual(rc, 0)
+        self.assertRegex(self._err, r"code: .*wall")
+        # `venice code | ...` must keep getting only the deliverable.
+        self.assertNotIn("wall", self._out.getvalue())
+
+    def test_footer_suppressed_under_json(self):
+        rc, _ = self._run(
+            _code_args(task="x", root=self.root, auto=True, json=True), self._full_seq())
+        self.assertEqual(rc, 0)
+        self.assertNotIn("wall", self._err)
+        json.loads(self._out.getvalue())        # envelope still parses
+
+    def test_session_file_carries_usage(self):
+        rc, _ = self._run(
+            _code_args(task="x", root=self.root, auto=True), self._full_seq())
+        self.assertEqual(rc, 0)
+        with open(self._sessions()[0]) as f:
+            usage = json.load(f)["usage"]
+        self.assertEqual(usage["turns"], 1)
+        self.assertEqual(usage["prompt_tokens"], 700)
+
+    def test_ctrlc_run_reports_time_and_persists_usage(self):
+        # The run an operator most wants a cost readout for: they sat through it and
+        # then killed it. A happy-path-only footer would hide exactly this one.
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _abort(session_id, *, enabled):
+            def _drain():
+                raise KeyboardInterrupt
+
+            yield _drain
+
+        seq = [FakeToolCompletion("plan", usage=self._usage(3))]
+        rc, _ = self._run(_code_args(task="x", root=self.root, auto=True), seq,
+                          steer=_abort)
+        self.assertEqual(rc, 130)
+        self.assertRegex(self._err, r"code: .*wall")
+        with open(self._sessions()[0]) as f:
+            usage = json.load(f)["usage"]
+        self.assertEqual(usage["turns"], 1)          # stamped BEFORE the snapshot
+        self.assertEqual(usage["prompt_tokens"], 300)
+
+    def test_plan_only_json_carries_the_plan_turns_usage(self):
+        seq = [FakeToolCompletion("just the plan", usage=self._usage(5))]
+        rc, _ = self._run(
+            _code_args(task="x", root=self.root, plan_only=True, json=True), seq)
+        self.assertEqual(rc, 0)
+        usage = json.loads(self._out.getvalue())["usage"]
+        self.assertEqual(usage["prompt_tokens"], 500)
+        self.assertEqual(usage["turns"], 1)
+
+    def test_api_error_run_still_reports_time(self):
+        import openai
+
+        fake = mock.MagicMock()
+        fake.chat.completions.create.side_effect = openai.OpenAIError("boom")
+        stdin = mock.MagicMock()
+        stdin.isatty.return_value = False
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake",
+                                          "VENICE_SESSIONS_DIR": self._sess_dir}), \
+             mock.patch("venice.client.urllib.request.urlopen", _urlopen_ok()), \
+             mock.patch("openai.OpenAI", return_value=fake), \
+             mock.patch.object(sys, "stdin", stdin), \
+             mock.patch.object(sys, "stdout", io.StringIO()), \
+             mock.patch.object(sys, "stderr", err):
+            from venice.commands import code
+            code._run(_code_args(task="x", root=self.root, auto=True))
+        self.assertRegex(err.getvalue(), r"code: .*wall")
+
+    def test_fail_safe_abort_reports_nothing(self):
+        # No model call happened, so "0.0s wall -- cost: $0.0000" would be noise
+        # dressed as data. The footer must not fire before the first call.
+        stdin = mock.MagicMock()
+        stdin.isatty.return_value = False       # non-tty + no --auto -> fail safe
+        err = io.StringIO()
+        fake, _calls = _fake_openai_seq([])
+        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake",
+                                          "VENICE_SESSIONS_DIR": self._sess_dir}), \
+             mock.patch("venice.client.urllib.request.urlopen", _urlopen_ok()), \
+             mock.patch("openai.OpenAI", return_value=fake), \
+             mock.patch.object(sys, "stdin", stdin), \
+             mock.patch.object(sys, "stdout", io.StringIO()), \
+             mock.patch.object(sys, "stderr", err):
+            from venice.commands import code
+            rc = code._run(_code_args(task="x", root=self.root))
+        self.assertEqual(rc, 2)
+        self.assertIn("refusing to run unattended", err.getvalue())
+        self.assertNotIn("wall", err.getvalue())
 
 
 if __name__ == "__main__":

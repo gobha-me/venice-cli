@@ -36,6 +36,7 @@ import json
 import os
 import re
 import sys
+import time
 from typing import List, Optional
 
 from .. import auth, config, userconfig
@@ -480,13 +481,62 @@ PROFILE = _agent.AgentProfile(
 )
 
 
-def _no_tool_turn(oai, model, messages, gen_kwargs, oai_tools) -> str:
+def _finish(ledger, t0, human, *, json_out: bool) -> None:
+    """Close the run's wall-clock window, once, and print the footer (#81).
+
+    A one-shot `venice code` reported neither time nor cost when it finished. This
+    is that report: one stderr line, on every exit that spent a model call --
+    including the Ctrl+C and API-error paths, which are exactly the runs whose cost
+    you most want to see and the ones a happy-path-only footer would hide.
+
+    stderr, not stdout: the final answer is the deliverable and `venice code | ...`
+    must stay clean. Not TTY-gated either -- this is a single line in the same class
+    as "code: aborted" and the acceptance report, not a redraw surface like
+    `_Spinner`, so gating it would only hide the number from logs and pipelines.
+
+    Idempotent via `ledger.turns`: a one-shot ledger is built fresh in `_run_oneshot`
+    and never `restore()`d, so a non-zero turn count means "already stamped". That
+    coupling is load-bearing -- if a future `--resume` ever seeds this ledger from a
+    prior session's usage, this guard silently stops stamping and needs replacing
+    with an explicit flag.
+    """
+    if ledger is None or ledger.turns:
+        return
+    ledger.record_turn(time.monotonic() - t0 - human[0])
+    if not json_out:
+        print(f"code: {_agent.format_duration(ledger.elapsed_seconds)} wall -- "
+              f"{ledger.summary()}", file=sys.stderr)
+
+
+@contextlib.contextmanager
+def _human_pause(acc):
+    """Bank the seconds a prompt spent waiting on the operator (#81).
+
+    `acc` is a one-element list used as a mutable accumulator (the run's timing lives
+    in locals, not an object). Banked on the way out even if the block raises -- an
+    EOFError at the edit prompt is still time you were not waiting on the CLI.
+    """
+    t = time.monotonic()
+    try:
+        yield
+    finally:
+        acc[0] += time.monotonic() - t
+
+
+def _no_tool_turn(oai, model, messages, gen_kwargs, oai_tools, *, ledger=None) -> str:
     """One completion with tools advertised but ``tool_choice="none"`` (no side
-    effects) -- used for the plan turn and the acceptance-check turn."""
+    effects) -- used for the plan turn and the acceptance-check turn.
+
+    #81: these run OUTSIDE `run_loop`, so nothing else records their usage. They
+    carry the whole transcript as prompt, which makes them among the largest calls
+    in a run -- a reported cost that skipped them would understate it badly.
+    """
     resp = oai.chat.completions.create(
         model=model, messages=messages, tools=oai_tools, tool_choice="none",
         **gen_kwargs,
     )
+    if ledger is not None:
+        ledger.record(getattr(resp, "usage", None))
     if getattr(resp, "choices", None):
         return resp.choices[0].message.content or ""
     return ""
@@ -537,12 +587,12 @@ def _prompt_accept(*, no_plan: bool = False) -> str:
         print("Please answer a, s, e, or n.", file=sys.stderr)
 
 
-def _emit_plan_only(args, root, task, plan_text) -> int:
+def _emit_plan_only(args, root, task, plan_text, *, usage=None) -> int:
     if args.json:
-        json.dump(
-            {"root": root, "task": task, "plan": plan_text, "mode": "plan_only"},
-            sys.stdout, indent=2, default=str,
-        )
+        doc = {"root": root, "task": task, "plan": plan_text, "mode": "plan_only"}
+        if usage is not None:
+            doc["usage"] = usage  # #81: a plan turn is a real call and a real wait
+        json.dump(doc, sys.stdout, indent=2, default=str)
         sys.stdout.write("\n")
     else:
         print(plan_text)  # the plan is the deliverable -> stdout
@@ -737,6 +787,16 @@ def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task
     oai_tools = _agent.to_openai_tools(tools)
     plan_text = None
     mode = None
+    # #75/#81: an ALWAYS-ON ledger, not the cap-gated `ledger_from_args`, which returns
+    # None unless --session-max-spend is set. A default `venice code` run therefore
+    # metered nothing at all: no cost to report and an empty `usage` blob in every
+    # session file it wrote. `--session-max-spend` still supplies the cap when given;
+    # uncapped, this meters without gating (`over()`/`over_tokens()` are both None-safe).
+    # Hoisted above the plan block so the plan turn -- a real API call, and a real wait --
+    # is inside the accounting rather than outside it.
+    ledger = _agent.usage_ledger(args, models, model)
+    t0 = time.monotonic()   # #81: the whole run is the window; see `_finish`
+    human = [0.0]           # seconds spent waiting on *you* at a prompt, excluded
 
     if not args.no_plan:
         # Decide the run mode from flags/TTY up front so the non-TTY fail-safe
@@ -753,31 +813,44 @@ def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task
         while True:
             plan_messages = messages + [{"role": "user", "content": _PLAN_INSTRUCTION}]
             try:
-                plan_text = _no_tool_turn(oai, model, plan_messages, gen_kwargs, oai_tools)
+                # Inside the re-plan loop: each `edit` revision buys another plan turn,
+                # so recording per call (not once) is what makes the total honest.
+                plan_text = _no_tool_turn(oai, model, plan_messages, gen_kwargs,
+                                          oai_tools, ledger=ledger)
             except openai.OpenAIError as e:
+                _finish(ledger, t0, human, json_out=args.json)
                 return _openai.status_to_exit(openai, e, "code")
             messages.append({"role": "assistant", "content": plan_text})
 
             if args.plan_only:
-                return _emit_plan_only(args, root, task, plan_text)
+                _finish(ledger, t0, human, json_out=args.json)
+                return _emit_plan_only(args, root, task, plan_text,
+                                       usage=ledger.to_dict())
             if not args.json:
                 _show_plan(plan_text)
 
             decision = mode_decision
             if decision == "prompt":
-                decision = _prompt_accept()
+                # #81: the plan gate and the edit prompt are the operator thinking, not
+                # the CLI working. The ticket's metric is explicitly "how long it kept
+                # me waiting", so bank these pauses and subtract them in `_finish`.
+                with _human_pause(human):
+                    decision = _prompt_accept()
             if decision == "edit":
                 try:
-                    fb = input("Describe the change to the plan (blank to cancel): ").strip()
+                    with _human_pause(human):
+                        fb = input("Describe the change to the plan (blank to cancel): ").strip()
                 except EOFError:
                     fb = ""
                 if not fb:
                     print("code: aborted", file=sys.stderr)
+                    _finish(ledger, t0, human, json_out=args.json)
                     return 1
                 messages.append({"role": "user", "content": "Revise the plan: " + fb})
                 continue
             if decision == "abort":
                 print("code: plan not accepted; aborting", file=sys.stderr)
+                _finish(ledger, t0, human, json_out=args.json)
                 return 1
             mode = decision
             break
@@ -788,7 +861,8 @@ def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task
             return 2
         decision = _decide_mode(args)
         if decision == "prompt":
-            decision = _prompt_accept(no_plan=True)
+            with _human_pause(human):   # #81: your thinking, not the CLI's working
+                decision = _prompt_accept(no_plan=True)
         if decision == "abort":
             print("code: aborted", file=sys.stderr)
             return 1
@@ -825,7 +899,6 @@ def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task
             active = None
     final_text = None
     budget = _budget_for(args)
-    ledger = _agent.ledger_from_args(args, models, model)  # #66 spend cap
     # #79: attached Ctrl+C steering. On an interactive tty, wrap the loop so the first
     # Ctrl+C pauses at the next checkpoint and prompts for a steering line (fed through
     # the #78 drain path); a second Ctrl+C aborts. Off a tty or in --json this yields the
@@ -848,12 +921,16 @@ def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task
                                 budget=budget, ledger=ledger, steer_drain=steer_drain,
                                 parallel=parallel)
     except openai.OpenAIError as e:
+        _finish(ledger, t0, human, json_out=args.json)
         return _openai.status_to_exit(openai, e, "code")
     except KeyboardInterrupt:
         # #79: abort (a 2nd Ctrl+C, or Ctrl+C at the steer prompt). Save the partial
         # transcript so the run stays inspectable/resumable -- side effects already ran --
         # then exit 130 (the documented Ctrl-C code) instead of an uncaught traceback.
         print("\ncode: aborted", file=sys.stderr)
+        # Stamp BEFORE the snapshot below, or the persisted usage carries 0 seconds
+        # for a run the operator just sat through.
+        _finish(ledger, t0, human, json_out=args.json)
         if active is not None:
             if ledger is not None:
                 try:
@@ -872,15 +949,18 @@ def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task
     if not args.no_verify and not args.no_plan:
         messages.append({"role": "user", "content": _VERIFY_MSG})
         try:
-            report = _no_tool_turn(oai, model, messages, gen_kwargs, oai_tools)
+            report = _no_tool_turn(oai, model, messages, gen_kwargs, oai_tools,
+                                   ledger=ledger)
             parsed = _parse_verdict(report)
             if parsed is None:      # re-prompt ONCE for the exact verdict line
                 messages.append({"role": "assistant", "content": report})
                 messages.append({"role": "user", "content": _VERIFY_RETRY_MSG})
-                retry = _no_tool_turn(oai, model, messages, gen_kwargs, oai_tools)
+                retry = _no_tool_turn(oai, model, messages, gen_kwargs, oai_tools,
+                                      ledger=ledger)
                 report = f"{report}\n{retry}" if report else retry
                 parsed = _parse_verdict(retry)
         except openai.OpenAIError as e:
+            _finish(ledger, t0, human, json_out=args.json)
             return _openai.status_to_exit(openai, e, "code")
         verdict = parsed or "unknown"
         if not args.json:
@@ -901,6 +981,9 @@ def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task
         for _u in unprocessed:
             print(f"  - {_u.splitlines()[0][:200] if _u.strip() else '(empty)'}",
                   file=sys.stderr)
+    # #81: stamp before the snapshot and before the envelope, so the persisted usage
+    # and the --json surface both carry the run's wall-clock.
+    _finish(ledger, t0, human, json_out=args.json)
     if active is not None:
         if ledger is not None:
             try:
@@ -916,6 +999,10 @@ def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task
         envelope = {
             "root": root, "task": task, "plan": plan_text, "mode": mode,
             "final": final_text,
+            # #81: `to_dict()` verbatim, so `venice code --json | jq .usage` and
+            # `jq .usage <session>.json` are the same shape and cannot drift apart.
+            # Numbers here, `format_duration` only on the human line.
+            "usage": ledger.to_dict(),
         }
         if report is not None:
             envelope["acceptance"] = {

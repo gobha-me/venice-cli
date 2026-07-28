@@ -390,6 +390,89 @@ class TestCostLedger(unittest.TestCase):
         L = _agent.usage_ledger(args, [], "m")
         self.assertEqual(L.max_spend, 0.25)
 
+    # -- wall-clock per turn (#81) ------------------------------------------ #
+
+    def test_record_turn_accumulates_elapsed_and_turns(self):
+        L = _agent.CostLedger()
+        L.record_turn(1.25)
+        L.record_turn(2.75)
+        self.assertAlmostEqual(L.elapsed_seconds, 4.0)
+        self.assertEqual(L.turns, 2)
+
+    def test_record_turn_survives_garbage_but_still_counts_the_turn(self):
+        # A monotonic clock can't run backwards, so these only ever mean a caller
+        # bug -- but dropping the turn too would corrupt the average, which is the
+        # number most likely to be read.
+        L = _agent.CostLedger()
+        for bad in (None, -5, True, "nope"):
+            L.record_turn(bad)
+        self.assertEqual(L.elapsed_seconds, 0.0)
+        self.assertEqual(L.turns, 4)
+
+    def test_timing_survives_a_resume_round_trip(self):
+        # Additive, like the token tallies: `--resume` reports the TOTAL time this
+        # session has kept you waiting, not just the latest leg.
+        L = _agent.CostLedger()
+        L.record_turn(2.0)
+        L.record_turn(4.0)
+        R = _agent.CostLedger()
+        R.restore(L.to_dict())
+        R.restore(L.to_dict())
+        self.assertAlmostEqual(R.elapsed_seconds, 12.0)
+        self.assertEqual(R.turns, 4)
+
+    def test_restore_tolerates_missing_and_garbage_timing_keys(self):
+        # A pre-#81 envelope has neither key; both degrade to 0 with no version bump.
+        old = _agent.CostLedger()
+        old.restore({"prompt_tokens": 5})
+        self.assertEqual((old.elapsed_seconds, old.turns), (0.0, 0))
+        junk = _agent.CostLedger()
+        junk.restore({"elapsed_seconds": "x", "turns": -3})
+        self.assertEqual((junk.elapsed_seconds, junk.turns), (0.0, 0))
+
+    def test_usage_report_empty_string_survives_the_new_timing_row(self):
+        # The pre-turn placeholder is pinned verbatim above; a ledger that spent
+        # time but got no tokens back (a turn that raised) must still report its
+        # clock -- and must NOT fabricate a cache breakdown for tokens it never saw.
+        self.assertEqual(_agent.CostLedger().usage_report(), "(no usage recorded yet)")
+        L = _agent.CostLedger()
+        L.record_turn(2.0)
+        r = L.usage_report()
+        self.assertNotEqual(r, "(no usage recorded yet)")
+        self.assertIn("2.0s", r)
+        self.assertIn("no tokens reported", r)
+        self.assertNotIn("cache hit rate", r)
+
+    def test_usage_report_has_no_wall_row_without_a_recorded_turn(self):
+        # `run_loop` in isolation and every per-subagent ledger only ever call
+        # record(); they must report exactly what they reported before #81.
+        L = _agent.CostLedger()
+        L.record({"prompt_tokens": 100, "completion_tokens": 5})
+        self.assertNotIn("wall", L.usage_report())
+
+    def test_usage_report_shows_wall_total_count_and_average(self):
+        L = _agent.CostLedger()
+        L.record({"prompt_tokens": 100, "completion_tokens": 5})
+        L.record_turn(60.0)
+        L.record_turn(30.0)
+        r = L.usage_report()
+        self.assertIn("1m 30s", r)
+        self.assertIn("over 2 turn(s)", r)
+        self.assertIn("avg 45.0s", r)
+
+    def test_format_duration_thresholds(self):
+        f = _agent.format_duration
+        self.assertEqual(f(0), "0.0s")
+        self.assertEqual(f(4.5), "4.5s")
+        self.assertEqual(f(59.9), "59.9s")
+        self.assertEqual(f(60), "1m 00s")
+        self.assertEqual(f(134), "2m 14s")
+        self.assertEqual(f(3600), "1h 00m")
+        self.assertEqual(f(7265), "2h 01m")
+        # A bad value must never make a report unreadable.
+        self.assertEqual(f(-5), "0.0s")
+        self.assertEqual(f(None), "0.0s")
+
 
 class TestRunLoopSpendGate(unittest.TestCase):
     """The loop stops starting paid turns once the session cap is hit (#66)."""
