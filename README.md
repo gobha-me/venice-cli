@@ -584,7 +584,11 @@ accumulates across `--resume`), `/reset` (clear history, keep the system prompt)
 `git commit`, optionally pre-seeded with `text`),
 `/help`, and `/exit` (or `/quit`, or Ctrl-D). Ctrl-C aborts the current turn
 without ending the session (while a tool-loop turn is running it first pauses to
-steer — see [Mid-run steering](#mid-run-steering-venice-sessions-send)). Tab completes slash-commands (and model ids after
+steer — see [Mid-run steering](#mid-run-steering-venice-sessions-send)); at the
+prompt it just discards the half-typed line and re-prompts. However you leave —
+`/exit`, Ctrl-D, or a Ctrl-C that lands somewhere unexpected — the session is
+flushed to disk first, so slash-command edits like `/model` and `/system` are
+never lost to the way you quit. Tab completes slash-commands (and model ids after
 `/model `, persona names after `/persona `). At a per-tool confirmation prompt, `a` accepts that call **and**
 auto-accepts the rest of the run. `--max-tool-calls 0` runs until the model
 stops on its own (instead of capping at the default and asking to continue).

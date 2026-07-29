@@ -411,6 +411,49 @@ class TestDriveChatRepl(_DriveCase):
             d.send_eof()
             self.assertEqual(d.wait(), 0)
 
+    def test_repl_ctrl_d_flushes_a_slash_only_session(self):
+        # #92: /model commits no turn, so the ^D exit is the only flush there is.
+        # The unit tests pin the `finally`; this pins that it survives a real pty.
+        with self.cli("chat", "-i") as d:
+            d.expect("you> ")
+            d.send("/model venice-uncensored")
+            d.expect("(model -> venice-uncensored)")
+            d.expect("you> ")
+            d.send_eof()
+            self.assertEqual(d.wait(), 0)
+            self.assertNotIn("Traceback", d.transcript)
+
+        saved = self.sessions()
+        self.assertEqual(len(saved), 1)
+        envelope = json.loads(saved[0].read_text(encoding="utf-8"))
+        self.assertEqual(envelope["model"], "venice-uncensored")
+
+    def test_repl_ctrl_c_at_prompt_reprompts_and_keeps_the_session(self):
+        # #92: `Driver.ctrl_c` had exactly one call site repo-wide (venice login) --
+        # the REPL's own signal behaviour was only ever covered by mocked input().
+        # A real SIGINT at the prompt must discard the line and come back, not exit.
+        self.api.reply("ALIVE-AFTER-INTERRUPT")
+        with self.cli("chat", "-i") as d:
+            d.expect("you> ")
+            d.send_partial("HALF-TYPED-DISCARDED")
+            # Deliberately matching our own echo, which the harness rules otherwise
+            # warn against: it is the sync point. Firing the interrupt before
+            # readline has taken the keystrokes makes the test a coin flip.
+            d.expect("HALF-TYPED-DISCARDED")
+            d.ctrl_c()
+            d.expect("you> ")
+            d.send("Say something")
+            d.expect("ALIVE-AFTER-INTERRUPT")
+            d.expect("you> ")
+            d.send("/exit")
+            self.assertEqual(d.wait(), 0)
+            self.assertNotIn("Traceback", d.transcript)
+
+        # The interrupted line never became a turn.
+        bodies = self.api.bodies("/chat/completions")
+        self.assertEqual(len(bodies), 1)
+        self.assertEqual(bodies[0]["messages"][-1]["content"], "Say something")
+
 
 # --------------------------------------------------------------------------
 # F. interleaved flow #2 -- the `venice code` plan-acceptance gate

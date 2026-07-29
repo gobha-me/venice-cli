@@ -700,42 +700,63 @@ def run(args, oai, openai, client, models, model, initial=None, *,
                 label=label, auto=state["yes"], session=active,
                 ephemeral=ephemeral)
 
-        # An explicit message (`venice chat -i "hello"`) becomes the first turn.
-        if initial:
-            _do_turn(oai, openai, chat, initial, messages, gen_kwargs, state, args)
+        # The session flush lives in exactly one place -- the `finally` below -- so that
+        # no exit path can skip it (#92). It used to be hand-copied into the ^D handler
+        # and the /exit branch, and the ^D copy was skippable: a SIGINT delivered *inside*
+        # an `except` block is not caught by a sibling clause of the same `try`, so the
+        # `except KeyboardInterrupt` here only ever guarded `input()`, never the recovery
+        # code after it. ^D-then-^C (or a lone ^C hitting the readline EOF/SIGINT race)
+        # landed between the newline and the save, and the save never ran. Same structural
+        # move as #86's ledger `_finish`: one call, in a `finally`, unskippable.
+        try:
+            # An explicit message (`venice chat -i "hello"`) becomes the first turn.
+            if initial:
+                _do_turn(oai, openai, chat, initial, messages, gen_kwargs, state, args)
 
-        while True:
-            try:
-                line = input(_PROMPT)
-            except EOFError:
-                print(file=sys.stderr)  # newline after ^D
-                _autosave(state, messages, gen_kwargs)  # flush /model,/system-only edits
-                return 0
-            except KeyboardInterrupt:
-                print(file=sys.stderr)  # ^C at the prompt: discard the line, re-prompt
-                continue
-            line = line.strip()
-            if not line:
-                continue
-            if line.startswith("/"):
-                # /paste and /edit compose a multi-line turn, then submit it like a
-                # normal message. They're handled here (not in _dispatch_slash, which
-                # lacks `openai`/`chat`) so they can call _do_turn directly. (#65)
-                cmd, _, rest = line[1:].partition(" ")
-                if cmd.lower() in ("paste", "edit"):
-                    text = (_read_paste_block() if cmd.lower() == "paste"
-                            else _compose_in_editor(rest.strip()))
-                    if text:
-                        _do_turn(oai, openai, chat, text, messages, gen_kwargs,
-                                 state, args)
-                    continue
-                if _dispatch_slash(
-                    line, messages, state, args, models, oai=oai, gen_kwargs=gen_kwargs
-                ) == "exit":
-                    _autosave(state, messages, gen_kwargs)
+            while True:
+                try:
+                    line = input(_PROMPT)
+                except EOFError:
+                    print(file=sys.stderr)  # newline after ^D
                     return 0
-                continue
-            _do_turn(oai, openai, chat, line, messages, gen_kwargs, state, args)
+                except KeyboardInterrupt:
+                    print(file=sys.stderr)  # ^C at the prompt: discard the line, re-prompt
+                    continue
+                line = line.strip()
+                if not line:
+                    continue
+                if line.startswith("/"):
+                    # /paste and /edit compose a multi-line turn, then submit it like a
+                    # normal message. They're handled here (not in _dispatch_slash, which
+                    # lacks `openai`/`chat`) so they can call _do_turn directly. (#65)
+                    cmd, _, rest = line[1:].partition(" ")
+                    if cmd.lower() in ("paste", "edit"):
+                        text = (_read_paste_block() if cmd.lower() == "paste"
+                                else _compose_in_editor(rest.strip()))
+                        if text:
+                            _do_turn(oai, openai, chat, text, messages, gen_kwargs,
+                                     state, args)
+                        continue
+                    if _dispatch_slash(
+                        line, messages, state, args, models, oai=oai, gen_kwargs=gen_kwargs
+                    ) == "exit":
+                        return 0
+                    continue
+                _do_turn(oai, openai, chat, line, messages, gen_kwargs, state, args)
+        except KeyboardInterrupt:
+            # Whatever the inner clauses didn't already handle: a ^C inside the ^D
+            # teardown, or during a slash-command's own API call. The per-turn abort
+            # (`_turn`, above) and the at-the-prompt re-prompt fire first and never reach
+            # here, so this is always "something unexpected got interrupted" -- end the
+            # session, the way every other command's Ctrl-C handler does. 130 is what
+            # CPython already exited with; this just makes it deliberate and quiet.
+            print(f"\n{label}: aborted", file=sys.stderr)
+            return 130
+        finally:
+            # Also runs on an unexpected crash, which is new: a session that died mid-run
+            # is now persisted rather than lost. `_autosave` no-ops without an active
+            # session (--ephemeral) and swallows disk errors, so this can't itself fail.
+            _autosave(state, messages, gen_kwargs)
 
 
 def _banner(model, tools_on, resume, messages, *, label="venice chat",

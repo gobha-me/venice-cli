@@ -188,6 +188,15 @@ class Driver:
     def send(self, line: str) -> None:
         self.child.sendline(line)
 
+    def send_partial(self, text: str) -> None:
+        """Type without submitting -- no trailing newline.
+
+        For testing what happens to a line the user never sent: Ctrl-C at the
+        prompt is supposed to discard it (#92). ``send`` would submit it and turn
+        the half-typed line into a real turn.
+        """
+        self.child.send(text)
+
     def send_secret(self, value: str) -> None:
         """Type a secret, and keep it out of any failure transcript.
 
