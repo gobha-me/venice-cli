@@ -54,6 +54,32 @@ def tearDownModule():
         __import__("shutil").rmtree(_SESSIONS_TMP, ignore_errors=True)
 
 
+class _InterruptingStderr(io.StringIO):
+    """A stderr whose next write raises KeyboardInterrupt, once (#92).
+
+    Reproduces the exact interleaving in the reported traceback: `input()` raises
+    EOFError, and the SIGINT is delivered on the very next bytecode -- the
+    `print(file=sys.stderr)` that opens the ^D handler. Arm it from the `input`
+    side_effect immediately before raising EOFError. `fired` exists so a test can
+    prove the interrupt actually happened rather than passing vacuously.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._armed = False
+        self.fired = False
+
+    def arm(self):
+        self._armed = True
+
+    def write(self, s):
+        if self._armed:
+            self._armed = False
+            self.fired = True
+            raise KeyboardInterrupt
+        return super().write(s)
+
+
 def _fake_clock(step=1.5):
     """Patch `_repl`'s monotonic clock with a deterministic counter (#81).
 
@@ -198,6 +224,86 @@ class TestRepl(unittest.TestCase):
         )
         self.assertEqual(rc, 0)
         self.assertEqual(len(calls), 1)
+
+    # ----------------------------------------------------------------- #
+    # #92: the ^D teardown used to be an unguarded window
+    # ----------------------------------------------------------------- #
+    def test_eof_autosaves_a_slash_only_edit(self):
+        # /model commits no turn, so nothing autosaves during the session -- the ^D
+        # exit is the only flush. Baseline for the interrupted case below.
+        with tempfile.TemporaryDirectory() as d:
+            rc, fake, calls = _run_repl(
+                _args(interactive=True),
+                [], ["/model venice-uncensored", EOFError], sessions_dir=d,
+            )
+            self.assertEqual(rc, 0)
+            self.assertEqual(len(calls), 0)          # no turn was ever taken
+            env = json.loads(list(Path(d).glob("*.json"))[0].read_text())
+            self.assertEqual(env["model"], "venice-uncensored")
+
+    def test_ctrl_c_inside_eof_teardown_still_autosaves(self):
+        """A SIGINT delivered *inside* the ^D handler (#92).
+
+        The regression test. `except KeyboardInterrupt` is a sibling clause of
+        `except EOFError`, so it never guarded the handler's own body: the interrupt
+        escaped `run()` entirely, printed a traceback out of `cli.main`, and -- the
+        part that wasn't cosmetic -- skipped the `_autosave` that sat on the next
+        line. The `/model` switch below is what used to be lost.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            err = _InterruptingStderr()
+            lines = iter(["/model venice-uncensored"])
+
+            def _input(prompt=""):
+                try:
+                    return next(lines)
+                except StopIteration:
+                    # ^D, and a SIGINT that lands on the handler's first statement.
+                    err.arm()
+                    raise EOFError
+
+            rc, fake, calls = _run_repl(
+                _args(interactive=True), [], _input, sessions_dir=d, stderr=err,
+            )
+            self.assertEqual(rc, 130)
+            self.assertIn("aborted", err.getvalue())
+            self.assertTrue(err.fired, "the fake stderr never raised; test is vacuous")
+            # The point of the fix: the session survived the interrupt.
+            env = json.loads(list(Path(d).glob("*.json"))[0].read_text())
+            self.assertEqual(env["model"], "venice-uncensored")
+
+    def test_ephemeral_ctrl_c_teardown_writes_nothing(self):
+        # The `finally` runs, but --ephemeral has no active session, so _autosave
+        # no-ops. 130 without a file.
+        with tempfile.TemporaryDirectory() as d:
+            err = _InterruptingStderr()
+
+            def _input(prompt=""):
+                err.arm()
+                raise EOFError
+
+            rc, fake, calls = _run_repl(
+                _args(interactive=True, ephemeral=True), [], _input,
+                sessions_dir=d, stderr=err,
+            )
+            self.assertEqual(rc, 130)
+            self.assertEqual(list(Path(d).glob("*.json")), [])
+
+    def test_exit_autosaves_exactly_once(self):
+        # The flush moved into a `finally`; the inline copies were dropped. Guard
+        # against it being done twice (or the /exit copy being left behind).
+        with tempfile.TemporaryDirectory() as d:
+            saves = []
+            real_save = _repl._session.save
+            with mock.patch.object(_repl._session, "save",
+                                   side_effect=lambda s: (saves.append(s.id),
+                                                          real_save(s))[1]):
+                rc, fake, calls = _run_repl(
+                    _args(interactive=True), [], ["/model venice-uncensored", "/exit"],
+                    sessions_dir=d,
+                )
+            self.assertEqual(rc, 0)
+            self.assertEqual(len(saves), 1)
 
     def test_auto_interactive_on_tty(self):
         # No message + stdin is a TTY -> REPL (was exit 2 before #22).
