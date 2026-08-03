@@ -70,9 +70,12 @@ It exists because patching `builtins.input` proves a *branch* runs; it can't
 prove the prompt reached a terminal in a usable order. Read the rules in
 `tests/_drive.py`'s docstring before adding a case — each one (pty CRLF, echoed
 input, the agent spinner) is a flake source already paid for once.
+
 The child's import path mirrors the parent's effective site configuration:
 user-site packages are included only when the parent interpreter has user-site
-imports enabled, and the child disables HOME-derived user-site discovery.
+imports enabled, and the child disables HOME-derived user-site discovery. That
+distinction is invisible until you run the suite from a venv, where
+`site.ENABLE_USER_SITE` is `False` (#107).
 
 ## House style
 

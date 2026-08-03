@@ -42,6 +42,8 @@ needs_openai = unittest.skipUnless(_HAS_OPENAI, "openai SDK not installed")
 
 
 class TestDrivePythonPath(unittest.TestCase):
+    """The child's import path, and the two things that keep it coherent (#107)."""
+
     def test_user_site_follows_parent_effective_configuration(self):
         with tempfile.TemporaryDirectory() as user_site:
             with mock.patch.object(site, "getusersitepackages", return_value=user_site):
@@ -54,6 +56,11 @@ class TestDrivePythonPath(unittest.TestCase):
         self.assertIn(user_site, enabled)
 
     def test_child_disables_home_derived_user_site(self):
+        # Defense in depth, and deliberately so: the tmp $HOME has no `.local`,
+        # so the child derives no user site today with or without this. It
+        # pins the *intent* -- membership in the user site dir stays something
+        # the parent states through PYTHONPATH, never something $HOME implies
+        # the day a fixture starts writing into the redirected home.
         with tempfile.TemporaryDirectory() as home:
             self.assertEqual(_drive.build_env(home)["PYTHONNOUSERSITE"], "1")
 
