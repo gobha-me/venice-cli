@@ -31,6 +31,7 @@ import json
 import os
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Callable, Dict, List, NamedTuple, Optional, Tuple
@@ -344,6 +345,25 @@ class CostLedger:
         # call, which `record()` counts and which would make the average meaningless.
         self.elapsed_seconds = 0.0
         self.turns = 0
+        # #82: per-tool execution time, name -> {"seconds": float, "calls": int}. Same
+        # caller-stamps-the-clock contract as `elapsed_seconds` above, one level down:
+        # `run_loop` brackets each `tool.invoke` and hands `record_tool` a delta.
+        # A SUBSET of `elapsed_seconds`, never a partition of it -- the model wait,
+        # `_compact`'s summary call (#101) and the out-of-loop turns are all wall time
+        # that no tool owns. Under `--parallel` overlapping windows make the sum exceed
+        # wall outright; `_tool_lines` labels that rather than hiding it.
+        self.tools: Dict[str, dict] = {}
+        # Serializes `record_tool`'s read-modify-write: under `--parallel` two
+        # `venice_spawn` windows close on DIFFERENT pool workers and land on the SAME
+        # key, and `row["calls"] += 1` is a load/add/store rather than one bytecode --
+        # the same shape `_code._DISPATCH_LOCK` guards for its dispatch append.
+        # Honest caveat, measured while writing the tests: CPython's GIL does not
+        # actually lose one of these increments even at 16 threads x 20,000 iterations
+        # with a 1ns switch interval, so no test can demonstrate the loss on this
+        # interpreter (the test pins that the mutation happens under the lock instead).
+        # The lock stays because GIL bytecode-boundary behaviour is not a language
+        # guarantee and free-threaded builds drop it outright.
+        self._tools_lock = threading.Lock()
         self._in = None          # per-token input rate (USD)
         self._out = None         # per-token output rate (USD)
         self._cache_in = None    # per-token cache-read rate (USD); None -> use _in
@@ -385,6 +405,19 @@ class CostLedger:
             # Rounded because `venice sessions show` prints this dict straight at a
             # human. Deliberately NOT read back by `restore()`; see the note there.
             "cache_hit_percent": self.cache_hit_percent(round_to=1),
+            # #82: the SECOND derived key (`cache_hit_percent` is the first) -- the exact
+            # number the run footers print, so a pipeline can alert on tool time without
+            # re-summing the map below. Deliberately NOT read back by `restore()`.
+            "tool_seconds": self.tool_seconds(),
+            # #82: name -> {"seconds", "calls"}. Self-describing rather than a positional
+            # pair, because this rides the `--json` envelope and the session file that
+            # operators jq (`.usage.tools.shell.seconds`). Rows are COPIED so a caller
+            # mutating the envelope cannot reach back into the live ledger. Sorted by
+            # NAME, so two runs of the same shape produce a diffable envelope -- the
+            # human block sorts by time instead (`_tool_lines`); different question,
+            # different order. Kept LAST because `venice sessions show` prints this dict
+            # as a one-line repr, and a nested map belongs after the readable scalars.
+            "tools": {k: dict(self.tools[k]) for k in sorted(self.tools)},
         }
 
     def restore(self, d) -> None:
@@ -426,6 +459,25 @@ class CostLedger:
         # above is additive because it is a tally; that one is DERIVED from the tallies
         # this method just seeded, so it recomputes itself for free -- and accumulating
         # it (the reflex the surrounding lines invite) would add two percentages.
+        # #82: additive per tool NAME, like the token tallies, so `--resume` reports
+        # where the whole session's tool time went and not just the latest leg. Tolerant
+        # PER ROW, so one hand-edited entry cannot cost the others. A pre-#82 envelope
+        # has no `tools` key and degrades to {} -- no SESSION_VERSION bump. No lock: this
+        # runs single-threaded at construction, and taking it would imply otherwise.
+        raw = d.get("tools")
+        if isinstance(raw, dict):
+            for name, row in raw.items():
+                if not isinstance(row, dict):
+                    continue
+                key = str(name).strip()
+                if not key:
+                    continue
+                cur = self.tools.setdefault(key, {"seconds": 0.0, "calls": 0})
+                cur["seconds"] = round(cur["seconds"] + _as_float(row.get("seconds")), 3)
+                cur["calls"] += _as_int(row.get("calls"))
+        # `tool_seconds` is NOT restored, for the `cache_hit_percent` reason one field
+        # over: it is DERIVED from the map the loop above just seeded, so it recomputes
+        # for free, and accumulating it would double every resumed run's tool time.
 
     def record_turn(self, seconds) -> None:
         """Add one blocked window's wall-clock and count the turn (#81).
@@ -439,6 +491,48 @@ class CostLedger:
         """
         self.elapsed_seconds = round(self.elapsed_seconds + _as_float(seconds), 3)
         self.turns += 1
+
+    def record_tool(self, name, seconds) -> None:
+        """Add one tool call's execution window to the per-tool aggregate (#82).
+
+        PURE like :meth:`record_turn`: the caller brackets `tool.invoke` and passes the
+        delta, so the ledger still never reads a clock and every test here stays a
+        pure-function assertion.
+
+        One CALL, not one invoke. A confirm-gated paid tool invokes TWICE (gated, then
+        re-invoked with ``confirm=True``); `_run_one_call` sums both windows and flushes
+        once, so `calls` counts what the model asked for while `seconds` counts what
+        actually ran. Thread-safe -- see `_tools_lock`.
+
+        Garbage or negative seconds count as 0 but still count the call, for
+        `record_turn`'s reason: a monotonic clock cannot run backwards, so that only ever
+        catches a caller bug, and dropping the call would corrupt the per-call average
+        too. A blank name is dropped ENTIRELY, which is the one real difference: there is
+        no row to put it on, and an anonymous line in the breakdown answers nothing.
+        """
+        key = str(name).strip() if name is not None else ""
+        if not key:
+            return
+        secs = _as_float(seconds)
+        with self._tools_lock:
+            row = self.tools.get(key)
+            if row is None:
+                self.tools[key] = {"seconds": round(secs, 3), "calls": 1}
+            else:
+                row["seconds"] = round(row["seconds"] + secs, 3)
+                row["calls"] += 1
+
+    def tool_seconds(self) -> float:
+        """Total measured tool-execution time (#82); 0.0 with nothing recorded."""
+        return round(sum(r["seconds"] for r in self.tools.values()), 3)
+
+    def tool_calls_total(self) -> int:
+        """How many tool calls that time is spread across (#82).
+
+        Not `tool_calls`: `calls_made`/`max_tool_calls` already crowd that vocabulary in
+        `run_loop`, and a bare `tool_calls` reads like the OpenAI message field.
+        """
+        return sum(r["calls"] for r in self.tools.values())
 
     def record(self, usage) -> float:
         """Add one turn's `usage` (dict or SDK obj); return this turn's cost.
@@ -613,7 +707,12 @@ class CostLedger:
             # raised, or one aborted mid-flight. Report the clock honestly rather than
             # claiming nothing happened, but don't fabricate a 0-token cache breakdown
             # and a "cache hit rate: 0.0%" that would read as a real measurement.
-            return "session usage:\n  (no tokens reported)\n" + self._timing_line()
+            # #82: a turn that spent minutes in tools then raised before any usage came
+            # back is exactly when the breakdown earns its keep -- wire BOTH sites.
+            return "\n".join(
+                ["session usage:", "  (no tokens reported)", self._timing_line()]
+                + self._tool_lines()
+            )
         uncached = self.prompt_tokens - self.cache_read_tokens - self.cache_write_tokens
         lines = ["session usage:"]
         # #98: the two flags govern DIFFERENT rows on purpose. Read-reported-but-
@@ -666,6 +765,7 @@ class CostLedger:
             lines.append(cost)
         if self.turns:  # #81
             lines.append(self._timing_line())
+        lines.extend(self._tool_lines())  # #82 -- own gate; see `_tool_lines`
         return "\n".join(lines)
 
     def _timing_line(self) -> str:
@@ -678,6 +778,78 @@ class CostLedger:
         avg = self.elapsed_seconds / self.turns if self.turns else 0.0
         return (f"  wall    {format_duration(self.elapsed_seconds):>10}  "
                 f"over {self.turns} turn(s)  (avg {format_duration(avg)})")
+
+    #: #82: rows in the `/usage` tools block before the tail folds into one `(+N more)`
+    #: line. Bounded because an MCP server can attach dozens of tools, and a 40-row
+    #: block buries the three names that actually ate the run.
+    _TOOL_ROWS = 8
+
+    def _tool_lines(self) -> List[str]:
+        """The `/usage` per-tool breakdown (#82); ``[]`` when nothing was timed.
+
+        Gated on the MAP, not on `self.turns` like `_timing_line`: a ledger that only
+        ever saw `run_loop` (every per-subagent ledger) has real tool time and no turn,
+        and the number is true there even though nothing renders it today. Coupling it
+        to `turns` would be a false dependency that reads as intentional.
+
+        Sorted by time DESCENDING -- the block exists to answer "what ate the run" --
+        with the name as tiebreak, so two tools at the same duration cannot swap places
+        between runs and turn a pinned test into a coin flip.
+        """
+        if not self.tools:
+            return []
+        total = self.tool_seconds()
+        # `  tools   ` is 10 chars before the field, exactly like `  wall    ` above, so
+        # the two durations line up in one column with no other coordination.
+        head = (f"  tools   {format_duration(total):>10}  "
+                f"across {self.tool_calls_total()} call(s)")
+        # #82: under --parallel two subagent windows overlap in real time but BOTH land
+        # in this total, so it can legitimately exceed the wall row it sits under. Say
+        # which clock it is rather than letting the reader assume it's an arithmetic
+        # bug; `_queue.progress_tick` sets the house precedent (locally measured `wall`
+        # vs provider-reported `server`). The tolerance absorbs `record_turn`'s 3-dp
+        # rounding -- a serial run's tools nest inside its turns and must never trip it.
+        if self.turns and total > self.elapsed_seconds + 0.001:
+            head += "  [concurrent -- exceeds wall]"
+        rows = sorted(self.tools.items(), key=lambda kv: (-kv[1]["seconds"], kv[0]))
+        shown, rest = rows[:self._TOOL_ROWS], rows[self._TOOL_ROWS:]
+        more = f"(+{len(rest)} more)" if rest else ""
+        # Width from the DATA: MCP tool names are unbounded, and a fixed column would
+        # either truncate the name (the one thing the row is for) or wrap the block.
+        w = max([12, len(more)] + [len(n) for n, _ in shown])
+        lines = [head]
+        for name, row in shown:
+            lines.append(f"    {name:<{w}}  {format_duration(row['seconds']):>8}"
+                         f"   {row['calls']} call(s)")
+        if rest:
+            # The residual carries its OWN seconds and calls, so the rows still
+            # reconcile to the header. A truncated block whose parts do not add up is
+            # the #98 lie in a new costume.
+            lines.append(f"    {more:<{w}}  "
+                         f"{format_duration(sum(r['seconds'] for _, r in rest)):>8}"
+                         f"   {sum(r['calls'] for _, r in rest)} call(s)")
+        return lines
+
+    def tools_fragment(self) -> str:
+        """The run footers' tool-time clause (#82): ``" (2m 41s tools)"`` or ``""``.
+
+        Rendered INSIDE the wall field -- ``code: 4m 12s wall (2m 41s tools) -- cost:``
+        -- because `" -- "` is THE top-level field boundary and the README documents it
+        as one. Same reflex as #100's cache clause going inside `summary`'s parens.
+
+        Unlike `summary(cache=...)` this needs no opt-in flag: it is built by the two
+        footers themselves rather than by `summary`, so `run_loop`'s spend/token
+        stop-reason messages -- which call `summary()` on unpriced subagent ledgers --
+        can never inherit this surface by accident.
+        """
+        if not self.tools:
+            return ""
+        total = self.tool_seconds()
+        if self.turns and total > self.elapsed_seconds + 0.001:
+            # A footer reading `4m 12s wall (6m 02s tools)` reads as an arithmetic bug
+            # unless it says why. One word, still inside the parens.
+            return f" ({format_duration(total)} tools, concurrent)"
+        return f" ({format_duration(total)} tools)"
 
 
 def _pricing_for(models, model_id):
@@ -1894,7 +2066,27 @@ def _prompt_yes() -> str:
     return "no"
 
 
-def _resolve_spend(tool: Tool, arguments: dict, result, gate: dict):
+@contextlib.contextmanager
+def _invoke_window(acc):
+    """Bank one ``tool.invoke`` window into ``acc[0]`` (#82).
+
+    A one-element list, mirroring `code._human_pause` -- the house pattern for "the
+    caller owns the clock and the timing lives in a local rather than on an object".
+    `CostLedger.record_tool` stays a pure accumulator; this is the caller side of that
+    split.
+
+    Banked in `finally`, so a tool that RAISED still reports the seconds it burned
+    before raising. That is real waiting, and a crash loop that self-reports 0.0s hides
+    precisely its own cost.
+    """
+    t = time.monotonic()
+    try:
+        yield
+    finally:
+        acc[0] += time.monotonic() - t
+
+
+def _resolve_spend(tool: Tool, arguments: dict, result, gate: dict, *, window=None):
     """Hybrid gate: prompt on a TTY, else feed the block back to the model.
 
     `gate` is the run's mutable auto-accept holder (`{"auto": bool}`); answering
@@ -1902,6 +2094,11 @@ def _resolve_spend(tool: Tool, arguments: dict, result, gate: dict):
     the same run skip the gate. Only reached for a paid tool that returned
     `confirmation_required` (which happens only while ``gate["auto"]`` is False).
     """
+    # #82: `window` is `_run_one_call`'s one-element accumulator -- the re-invoke below
+    # is the SAME tool call, so its seconds belong to the same row. None -> a throwaway,
+    # so this stays callable standalone (a signature break is against house rules).
+    if window is None:
+        window = [0.0]
     if not tool.paid or gate["auto"]:
         return result
     if not (isinstance(result, dict) and result.get("status") == "confirmation_required"):
@@ -1914,14 +2111,36 @@ def _resolve_spend(tool: Tool, arguments: dict, result, gate: dict):
             if ans == "all":
                 gate["auto"] = True
             try:
-                return tool.invoke(arguments, confirm=True)
+                with _invoke_window(window):  # #82: same call, same row
+                    return tool.invoke(arguments, confirm=True)
             except Exception as e:  # pragma: no cover - impls shouldn't raise
                 return {"status": "error", "message": f"{tool.name} failed: {e}"}
         print(f"{tool.name}: declined by user", file=sys.stderr)
     return result  # non-TTY or declined -> the model sees the gate and adapts
 
 
-def _run_one_call(tc, dispatch: Dict[str, Tool], gate: dict) -> dict:
+def _run_one_call(tc, dispatch: Dict[str, Tool], gate: dict, *, on_tool=None) -> dict:
+    """Run one tool call and return the model-visible result dict.
+
+    `on_tool` (#82) is an optional ``(name, seconds) -> None`` sink for the call's
+    EXECUTION time -- `CostLedger.record_tool` when `run_loop` was given a ledger. A
+    callback rather than the ledger itself for two reasons: this function's return value
+    is `json.dumps`'d straight into the `tool` message the MODEL reads (see both
+    callers), so a duration must never ride it; and the dispatch layer should not have
+    to learn what a ledger is in order to say how long something took.
+
+    What is timed, exactly:
+
+    * only `tool.invoke`. The three validation returns below never entered a tool, so
+      they are not tool time -- stamping them would land ~0.0s rows that deflate the
+      per-call average, and a turn full of rejected calls would report suspiciously
+      fast tools.
+    * BOTH invokes of a confirm-gated paid tool, summed into one row and ONE call. The
+      operator's read-time at the `Proceed?` prompt falls BETWEEN the two windows and is
+      excluded for free -- `chat._finish` documents that wait as a known hole in the
+      WALL clock; it is deliberately not a hole here.
+    * a tool that raised (the window closes in `finally`).
+    """
     tool = dispatch.get(tc.function.name)
     if tool is None:
         return {"status": "error", "message": f"unknown tool {tc.function.name!r}"}
@@ -1931,11 +2150,21 @@ def _run_one_call(tc, dispatch: Dict[str, Tool], gate: dict) -> dict:
         return {"status": "error", "message": f"invalid JSON arguments: {e}"}
     if not isinstance(arguments, dict):
         return {"status": "error", "message": "tool arguments must be a JSON object"}
+    # #82: opened BELOW the validation returns on purpose -- see the docstring.
+    window = [0.0]
     try:
-        result = tool.invoke(arguments, confirm=bool(gate["auto"]))
-    except Exception as e:  # pragma: no cover - impls shouldn't raise
-        return {"status": "error", "message": f"{tool.name} failed: {e}"}
-    return _resolve_spend(tool, arguments, result, gate)
+        try:
+            with _invoke_window(window):
+                result = tool.invoke(arguments, confirm=bool(gate["auto"]))
+        except Exception as e:  # pragma: no cover - impls shouldn't raise
+            return {"status": "error", "message": f"{tool.name} failed: {e}"}
+        return _resolve_spend(tool, arguments, result, gate, window=window)
+    finally:
+        # One flush per CALL, after any confirm re-invoke, on every path out of here
+        # including the raise above. `tool.name` rather than `tc.function.name`:
+        # identical by construction of `dispatch_map`, but the tool's is canonical.
+        if on_tool is not None:
+            on_tool(tool.name, window[0])
 
 
 def _dispatch_parallel(
@@ -1948,6 +2177,7 @@ def _dispatch_parallel(
     max_tool_calls: int,
     unlimited: bool,
     show: bool,
+    on_tool=None,
 ) -> int:
     """Run one assistant turn's tool calls with subagent dispatches executed concurrently.
 
@@ -1961,6 +2191,11 @@ def _dispatch_parallel(
     contract: each ``tool`` message answers its assistant ``tool_calls`` entry), and the
     tool-call budget is honored exactly as the serial path does. Returns the updated
     ``calls_made``.
+
+    ``on_tool`` (#82) is the ONE exception to the main-thread rule above: a tool's window
+    closes where the tool ran, so a worker calls the sink directly.
+    :meth:`CostLedger.record_tool` takes a lock for exactly this -- two ``venice_spawn``
+    calls in one batch land on the same key from two threads.
     """
     n = len(tool_calls)
     # Budget allotment up front: the first `slots` calls (original order) run; the rest
@@ -1999,7 +2234,8 @@ def _dispatch_parallel(
             max_workers=workers, thread_name_prefix="venice-subagent"
         ) as ex:
             futs = {
-                ex.submit(_run_one_call, tool_calls[i], dispatch, gate): i
+                ex.submit(_run_one_call, tool_calls[i], dispatch, gate,
+                          on_tool=on_tool): i
                 for i in par_idx
             }
             try:
@@ -2011,7 +2247,7 @@ def _dispatch_parallel(
 
     # Serial remainder, in original order (paid tools + the confirm gate stay unchanged).
     for i in ser_idx:
-        results[i] = _run_one_call(tool_calls[i], dispatch, gate)
+        results[i] = _run_one_call(tool_calls[i], dispatch, gate, on_tool=on_tool)
 
     # Commit on the main thread: append in ORIGINAL order, advance by the executed count.
     for i, tc in enumerate(tool_calls):
@@ -2091,6 +2327,11 @@ def run_loop(
     dispatch = dispatch_map(tools)
     calls_made = 0
     gate = {"auto": bool(yes)}  # mutable so an `a`/`all` confirm flips the run to auto
+    # #82: the per-tool timing sink, bound ONCE so both dispatch paths -- and every pool
+    # worker under --parallel -- hand their windows to the same ledger. None when
+    # unmetered, which keeps the two dispatch helpers ledger-free and makes every call
+    # site a single `is not None`. `record_tool` is thread-safe; see its lock.
+    on_tool = ledger.record_tool if ledger is not None else None
     # `--max-tool-calls 0` (or None) means unlimited -- run until the model stops
     # on its own (bounded in practice by the model's context window).
     unlimited = max_tool_calls is None or max_tool_calls <= 0
@@ -2174,7 +2415,7 @@ def run_loop(
             calls_made = _dispatch_parallel(
                 tool_calls, dispatch, gate, messages,
                 calls_made=calls_made, max_tool_calls=max_tool_calls,
-                unlimited=unlimited, show=show,
+                unlimited=unlimited, show=show, on_tool=on_tool,
             )
         else:
             for tc in tool_calls:
@@ -2189,7 +2430,7 @@ def run_loop(
                         f"· {tc.function.name} {_short_args(tc.function.arguments)}".rstrip(),
                         enabled=show,
                     )
-                    result = _run_one_call(tc, dispatch, gate)
+                    result = _run_one_call(tc, dispatch, gate, on_tool=on_tool)
                     calls_made += 1
                 messages.append(
                     {

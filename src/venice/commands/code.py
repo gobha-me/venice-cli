@@ -506,8 +506,14 @@ def _finish(ledger, t0, human, *, json_out: bool) -> None:
     if not json_out:
         # cache=True (#100): a prompt-cache collapse is a silent 3-5x cost event, and
         # this footer is the only surface a one-shot run puts in front of an operator.
-        print(f"code: {_agent.format_duration(ledger.elapsed_seconds)} wall -- "
-              f"{ledger.summary(cache=True)}", file=sys.stderr)
+        # tools_fragment (#82) sits INSIDE the wall field, because " -- " is the
+        # top-level field boundary the README documents. It reads `elapsed_seconds` to
+        # decide whether to say "concurrent", which is why it must render AFTER the
+        # `record_turn` above -- moving the stamp below this print would make the
+        # marker fire on every run.
+        print(f"code: {_agent.format_duration(ledger.elapsed_seconds)} wall"
+              f"{ledger.tools_fragment()} -- {ledger.summary(cache=True)}",
+              file=sys.stderr)
 
 
 @contextlib.contextmanager

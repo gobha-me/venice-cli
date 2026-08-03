@@ -417,9 +417,12 @@ def _finish(ledger, t0) -> None:
         return
     ledger.record_turn(time.monotonic() - t0)
     # cache=True (#100): same reasoning as `code._finish` -- and more load-bearing here,
-    # since chat's `--json` has no envelope to carry the number instead (#88).
-    print(f"chat: {_agent.format_duration(ledger.elapsed_seconds)} wall -- "
-          f"{ledger.summary(cache=True)}", file=sys.stderr)
+    # since chat's `--json` has no envelope to carry the number instead (#88). The same
+    # goes for tools_fragment (#82): this footer is the ONLY surface carrying it here.
+    # It reads `elapsed_seconds` for its "concurrent" check, so it must render after the
+    # `record_turn` above.
+    print(f"chat: {_agent.format_duration(ledger.elapsed_seconds)} wall"
+          f"{ledger.tools_fragment()} -- {ledger.summary(cache=True)}", file=sys.stderr)
 
 
 def _run(args) -> int:

@@ -895,6 +895,7 @@ class TestCodeUsageSurface(unittest.TestCase):
             _code_args(task="x", root=self.root, auto=True, json=True), self._full_seq())
         self.assertEqual(rc, 0)
         self.assertNotIn("wall", self._err)
+        self.assertNotIn("tools", self._err)    # #82 rides the same suppression
         json.loads(self._out.getvalue())        # envelope still parses
 
     # -- the cache hit rate reaches the footer and the envelope (#100) ------- #
@@ -949,6 +950,58 @@ class TestCodeUsageSurface(unittest.TestCase):
         usage = json.loads(self._out.getvalue())["usage"]
         self.assertIn("cache_hit_percent", usage)
         self.assertIsNone(usage["cache_hit_percent"])
+
+    # -- per-tool timing reaches the footer and the envelope (#82) ---------- #
+
+    def _tool_seq(self):
+        """The same run, but the exec turn dispatches two real `write_file` calls."""
+        return [
+            FakeToolCompletion("plan text", usage=self._usage(1)),
+            FakeToolCompletion(tool_calls=[_write_call("c1", "a.txt", "x"),
+                                           _write_call("c2", "b.txt", "y")],
+                               usage=self._usage(2)),
+            FakeToolCompletion("done", usage=self._usage(2)),
+            FakeToolCompletion("ACCEPTANCE: PASS", usage=self._usage(4)),
+        ]
+
+    def _footer(self):
+        lines = [ln for ln in self._err.splitlines()
+                 if ln.startswith("code: ") and "wall" in ln]
+        self.assertEqual(len(lines), 1, self._err)
+        return lines[0]
+
+    def test_footer_carries_the_tools_clause(self):
+        rc, _ = self._run(
+            _code_args(task="x", root=self.root, auto=True), self._tool_seq())
+        self.assertEqual(rc, 0)
+        # The clause lives INSIDE the wall field: " -- " stays the top-level boundary.
+        self.assertRegex(self._footer(),
+                         r"^code: [\d.]+s wall \([\d.]+s tools\) -- cost: ")
+
+    def test_footer_has_no_tools_clause_when_no_tool_ran(self):
+        # assertIn("wall", ...) cannot see a wrongly-appended " (0.0s tools)" -- a
+        # substring match is blind to a suffix, so pin the shape of the whole field.
+        rc, _ = self._run(
+            _code_args(task="x", root=self.root, auto=True), self._full_seq())
+        self.assertEqual(rc, 0)
+        self.assertRegex(self._footer(), r"^code: [\d.]+s wall -- cost: ")
+        self.assertNotIn("tools", self._footer())
+
+    def test_json_envelope_carries_the_tools_block(self):
+        rc, _ = self._run(
+            _code_args(task="x", root=self.root, auto=True, json=True), self._tool_seq())
+        self.assertEqual(rc, 0)
+        usage = json.loads(self._out.getvalue())["usage"]
+        self.assertEqual(usage["tools"]["write_file"]["calls"], 2)
+        self.assertGreaterEqual(usage["tool_seconds"], 0)
+
+    def test_session_file_carries_the_tools_block(self):
+        # Same contract as the cache rate: `jq .usage` agrees on envelope and session.
+        rc, _ = self._run(
+            _code_args(task="x", root=self.root, auto=True), self._tool_seq())
+        self.assertEqual(rc, 0)
+        with open(self._sessions()[0]) as f:
+            self.assertEqual(json.load(f)["usage"]["tools"]["write_file"]["calls"], 2)
 
     def test_session_file_carries_the_cache_hit_rate(self):
         # Same shape as the envelope: `jq .usage` agrees on both (code.py's

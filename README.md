@@ -817,7 +817,7 @@ Details and safety:
   tool cap). A model with unknown pricing is counted (tokens) but not charged.
 - `--output DIR` sets where generated files are written (default: cwd).
 - **What the run cost.** A finished `--tools` run prints one line to **stderr** —
-  `chat: 8.3s wall -- cost: $0.0041 (tokens prompt=3120 completion=284, cache 71.4% hit)`
+  `chat: 8.3s wall (5.1s tools) -- cost: $0.0041 (tokens prompt=3120 completion=284, cache 71.4% hit)`
   — so stdout
   stays exactly the deliverable and `venice chat --tools … | …` is unaffected. It
   totals *every* turn of the loop, not just the last one, and it prints on the
@@ -1252,7 +1252,7 @@ never emitted a parseable verdict even after the re-prompt (the work may still b
 complete — a loud stderr warning is printed).
 
 **What the run cost.** A finished run prints one line to **stderr** —
-`code: 2m 14s wall -- cost: $0.0431 (tokens prompt=48201 completion=3904, cache 94.0% hit)`
+`code: 2m 14s wall (1m 02s tools) -- cost: $0.0431 (tokens prompt=48201 completion=3904, cache 94.0% hit)`
 — so
 stdout stays exactly the deliverable and `venice code … | …` is unaffected. It
 prints on the Ctrl+C and API-error exits too, which are the runs most worth
@@ -1283,6 +1283,32 @@ understated percentage, and the human line marks it `[partially unreported]` whi
 JSON does not — so an unguarded `cache_hit_percent < 50` pages you for a provider that
 merely went quiet. `VENICE_USAGE_RAW=1` dumps each response's raw `usage` block to
 stderr when you need to see which turns those were.
+
+**Where the time went.** "The model is slow" and "my test suite is slow" call for
+completely different responses, so the wall figure carries a tool-time clause —
+`2m 14s wall (1m 02s tools)` — and `/usage` itemizes it:
+
+```
+  wall        2m 14s  over 1 turn(s)  (avg 2m 14s)
+  tools       1m 02s  across 19 call(s)
+    shell             48.1s   7 call(s)
+    apply_patch       11.4s   5 call(s)
+    read_file          2.5s   7 call(s)
+```
+
+Only `tool.invoke` is counted, so the seconds you spend at a `Proceed?` confirm
+prompt are *not* charged to the tool. The tools total is a **subset** of wall — the
+model wait, auto-compaction and the plan/acceptance turns are all wall time no tool
+owns — with one exception: under `--parallel`, overlapping subagent windows both land
+in the total, so it can exceed wall and is then marked `concurrent`. Long runs fold
+the tail into a `(+N more)` row that carries its own seconds and calls, so the rows
+always add back up to the header. The machine-readable half is `usage.tool_seconds`
+and `usage.tools`, in both the `--json` envelope and the session file:
+
+```sh
+venice code --json "..." | jq '.usage.tools.shell.seconds'
+venice code --json "..." | jq '.usage.tool_seconds'
+```
 
 **Tools** (path-sandboxed to the project root; mutating tools confirm unless `--auto`):
 

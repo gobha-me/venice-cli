@@ -52,6 +52,21 @@ def _tty(value=True):
     return m
 
 
+@contextlib.contextmanager
+def _driven_clock():
+    """A monotonic clock that only the FAKES advance (#82).
+
+    `_repl._fake_clock` auto-increments on every read because it only needs a non-zero
+    duration. Here the durations ARE the assertion, so an auto-incrementing counter
+    would make every expected number a function of how many times production happens to
+    read the clock -- exactly the tripwire that helper's docstring warns about. Reads are
+    free; a fake tool impl or a mocked `input()` moves `now[0]` deliberately.
+    """
+    now = [0.0]
+    with mock.patch("venice.commands._agent.time.monotonic", lambda: now[0]):
+        yield now
+
+
 class TestShortArgs(unittest.TestCase):
     def test_prefers_informative_field(self):
         self.assertEqual(
@@ -124,6 +139,154 @@ class TestConfirmGate(unittest.TestCase):
                                           dispatch, gate)
         self.assertEqual(result["status"], "confirmation_required")
         self.assertFalse(gate["auto"])
+
+
+class TestToolTiming(unittest.TestCase):
+    """#82: what `_run_one_call` does and does not count as tool time."""
+
+    def _timed_tool(self, now, secs, *, raises=False, name="t"):
+        def impl(arguments, *, confirm=False):
+            now[0] += secs
+            if raises:
+                raise RuntimeError("boom")
+            return {"status": "ok"}
+        return _tool(name, impl)
+
+    @staticmethod
+    def _sink(into):
+        """The `(name, seconds)` sink shape, collecting into `into` as tuples."""
+        return lambda name, seconds: into.append((name, seconds))
+
+    def _call(self, dispatch, sink, *, args="{}", name="t"):
+        return _agent._run_one_call(_FnCall("c1", name, args), dispatch,
+                                    {"auto": True}, on_tool=self._sink(sink))
+
+    def test_run_one_call_records_the_invoke_window(self):
+        sink = []
+        with _driven_clock() as now:
+            self._call({"t": self._timed_tool(now, 3.0)}, sink)
+        self.assertEqual(sink, [("t", 3.0)])
+
+    def test_validation_returns_are_not_timed(self):
+        # None of the three entered a tool, so none is tool time. Stamping them would
+        # land ~0.0s rows and a turn of rejected calls would report fast tools.
+        with _driven_clock() as now:
+            dispatch = {"t": self._timed_tool(now, 3.0)}
+            unknown, bad_json, not_obj = [], [], []
+            self._call(dispatch, unknown, name="nope")
+            self._call(dispatch, bad_json, args="{not json")
+            self._call(dispatch, not_obj, args="[1,2,3]")
+        self.assertEqual((unknown, bad_json, not_obj), ([], [], []))
+
+    def test_a_tool_that_raised_is_still_timed(self):
+        # Real waiting. A crash loop that self-reports 0.0s hides its own cost.
+        sink = []
+        with _driven_clock() as now:
+            result = self._call({"t": self._timed_tool(now, 3.0, raises=True)}, sink)
+        self.assertEqual(sink, [("t", 3.0)])
+        self.assertEqual(result["status"], "error")
+
+    def test_the_confirm_prompt_is_not_tool_time(self):
+        # The load-bearing one. Each invoke costs 1s; the operator stares at the
+        # `Proceed?` prompt for 100s. That wait falls BETWEEN the two windows, so the
+        # row is 2.0s. Kills both "bracket all of _run_one_call" (-> 102.0) and a
+        # missing window on the confirm re-invoke (-> 1.0).
+        sink = []
+        with _driven_clock() as now:
+            def impl(arguments, *, confirm=False):
+                now[0] += 1.0
+                return {"status": "ok"} if confirm else {
+                    "status": "confirmation_required", "message": "spend?"}
+
+            def slow_operator(*a, **kw):
+                now[0] += 100.0
+                return "y"
+
+            dispatch = {"venice_image": _tool("venice_image", impl, paid=True)}
+            with mock.patch.object(sys, "stdin", _tty()), \
+                 mock.patch("builtins.input", slow_operator), \
+                 mock.patch.object(sys, "stderr", io.StringIO()):
+                _agent._run_one_call(_FnCall("c1", "venice_image", "{}"),
+                                     dispatch, {"auto": False},
+                                     on_tool=self._sink(sink))
+        self.assertEqual(sink, [("venice_image", 2.0)])
+
+    def test_a_gated_call_counts_once_despite_two_invokes(self):
+        # One CALL, not one invoke: `calls` counts what the model asked for.
+        L = _agent.CostLedger()
+        with _driven_clock() as now:
+            def impl(arguments, *, confirm=False):
+                now[0] += 1.0
+                return {"status": "ok"} if confirm else {
+                    "status": "confirmation_required", "message": "spend?"}
+
+            dispatch = {"venice_image": _tool("venice_image", impl, paid=True)}
+            with mock.patch.object(sys, "stdin", _tty()), \
+                 mock.patch("builtins.input", return_value="y"), \
+                 mock.patch.object(sys, "stderr", io.StringIO()):
+                _agent._run_one_call(_FnCall("c1", "venice_image", "{}"),
+                                     dispatch, {"auto": False},
+                                     on_tool=L.record_tool)
+        self.assertEqual(L.tools, {"venice_image": {"seconds": 2.0, "calls": 1}})
+
+    def test_no_sink_is_a_no_op(self):
+        # `run_loop(ledger=None)` passes on_tool=None; the call must still work.
+        with _driven_clock() as now:
+            r = _agent._run_one_call(_FnCall("c1", "t", "{}"),
+                                     {"t": self._timed_tool(now, 3.0)}, {"auto": True})
+        self.assertEqual(r["status"], "ok")
+
+    def test_record_tool_mutates_under_the_lock(self):
+        # Deterministic, and deliberately structural.
+        #
+        # The obvious test -- hammer `record_tool` from N threads and assert no lost
+        # updates -- does NOT work: measured at 16 threads x 20,000 increments with a
+        # 1ns switch interval, CPython's GIL never actually loses one, so that test
+        # passes with the lock DELETED. It would be a vacuous guard, so it isn't here.
+        #
+        # The lock is still correct: `row["calls"] += 1` is a load/add/store, and
+        # nothing about the GIL's current bytecode-boundary behaviour is a language
+        # guarantee (free-threaded builds drop it outright). So pin the property that
+        # is actually checkable -- the mutation happens while the lock is held.
+        L = _agent.CostLedger()
+        held = []
+        real = L._tools_lock
+
+        class Watched:
+            def __enter__(self):
+                real.acquire()
+                held.append("in")
+                return self
+
+            def __exit__(self, *exc):
+                held.append("out")
+                real.release()
+                return False
+
+        L._tools_lock = Watched()
+        L.record_tool("shell", 1.0)
+        L.record_tool("shell", 1.0)
+        self.assertEqual(held, ["in", "out", "in", "out"])
+
+    def test_record_tool_is_correct_under_real_threads(self):
+        # Not a race detector (see above) -- a smoke test that concurrent workers,
+        # which is how `--parallel` calls this, all land. `venice_spawn` batches hit
+        # the same key from up to `_MAX_PARALLEL` threads at once.
+        L = _agent.CostLedger()
+        old = sys.getswitchinterval()
+        sys.setswitchinterval(1e-6)
+        self.addCleanup(sys.setswitchinterval, old)
+
+        def hammer():
+            for _ in range(500):
+                L.record_tool("shell", 0.001)
+
+        threads = [threading.Thread(target=hammer) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(L.tools["shell"]["calls"], 4000)
 
 
 class TestRunLoopBudget(unittest.TestCase):
@@ -822,6 +985,220 @@ class TestCostLedger(unittest.TestCase):
         self.assertEqual(f(-5), "0.0s")
         self.assertEqual(f(None), "0.0s")
 
+    # -- per-tool timing (#82) ----------------------------------------------- #
+
+    def test_record_tool_accumulates_seconds_and_calls(self):
+        L = _agent.CostLedger()
+        L.record_tool("shell", 1.25)
+        L.record_tool("shell", 2.75)
+        L.record_tool("read_file", 0.5)
+        # Whole-dict equality: a partial assertion here would not notice a stray key.
+        self.assertEqual(L.tools, {"shell": {"seconds": 4.0, "calls": 2},
+                                   "read_file": {"seconds": 0.5, "calls": 1}})
+        self.assertEqual(L.tool_seconds(), 4.5)
+        self.assertEqual(L.tool_calls_total(), 3)
+
+    def test_record_tool_survives_garbage_but_still_counts_the_call(self):
+        # `record_turn`'s rule one level down: the clock can't run backwards, so this
+        # only ever catches a caller bug -- and dropping the call would corrupt the
+        # per-call average, which is what the breakdown is read for.
+        L = _agent.CostLedger()
+        for bad in (None, -5, True, "nope"):
+            L.record_tool("shell", bad)
+        self.assertEqual(L.tools, {"shell": {"seconds": 0.0, "calls": 4}})
+
+    def test_record_tool_drops_a_blank_name(self):
+        # The one place this diverges from `record_turn`: there is no row to put an
+        # anonymous call on, so it is dropped rather than counted under "".
+        L = _agent.CostLedger()
+        for blank in ("", "   ", None):
+            L.record_tool(blank, 5.0)
+        self.assertEqual(L.tools, {})
+        self.assertEqual(L.tool_calls_total(), 0)
+
+    def test_tools_survive_a_resume_round_trip(self):
+        # Additive per NAME, like the token tallies: `--resume` reports where the whole
+        # session's tool time went, not just the latest leg.
+        L = _agent.CostLedger()
+        L.record_tool("shell", 2.0)
+        L.record_tool("apply_patch", 4.0)
+        R = _agent.CostLedger()
+        R.restore(L.to_dict())
+        R.restore(L.to_dict())
+        self.assertEqual(R.tools, {"shell": {"seconds": 4.0, "calls": 2},
+                                   "apply_patch": {"seconds": 8.0, "calls": 2}})
+
+    def test_tool_seconds_is_derived_and_not_restored(self):
+        # The `cache_hit_percent` rule one field over: `tool_seconds` is derived from
+        # the map `restore` seeds, so accumulating it too would DOUBLE every resumed
+        # run's tool time. 2 restores of a 6.0s ledger -> 12.0s, never 24.0s.
+        L = _agent.CostLedger()
+        L.record_tool("shell", 6.0)
+        R = _agent.CostLedger()
+        R.restore(L.to_dict())
+        R.restore(L.to_dict())
+        self.assertEqual(R.tool_seconds(), 12.0)
+        self.assertEqual(R.to_dict()["tool_seconds"], 12.0)
+
+    def test_restore_tolerates_missing_and_garbage_tools_keys(self):
+        # A pre-#82 envelope has no `tools` key; a hand-edited one may have anything.
+        # Tolerance is PER ROW -- one bad entry must not cost the good ones.
+        old = _agent.CostLedger()
+        old.restore({"prompt_tokens": 5})
+        self.assertEqual(old.tools, {})
+        junk = _agent.CostLedger()
+        junk.restore({"tools": "not-a-dict"})
+        self.assertEqual(junk.tools, {})
+        mixed = _agent.CostLedger()
+        mixed.restore({"tools": {"shell": 5, "": {"seconds": 1, "calls": 1},
+                                 "bad": {"seconds": "x", "calls": -2},
+                                 "ok": {"seconds": 3.0, "calls": 2}}})
+        self.assertEqual(mixed.tools, {"bad": {"seconds": 0.0, "calls": 0},
+                                       "ok": {"seconds": 3.0, "calls": 2}})
+
+    def test_to_dict_tools_is_name_sorted_and_self_describing(self):
+        L = _agent.CostLedger()
+        for name in ("zebra", "alpha", "middle"):
+            L.record_tool(name, 1.0)
+        d = L.to_dict()
+        # Name-sorted so two runs of the same shape produce a diffable envelope. The
+        # HUMAN block sorts by time instead; that divergence is deliberate.
+        self.assertEqual(list(d["tools"]), ["alpha", "middle", "zebra"])
+        self.assertEqual(d["tools"]["alpha"], {"seconds": 1.0, "calls": 1})
+
+    def test_to_dict_tools_rows_are_copies(self):
+        # The envelope reaches session files and `--json`; a caller mutating it must
+        # not be able to reach back into the live ledger.
+        L = _agent.CostLedger()
+        L.record_tool("shell", 1.0)
+        d = L.to_dict()
+        d["tools"]["shell"]["calls"] = 999
+        self.assertEqual(L.tools["shell"]["calls"], 1)
+
+    def _seeded(self, pairs, *, turn=None):
+        """A ledger with `(name, total_seconds, call_count)` rows.
+
+        The whole duration goes on the first call and the rest record 0.0 -- the render
+        only reads the total and the count, and splitting evenly would make the expected
+        strings depend on 3-dp rounding of a repeating decimal.
+        """
+        L = _agent.CostLedger()
+        L.record({"prompt_tokens": 100, "completion_tokens": 5})
+        for name, secs, n in pairs:
+            for i in range(n):
+                L.record_tool(name, secs if i == 0 else 0.0)
+        if turn is not None:
+            L.record_turn(turn)
+        return L
+
+    def _tool_block(self, report):
+        """The tools block only: the header line and everything indented under it."""
+        lines = report.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.startswith("  tools "))
+        return lines[i:]
+
+    def test_usage_report_tools_block_pins_the_whole_line(self):
+        # assertIn is a substring match and cannot see a wrongly-appended suffix (the
+        # `[concurrent]` marker, a stray column) -- pin whole lines.
+        L = self._seeded([("shell", 118.0, 7), ("apply_patch", 31.4, 5)], turn=252.0)
+        self.assertEqual(self._tool_block(L.usage_report()), [
+            "  tools       2m 29s  across 12 call(s)",
+            "    shell           1m 58s   7 call(s)",
+            "    apply_patch      31.4s   5 call(s)",
+        ])
+
+    def test_wall_and_tools_durations_share_a_column(self):
+        L = self._seeded([("shell", 118.0, 7)], turn=252.0)
+        wall, tools = [ln for ln in L.usage_report().splitlines()
+                       if ln.startswith(("  wall ", "  tools "))]
+        self.assertEqual(wall.index("4m 12s"), tools.index("1m 58s"))
+
+    def test_usage_report_has_no_tools_block_without_a_recorded_tool(self):
+        L = self._seeded([], turn=10.0)
+        self.assertNotIn("  tools", L.usage_report())
+
+    def test_tools_block_renders_without_a_recorded_turn(self):
+        # Deliberate asymmetry with `_timing_line`: a per-subagent ledger has real tool
+        # time and no turn. Gating on `turns` would be a false dependency.
+        L = self._seeded([("shell", 4.0, 1)])
+        r = L.usage_report()
+        self.assertNotIn("  wall", r)
+        self.assertEqual(self._tool_block(r), [
+            "  tools         4.0s  across 1 call(s)",
+            "    shell             4.0s   1 call(s)",
+        ])
+
+    def test_no_tokens_branch_still_shows_the_tools_block(self):
+        # A turn that burned minutes in tools then raised before any usage came back.
+        L = _agent.CostLedger()
+        L.record_tool("shell", 90.0)
+        L.record_turn(95.0)
+        self.assertEqual(L.usage_report().splitlines(), [
+            "session usage:",
+            "  (no tokens reported)",
+            "  wall        1m 35s  over 1 turn(s)  (avg 1m 35s)",
+            "  tools       1m 30s  across 1 call(s)",
+            "    shell           1m 30s   1 call(s)",
+        ])
+
+    def test_tools_block_sorts_by_seconds_then_name(self):
+        # Insertion order, name order and time order are all DIFFERENT here, so a
+        # dropped tiebreak cannot pass on `sorted`'s stability.
+        L = self._seeded([("m_mid", 5.0, 1), ("z_tied", 9.0, 1),
+                          ("a_tied", 9.0, 1), ("b_low", 1.0, 1)])
+        self.assertEqual([ln.split()[0] for ln in self._tool_block(L.usage_report())[1:]],
+                         ["a_tied", "z_tied", "m_mid", "b_low"])
+
+    def test_tools_block_caps_rows_and_the_residual_reconciles(self):
+        # 12 tools -> 8 rows + one folded line whose seconds and calls make the rows
+        # add back up to the header. A truncated block that doesn't reconcile is the
+        # #98 lie in a new costume.
+        L = self._seeded([(f"tool{i:02d}", float(12 - i), 1) for i in range(12)])
+        block = self._tool_block(L.usage_report())
+        self.assertEqual(len(block), 1 + 8 + 1)
+        # Header 78s; the 8 shown rows are 12+11+...+5 = 68s, so the fold must carry
+        # the remaining 4+3+2+1 = 10.0s over 4 calls for the block to add back up.
+        self.assertEqual(block[0], "  tools       1m 18s  across 12 call(s)")
+        self.assertEqual(block[-1], "    (+4 more)        10.0s   4 call(s)")
+
+    def test_tools_block_marks_concurrent_only_when_it_exceeds_wall(self):
+        head = lambda L: self._tool_block(L.usage_report())[0]
+        over = self._seeded([("venice_spawn", 90.0, 3)], turn=40.0)
+        self.assertIn("[concurrent -- exceeds wall]", head(over))
+        # Exactly equal must NOT mark.
+        exact = self._seeded([("shell", 40.0, 1)], turn=40.0)
+        self.assertNotIn("concurrent", head(exact))
+        # Exactly ON the rounding tolerance must NOT mark either. This is the case
+        # that discriminates: the equal case above CANNOT tell `>` from `>=`, because
+        # `40.0 > 40.001` and `40.0 >= 40.001` are both False -- the tolerance
+        # dominates the operator. Here `40.001 >= 40.001` is True and `>` is False, so
+        # this single case kills both `>=` AND dropping the `+ 0.001` (which would let
+        # `record_turn`'s 3-dp rounding fire the marker on a plain serial run).
+        edge = self._seeded([("shell", 40.001, 1)], turn=40.0)
+        self.assertNotIn("concurrent", head(edge))
+        # No turn recorded -> nothing to exceed, so no marker.
+        noturn = self._seeded([("shell", 40.0, 1)])
+        self.assertNotIn("concurrent", head(noturn))
+
+    def test_tools_block_column_absorbs_a_long_mcp_name(self):
+        long = "mcp__some_server__a_really_long_tool_name"
+        L = self._seeded([(long, 4.0, 1), ("shell", 1.0, 1)])
+        self.assertEqual(self._tool_block(L.usage_report())[1:], [
+            f"    {long}      4.0s   1 call(s)",
+            f"    {'shell':<{len(long)}}      1.0s   1 call(s)",
+        ])
+        self.assertNotIn("...", L.usage_report())  # the name is never truncated
+
+    def test_tools_fragment_is_empty_without_tools(self):
+        self.assertEqual(_agent.CostLedger().tools_fragment(), "")
+        self.assertEqual(self._seeded([], turn=10.0).tools_fragment(), "")
+
+    def test_tools_fragment_is_the_footer_clause(self):
+        self.assertEqual(self._seeded([("shell", 161.0, 7)], turn=252.0).tools_fragment(),
+                         " (2m 41s tools)")
+        self.assertEqual(self._seeded([("venice_spawn", 362.0, 3)], turn=40.0)
+                         .tools_fragment(), " (6m 02s tools, concurrent)")
+
 
 class TestRunLoopSpendGate(unittest.TestCase):
     """The loop stops starting paid turns once the session cap is hit (#66)."""
@@ -1487,15 +1864,62 @@ class TestParallelDispatch(unittest.TestCase):
         self.assertFalse(_agent._is_parallelizable(mk(_agent.MERGE_TOOL_NAME)))
         self.assertFalse(_agent._is_parallelizable(mk("write_file")))
 
-    def _run(self, seq, tools, *, max_tool_calls, parallel):
+    def _run(self, seq, tools, *, max_tool_calls, parallel, ledger=None):
         fake, calls = _fake_oai(seq)
         messages = [{"role": "user", "content": "go"}]
         with mock.patch.object(sys, "stdout", io.StringIO()), \
              mock.patch.object(sys, "stderr", io.StringIO()):
             _agent.run_loop(fake, "m", messages, {}, tools,
                             max_tool_calls=max_tool_calls, yes=True, json_out=False,
-                            parallel=parallel)
+                            parallel=parallel, ledger=ledger)
         return messages, calls
+
+    # -- per-tool timing through run_loop (#82) ------------------------------ #
+
+    def test_every_worker_window_reaches_the_one_ledger(self):
+        # Three concurrent spawns land on the SAME key from three pool threads.
+        L = _agent.CostLedger()
+        tools = [_sub_tool(_agent.SPAWN_TOOL_NAME)]
+        turn = FakeToolCompletion(tool_calls=[
+            self._spawn_call("c1", "A"),
+            self._spawn_call("c2", "B"),
+            self._spawn_call("c3", "C"),
+        ])
+        self._run([turn, FakeToolCompletion("done")], tools,
+                  max_tool_calls=0, parallel=True, ledger=L)
+        self.assertEqual(L.tools[_agent.SPAWN_TOOL_NAME]["calls"], 3)
+
+    def test_parallel_budget_overflow_is_not_timed(self):
+        # The guard here is the ABSENCE of a `_run_one_call`, which is exactly what a
+        # refactor deletes silently -- so pin it. slots=2: c3 is never executed and
+        # must not appear as a 0.0s call.
+        L = _agent.CostLedger()
+        tools = [_sub_tool(_agent.SPAWN_TOOL_NAME), _free_tool()]
+        turn = FakeToolCompletion(tool_calls=[
+            self._spawn_call("c1", "A"),
+            self._spawn_call("c2", "B"),
+            _FnCall("c3", "t", "{}"),
+        ])
+        self._run([turn, FakeToolCompletion("done")], tools,
+                  max_tool_calls=2, parallel=True, ledger=L)
+        self.assertEqual(L.tool_calls_total(), 2)
+        self.assertNotIn("t", L.tools)
+
+    def test_serial_budget_overflow_is_not_timed(self):
+        L = _agent.CostLedger()
+        turn = FakeToolCompletion(tool_calls=[_FnCall("c1", "t", "{}"),
+                                              _FnCall("c2", "t", "{}")])
+        self._run([turn, FakeToolCompletion("done")], [_free_tool()],
+                  max_tool_calls=1, parallel=False, ledger=L)
+        self.assertEqual(L.tools["t"]["calls"], 1)
+
+    def test_an_unmetered_run_records_nothing_and_still_runs(self):
+        record = []
+        tools = [_sub_tool(_agent.SPAWN_TOOL_NAME, record=record)]
+        turn = FakeToolCompletion(tool_calls=[self._spawn_call("c1", "A")])
+        self._run([turn, FakeToolCompletion("done")], tools,
+                  max_tool_calls=0, parallel=True, ledger=None)
+        self.assertEqual(record, [_agent.SPAWN_TOOL_NAME])
 
     def test_batch_runs_and_appends_in_original_order(self):
         record = []
