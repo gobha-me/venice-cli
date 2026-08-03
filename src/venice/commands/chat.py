@@ -416,8 +416,10 @@ def _finish(ledger, t0) -> None:
     if ledger is None or ledger.turns:
         return
     ledger.record_turn(time.monotonic() - t0)
+    # cache=True (#100): same reasoning as `code._finish` -- and more load-bearing here,
+    # since chat's `--json` has no envelope to carry the number instead (#88).
     print(f"chat: {_agent.format_duration(ledger.elapsed_seconds)} wall -- "
-          f"{ledger.summary()}", file=sys.stderr)
+          f"{ledger.summary(cache=True)}", file=sys.stderr)
 
 
 def _run(args) -> int:

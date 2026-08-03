@@ -443,6 +443,161 @@ class TestCostLedger(unittest.TestCase):
         rate_line = [ln for ln in r.splitlines() if "cache hit rate" in ln]
         self.assertEqual(rate_line, ["  cache hit rate: 90.0%"])
 
+    # -- the hit rate on the one-line surfaces (#100) ------------------------ #
+    #
+    # #98 made the rate honest but left it visible in exactly one place (REPL
+    # `/usage`), so a 94%->0% collapse ran for three days unseen. These pin the
+    # rate onto `summary()`, which is what both run footers and `/cost` render.
+    #
+    # Every `summary` assertion below is a WHOLE-STRING assertEqual on purpose:
+    # the fragment is a SUFFIX, and `assertIn("completion=5", s)` cannot see a
+    # suffix appended after it (the #98 lesson, learned the expensive way).
+
+    @staticmethod
+    def _priced():
+        L = _agent.CostLedger()
+        L.bind_pricing({"input": {"usd": 3.0}, "output": {"usd": 15.0}})
+        return L
+
+    def test_cache_hit_percent_is_three_state(self):
+        # Unknowable two ways, and neither may render as a zero.
+        blank = _agent.CostLedger()
+        self.assertIsNone(blank.cache_hit_percent())        # nothing recorded
+        unrep = _agent.CostLedger()
+        unrep.record({"prompt_tokens": 100, "completion_tokens": 5})
+        self.assertIsNone(unrep.cache_hit_percent())        # no cache field at all
+        # ...but a provider-reported zero IS knowable, and is 0.0, not None.
+        zero = _agent.CostLedger()
+        zero.record({
+            "prompt_tokens": 100, "completion_tokens": 5,
+            "prompt_tokens_details": {"cached_tokens": 0},
+        })
+        self.assertEqual(zero.cache_hit_percent(), 0.0)
+        self.assertIsNotNone(zero.cache_hit_percent())
+        real = _agent.CostLedger()
+        real.record({
+            "prompt_tokens": 1010, "completion_tokens": 5,
+            "prompt_tokens_details": {"cached_tokens": 900},
+        })
+        self.assertAlmostEqual(real.cache_hit_percent(), 89.10891089, places=6)
+        self.assertEqual(real.cache_hit_percent(round_to=1), 89.1)
+
+    def test_summary_stays_byte_identical_without_the_opt_in(self):
+        # Default OFF is load-bearing: `run_loop`'s spend/token gates render this
+        # into "why did I stop" messages on unpriced subagent ledgers.
+        L = self._priced()
+        L.record({
+            "prompt_tokens": 100, "completion_tokens": 5,
+            "prompt_tokens_details": {"cached_tokens": 90},
+        })
+        self.assertEqual(
+            L.summary(),
+            "cost: $0.0004 (tokens prompt=100 completion=5)",
+        )
+
+    def test_summary_with_cache_renders_a_known_rate(self):
+        L = self._priced()
+        L.record({
+            "prompt_tokens": 100, "completion_tokens": 5,
+            "prompt_tokens_details": {"cached_tokens": 90},
+        })
+        self.assertEqual(
+            L.summary(cache=True),
+            "cost: $0.0004 (tokens prompt=100 completion=5, cache 90.0% hit)",
+        )
+
+    def test_summary_with_cache_renders_a_real_zero(self):
+        # The #98 contract on this surface too: a printed 0.0% means the provider
+        # said zero. Collapsing this into the n/a branch is the whole bug.
+        L = self._priced()
+        L.record({
+            "prompt_tokens": 100, "completion_tokens": 5,
+            "prompt_tokens_details": {"cached_tokens": 0},
+        })
+        self.assertEqual(
+            L.summary(cache=True),
+            "cost: $0.0004 (tokens prompt=100 completion=5, cache 0.0% hit)",
+        )
+
+    def test_summary_with_cache_says_n_a_when_nothing_was_reported(self):
+        # Also pins the fragment onto the UNPRICED branch, which has its own
+        # return path and no parens -- and which every command-level test renders,
+        # because the catalog fake carries no `pricing`.
+        L = _agent.CostLedger()
+        L.record({"prompt_tokens": 100, "completion_tokens": 5})
+        self.assertEqual(
+            L.summary(cache=True),
+            "cost: (unpriced — model rate unknown) "
+            "tokens prompt=100 completion=5, cache n/a",
+        )
+
+    def test_summary_with_cache_marks_a_partially_unreported_rate(self):
+        # Same wording as `usage_report` -- an operator can run /cost and /usage
+        # seconds apart, and two vocabularies for one state read as two states.
+        L = self._priced()
+        L.record({
+            "prompt_tokens": 100, "completion_tokens": 5,
+            "prompt_tokens_details": {"cached_tokens": 90},
+        })
+        L.record({"prompt_tokens": 100, "completion_tokens": 5})
+        self.assertEqual(
+            L.summary(cache=True),
+            "cost: $0.0008 (tokens prompt=200 completion=10, "
+            "cache 45.0% hit [partially unreported])",
+        )
+
+    def test_summary_with_cache_says_nothing_before_any_turn(self):
+        # A ledger that recorded nothing has no cache claim to make -- not 0.0%,
+        # and not "n/a" either, which would imply someone looked and failed.
+        L = self._priced()
+        self.assertEqual(
+            L.summary(cache=True),
+            "cost: $0.0000 (tokens prompt=0 completion=0)",
+        )
+
+    def test_json_carries_a_rounded_rate_or_null(self):
+        # `venice sessions show` prints this dict straight at a human, so the
+        # unrounded 89.10891089108911 is a regression there.
+        L = self._priced()
+        L.record({
+            "prompt_tokens": 1010, "completion_tokens": 5,
+            "prompt_tokens_details": {"cached_tokens": 900},
+        })
+        self.assertEqual(L.to_dict()["cache_hit_percent"], 89.1)
+        blind = _agent.CostLedger()
+        blind.record({"prompt_tokens": 100, "completion_tokens": 5})
+        self.assertIn("cache_hit_percent", blind.to_dict())
+        self.assertIsNone(blind.to_dict()["cache_hit_percent"])
+
+    def test_restore_recomputes_the_rate_instead_of_accumulating_it(self):
+        # Every neighbouring field in `restore` is additive because it is a tally.
+        # This one is DERIVED; adding it would sum two percentages into 178.2.
+        src = self._priced()
+        src.record({
+            "prompt_tokens": 100, "completion_tokens": 5,
+            "prompt_tokens_details": {"cached_tokens": 90},
+        })
+        snap = src.to_dict()
+        self.assertEqual(snap["cache_hit_percent"], 90.0)
+        L = self._priced()
+        L.restore(snap)
+        L.restore(snap)
+        self.assertEqual(L.prompt_tokens, 200)          # tallies DO accumulate
+        self.assertEqual(L.to_dict()["cache_hit_percent"], 90.0)
+
+    def test_usage_report_refuses_a_rate_over_zero_input(self):
+        # Reachable from a partial/hand-edited envelope: `restore` (unlike
+        # `record`) does not clamp the cache buckets to the prompt total. This
+        # used to print "cache hit rate: 0.0%" -- a measurement of nothing, which
+        # is the #98 lie one level down. Distinct wording from the flag case, so
+        # the two unknowns stay tellable apart.
+        L = _agent.CostLedger()
+        L.restore({"completion_tokens": 5})
+        L.record_turn(1.0)
+        r = L.usage_report()
+        rate_line = [ln for ln in r.splitlines() if "cache hit rate" in ln]
+        self.assertEqual(rate_line, ["  cache hit rate: n/a (no input tokens)"])
+
     # -- VENICE_USAGE_RAW opt-in dump (#98) --------------------------------- #
 
     def _record_with_raw(self, value, usage):
@@ -751,6 +906,36 @@ class TestRunLoopSpendGate(unittest.TestCase):
         self.assertEqual(calls[-1]["tool_choice"], "none")   # forced, no tools
         self.assertTrue(ledger.over_tokens())
         self.assertFalse(ledger.over())                      # USD gate never fired
+
+    def test_stop_reason_messages_carry_no_cache_claim(self):
+        # #100 kept `summary()`'s cache clause opt-in for exactly this: both of
+        # `run_loop`'s gates render it into a "why did I stop" line, on subagent and
+        # review ledgers that are unpriced AND near-always cache-unreported. Making
+        # the clause unconditional would tag every token-capped worker with a cache
+        # warning nobody asked for. Both gates asserted -- one is not the other.
+        usage = {"prompt_tokens": 900, "completion_tokens": 200}
+        for kw, expect in ((dict(max_tokens=1000), "token cap"),
+                           (dict(max_spend=0.0001), "--max-spend")):
+            with self.subTest(gate=expect):
+                seq = [
+                    FakeToolCompletion(tool_calls=[_FnCall("c1", "t", "{}")],
+                                       usage=usage),
+                    FakeToolCompletion("wrapped up"),
+                ]
+                fake, _calls = _fake_oai(seq)
+                ledger = _agent.CostLedger(**kw)
+                if "max_spend" in kw:
+                    ledger.bind_pricing({"input": {"usd": 3.0}, "output": {"usd": 15.0}})
+                err = io.StringIO()
+                with mock.patch.object(sys, "stdout", io.StringIO()), \
+                     mock.patch.object(sys, "stderr", err):
+                    _agent.run_loop(
+                        fake, "m", [{"role": "user", "content": "go"}], {},
+                        [self._tool()], max_tool_calls=0, yes=True, json_out=False,
+                        ledger=ledger,
+                    )
+                self.assertIn(expect, err.getvalue())        # the gate really fired
+                self.assertNotIn("cache", err.getvalue())
 
     def test_no_token_cap_means_no_token_gate(self):
         # A ledger with max_tokens=None (the parent chat/REPL case) never token-gates,

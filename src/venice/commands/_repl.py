@@ -51,7 +51,7 @@ Commands:
   /auto            auto-accept paid/side-effecting tool calls for following turns
   /manual          confirm each paid/side-effecting tool call (undo /auto)
   /compact [N]     summarize older history to shrink the context (keeps last N turns)
-  /cost            show this session's estimated spend so far (--session-max-spend caps it)
+  /cost            this session's estimated spend so far + cache hit rate (--session-max-spend caps it)
   /usage           token + cost breakdown for this session (cache-read/write split)
   /reset           clear the conversation (keeps the system prompt)
   /save [file]     write the transcript JSON (default: the --resume file)
@@ -548,11 +548,13 @@ def _dispatch_slash(line, messages, state, args, models, oai=None, gen_kwargs=No
     elif cmd == "cost":
         # Session spend so far (#66). The REPL ledger is always-on (#75), so this
         # reports the running total; `--session-max-spend` only adds the cap line.
+        # cache=True (#100): what a session costs and how well it is caching are the
+        # same question over a long REPL, and `/cost` is the one people actually type.
         led = state.get("ledger")
         if led is None:
             print("(no session cost tracking)", file=sys.stderr)
         else:
-            print(led.summary(), file=sys.stderr)
+            print(led.summary(cache=True), file=sys.stderr)
     elif cmd == "usage":
         # Token + cost breakdown with the cache buckets kept distinct (#75).
         led = state.get("ledger")

@@ -504,8 +504,10 @@ def _finish(ledger, t0, human, *, json_out: bool) -> None:
         return
     ledger.record_turn(time.monotonic() - t0 - human[0])
     if not json_out:
+        # cache=True (#100): a prompt-cache collapse is a silent 3-5x cost event, and
+        # this footer is the only surface a one-shot run puts in front of an operator.
         print(f"code: {_agent.format_duration(ledger.elapsed_seconds)} wall -- "
-              f"{ledger.summary()}", file=sys.stderr)
+              f"{ledger.summary(cache=True)}", file=sys.stderr)
 
 
 @contextlib.contextmanager
@@ -1001,7 +1003,10 @@ def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task
             "final": final_text,
             # #81: `to_dict()` verbatim, so `venice code --json | jq .usage` and
             # `jq .usage <session>.json` are the same shape and cannot drift apart.
-            # Numbers here, `format_duration` only on the human line.
+            # Numbers here, `format_duration` only on the human line. FOUR surfaces
+            # share that shape, not two -- `--plan-only --json` via `_emit_plan_only`
+            # and the Ctrl+C session save are the other pair, so a key added to
+            # `to_dict()` (e.g. #100's `cache_hit_percent`) appears on all four.
             "usage": ledger.to_dict(),
         }
         if report is not None:
