@@ -84,6 +84,14 @@ def _python_path() -> str:
       with ``pip install --user``, and `venice chat` dies with "needs the openai
       package" instead of running the test.
 
+      The user site dir is included only when this interpreter actually honours
+      it (``site.ENABLE_USER_SITE``), which is **False** inside a venv -- the
+      setup CONTRIBUTING.md tells contributors to use. Appending it regardless
+      inverts the contract in the line above: the child would get *more* than
+      the parent, out of a directory the parent deliberately opted out of, and
+      resolve half a package from one interpreter's worldview and half from
+      another's (#107).
+
     Deliberately **not** the whole of ``sys.path``: under ``make test`` that
     includes the repo root and ``tests/``, and PYTHONPATH precedes the stdlib on
     the child's path -- so a future fixture named after a stdlib module
