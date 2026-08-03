@@ -69,6 +69,14 @@ MEMORY_SUBDIR = "memory"  # under INDEX_DIRNAME (.venice) for the project tier
 MEMORY_FILENAME = "memory.json"
 TASKS_FILENAME = "tasks.json"
 
+# Opt-in verbatim dump of each API response's `usage` block to stderr (#98). The
+# ledger aggregates, and an aggregate cannot answer "was the field even there?"
+# after the fact -- nothing persists the raw block anywhere (`venice code --json`
+# and the session envelope both carry only the summed `CostLedger.to_dict()`), so
+# diagnosing a cache regression meant re-running the incident live. Diagnostic
+# only: stderr, so a piped stdout stays machine-readable.
+ENV_USAGE_RAW = "VENICE_USAGE_RAW"
+
 SFX_POLL_INTERVAL_SEC = 2.0
 SFX_POLL_MAX_WAIT_SEC = 300
 

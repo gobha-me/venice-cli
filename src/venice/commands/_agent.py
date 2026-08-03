@@ -28,12 +28,16 @@ import contextlib
 import io
 import itertools
 import json
+import os
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Callable, Dict, List, NamedTuple, Optional, Tuple
 
+# Aliased: a bare `config` would be shadowed by the `config=None` keyword argument
+# that `browser_tools` (and its callers) already take further down this module.
+from .. import config as _config
 from .. import userconfig
 from . import _exec
 from . import _mcp
@@ -212,6 +216,70 @@ def _detail(usage: dict, section: str, key: str):
     return None
 
 
+#: The cache sub-fields we recognize inside ``prompt_tokens_details``, in priority
+#: order. `reference/venice-openapi.yaml` documents exactly two (`cached_tokens`,
+#: `cache_creation_input_tokens`); `cache_write_tokens` is OBSERVED on live
+#: kimi/glm/deepseek responses but undocumented, so it is read as a fallback and
+#: must never take precedence over the documented name. Deliberately NOT widened
+#: to the Anthropic/DeepSeek-native top-level aliases (`cache_read_input_tokens`,
+#: `prompt_cache_hit_tokens`): Venice never emits them, and an additive top-level
+#: block would hit the clamp in `record()` -- truncating the write bucket to 0
+#: while `CostLedger`'s "reported" flag swore it was measured, which is a NEW lie.
+#: `_cache_tokens`'s three-state is the honest degradation for a rename (#98).
+_CACHE_READ_KEYS = ("cached_tokens",)
+_CACHE_WRITE_KEYS = ("cache_creation_input_tokens", "cache_write_tokens")
+
+
+def _cache_tokens(usage: dict, keys) -> Optional[int]:
+    """A cache token count from ``prompt_tokens_details``; None when unreported (#98).
+
+    THREE-STATE ON PURPOSE, and that is the whole point of #98. `None` means "this
+    response carried no such field at all", which is NOT the same as a reported zero:
+    the spec marks `prompt_tokens_details` ``nullable: true`` and leaves it out of
+    `required` (its own glm example ships ``prompt_tokens_details: null``), so
+    coercing absence to 0 fabricates a "cache hit rate: 0.0%" that reads as a real
+    measurement. A printed 0.0% must mean the provider said zero.
+
+    Present-but-null and present-but-garbage both count as ABSENT -- a value we cannot
+    read is not a measurement (mirrors :func:`_as_int`'s "a bool is never a token
+    count" rule). :func:`_detail` is kept as-is for `reasoning_tokens`, which stays
+    deliberately two-state: no incident, and no rate hangs off it.
+    """
+    for key in keys:
+        v = _detail(usage, "prompt_tokens_details", key)
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            return _as_int(v)
+    return None
+
+
+def _dump_raw_usage(usage) -> None:
+    """Echo one API response's raw `usage` block to stderr when opted in (#98).
+
+    The ledger aggregates, and an aggregate cannot answer "was the field even there?"
+    after the fact -- nothing else persists the raw block, so diagnosing a cache
+    regression used to mean re-running the incident live.
+
+    Off unless $VENICE_USAGE_RAW is explicitly truthy -- a bare truthiness check would
+    turn this ON for ``VENICE_USAGE_RAW=0``. STDERR only: `venice code --json` and every
+    piped command must keep stdout machine-readable.
+
+    Exactly ONE `print`, so each record stays an atomic line -- this fires on subagent
+    and review ledgers too, which run under a ThreadPoolExecutor, and two writes would
+    interleave into garbage under `--parallel`. A diagnostic must never take down the
+    turn that produced it, hence the blanket serialization fallback.
+    """
+    if os.environ.get(_config.ENV_USAGE_RAW, "").strip().lower() not in (
+        "1", "true", "yes", "on"
+    ):
+        return
+    try:
+        raw = usage.model_dump() if hasattr(usage, "model_dump") else usage
+        line = json.dumps(raw, sort_keys=True, default=str)
+    except Exception:  # noqa: BLE001 - a diagnostic must never break the turn
+        line = repr(usage)
+    print(f"usage-raw: {line}", file=sys.stderr)
+
+
 def format_duration(seconds) -> str:
     """A compact human duration: ``4.5s``, ``2m 14s``, ``1h 03m`` (#81).
 
@@ -258,6 +326,16 @@ class CostLedger:
         self.cache_write_tokens = 0
         self.reasoning_tokens = 0
         self.unpriced = False  # saw a turn whose model price was unknown
+        # #98: sticky "at least one recorded turn carried no recognized cache-read
+        # (resp. cache-write) field", mirroring `unpriced`. These exist so a rendered
+        # 0 can be told apart from an absent one -- the buckets above cannot say
+        # "unknown", and `cache hit rate: 0.0%` was being emitted by byte-identical
+        # code for a real miss and for a response with no cache block at all. They
+        # drive DIFFERENT render sites (see `usage_report`): read-reported-but-
+        # write-absent is the normal state for most Venice models, so folding them
+        # into one marker would tag essentially every session.
+        self.cache_read_unreported = False
+        self.cache_write_unreported = False
         # #81: the operator's wall-clock. `elapsed_seconds` is BLOCKED time only --
         # the caller stamps the window and passes the delta, so the ledger never reads
         # a clock and every ledger test stays a pure-function assertion. `turns` counts
@@ -299,6 +377,8 @@ class CostLedger:
             "unpriced": self.unpriced,
             "elapsed_seconds": self.elapsed_seconds,  # #81
             "turns": self.turns,
+            "cache_read_unreported": self.cache_read_unreported,    # #98
+            "cache_write_unreported": self.cache_write_unreported,  # #98
         }
 
     def restore(self, d) -> None:
@@ -328,6 +408,14 @@ class CostLedger:
         self.turns += _as_int(d.get("turns"))
         if d.get("unpriced"):
             self.unpriced = True
+        # #98: sticky-OR like `unpriced`, and falsy-by-default so a pre-#98 envelope
+        # (which has neither key) claims "reported" rather than retroactively marking
+        # every resumed session unknown. The inaccuracy has a one-turn lifetime: the
+        # flags are sticky, so the resumed session's first `record()` sets the truth.
+        if d.get("cache_read_unreported"):
+            self.cache_read_unreported = True
+        if d.get("cache_write_unreported"):
+            self.cache_write_unreported = True
 
     def record_turn(self, seconds) -> None:
         """Add one blocked window's wall-clock and count the turn (#81).
@@ -351,7 +439,19 @@ class CostLedger:
         buckets are subsets of `prompt_tokens` in Venice's OpenAI-normalized
         usage shape, so uncached input is the remainder. With no cache tokens and
         no cache pricing this reduces exactly to the old `pt*in + ct*out`.
+
+        A cache field the response never carried is recorded as *unreported* rather
+        than as zero (#98) -- see :func:`_cache_tokens`. The arithmetic is unchanged
+        by that: every shape that used to yield 0 still yields 0.
+
+        NOT READ: the `/responses` endpoint's second usage shape (`input_tokens` /
+        `input_tokens_details.cached_tokens`). The CLI never calls it today, but if it
+        ever does this ledger silently zeroes rather than erroring.
         """
+        # FIRST, ahead of every bail-out below: `record(None)` dumping `usage-raw: null`
+        # is exactly the diagnostic that was missing -- it separates "the response had
+        # no usage block" from "it had one with no cache fields" (#98).
+        _dump_raw_usage(usage)
         if usage is None:
             return 0.0
         if hasattr(usage, "model_dump"):
@@ -360,10 +460,17 @@ class CostLedger:
             return 0.0
         pt = _as_int(usage.get("prompt_tokens"))
         ct = _as_int(usage.get("completion_tokens"))
-        cache_read = _as_int(_detail(usage, "prompt_tokens_details", "cached_tokens"))
-        cache_write = _as_int(
-            _detail(usage, "prompt_tokens_details", "cache_creation_input_tokens")
-        )
+        # #98: None means the field was absent, which is not a reported zero. The
+        # flags are what `usage_report` needs to refuse to print a fake 0.0%; the
+        # counts fall back to 0 so the cost math below is untouched.
+        raw_read = _cache_tokens(usage, _CACHE_READ_KEYS)
+        raw_write = _cache_tokens(usage, _CACHE_WRITE_KEYS)
+        if raw_read is None:
+            self.cache_read_unreported = True
+        if raw_write is None:
+            self.cache_write_unreported = True
+        cache_read = 0 if raw_read is None else raw_read
+        cache_write = 0 if raw_write is None else raw_write
         reasoning = _as_int(
             _detail(usage, "completion_tokens_details", "reasoning_tokens")
         )
@@ -449,16 +556,35 @@ class CostLedger:
             if self.prompt_tokens else 0.0
         )
         lines = ["session usage:"]
-        lines.append(
-            f"  input   {self.prompt_tokens:>10,} tok  "
-            f"({uncached:,} uncached + {self.cache_read_tokens:,} cache-read "
-            f"+ {self.cache_write_tokens:,} cache-write)"
-        )
+        # #98: the two flags govern DIFFERENT rows on purpose. Read-reported-but-
+        # write-absent is the normal shape for most Venice models, so a shared marker
+        # would decorate the hit rate of nearly every session with a warning about a
+        # bucket the hit rate does not even use.
+        if self.cache_read_unreported and self.cache_write_unreported:
+            # Nothing about the split is known -- don't itemize a breakdown that is
+            # entirely inferred, same reflex as "(no tokens reported)" above.
+            split = "cache breakdown not reported"
+        else:
+            read_part = ("cache-read n/a" if self.cache_read_unreported
+                         else f"{self.cache_read_tokens:,} cache-read")
+            write_part = ("cache-write n/a" if self.cache_write_unreported
+                          else f"{self.cache_write_tokens:,} cache-write")
+            # NOTE: with a side unreported, `uncached` is an UPPER BOUND and the terms
+            # no longer sum to the input total -- the n/a shows where the slack went.
+            split = f"{uncached:,} uncached + {read_part} + {write_part}"
+        lines.append(f"  input   {self.prompt_tokens:>10,} tok  ({split})")
         out = f"  output  {self.completion_tokens:>10,} tok"
         if self.reasoning_tokens:
             out += f"  (incl. {self.reasoning_tokens:,} reasoning)"
         lines.append(out)
-        lines.append(f"  cache hit rate: {hit:.1f}%")
+        if not self.cache_read_unreported:
+            lines.append(f"  cache hit rate: {hit:.1f}%")
+        elif self.cache_read_tokens:
+            # Some turns measured, some didn't: the rate is real but understated
+            # against a prompt total that includes turns it could not see.
+            lines.append(f"  cache hit rate: {hit:.1f}%  [partially unreported]")
+        else:
+            lines.append("  cache hit rate: n/a (no cache fields reported)")
         if self.unpriced and self.total == 0.0:
             lines.append("  cost: (model rate unknown)")
         else:

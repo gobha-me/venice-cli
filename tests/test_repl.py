@@ -559,6 +559,28 @@ class TestRepl(unittest.TestCase):
         self.assertIn("1,000 uncached", out)
         self.assertIn("cache hit rate: 90.0%", out)
 
+    def test_slash_usage_reports_unknown_cache_state(self):
+        # #98 end-to-end, in-process: a streamed turn whose usage carries no
+        # `prompt_tokens_details` at all must reach /usage as "unknown", not 0%.
+        # This is the only test proving the distinction survives the real path --
+        # chunk.usage -> SDK object -> model_dump() -> CostLedger.record().
+        err = io.StringIO()
+        results = [[FakeChunk("hi"),
+                    FakeChunk(usage={
+                        "prompt_tokens": 10000, "completion_tokens": 500,
+                        "total_tokens": 10500,
+                    })]]
+        rc, fake, calls = _run_repl(
+            _args(interactive=True),
+            results, ["hey", "/usage", "/exit"], stderr=err,
+            urlopen=_urlopen_ok(),
+        )
+        self.assertEqual(rc, 0)
+        out = err.getvalue()
+        self.assertIn("cache hit rate: n/a (no cache fields reported)", out)
+        self.assertIn("cache breakdown not reported", out)
+        self.assertNotIn("cache hit rate: 0.0%", out)
+
     def test_slash_usage_before_any_turn(self):
         err = io.StringIO()
         rc, fake, calls = _run_repl(

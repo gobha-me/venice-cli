@@ -574,7 +574,10 @@ message, keeping the last `N` turns verbatim),
 `/cost` (this session's estimated spend so far; `--session-max-spend` adds a
 cap), `/usage` (a token + cost breakdown for the session, keeping the
 cache-read/cache-write/uncached input split distinct so cache-heavy sessions
-cost out correctly, plus a **wall-clock** row — total, turn count and average
+cost out correctly — the split and the hit rate report `n/a` when the model's
+usage block carried no cache fields at all, so a printed `0.0%` always means the
+provider reported a real zero rather than that nobody looked — plus a
+**wall-clock** row — total, turn count and average
 for the time the CLI kept you waiting, measured from submitting a turn to
 getting the prompt back, so thinking time at the prompt is never counted; it
 accumulates across `--resume`), `/reset` (clear history, keep the system prompt),
@@ -1860,6 +1863,7 @@ The player list (`paplay` -> `aplay` -> `ffplay` -> `mpg123` -> `play`
 | `VENICE_EMBED_CA_BUNDLE` | CA bundle to trust for a self-signed embedding backend (`embed`, `index`, `search`, and the `project_search` agent tool) |
 | `VENICE_MCP_MAX_SPEND` | `mcp-serve` auto-approve cap in USD (default `0.10`) |
 | `VENICE_MCP_OUTPUT_DIR` | where `mcp-serve` tools write files (default: cwd) |
+| `VENICE_USAGE_RAW` | set to `1`/`true`/`yes`/`on` to echo each API response's raw `usage` block to **stderr** as one `usage-raw: {...}` line (diagnostic; stdout stays machine-readable) |
 
 ## Commands at a glance
 
