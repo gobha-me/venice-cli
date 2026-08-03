@@ -1011,6 +1011,32 @@ class TestChatUsageSurface(unittest.TestCase):
         self.assertEqual(len(footer), 1)
         self.assertTrue(footer[0].endswith("cache 50.0% hit"), footer[0])
 
+    def test_footer_carries_the_tools_clause(self):
+        # #82. `_tool_seq` dispatches one `venice_chat` call before the final turn,
+        # so the clause must appear -- INSIDE the wall field, keeping " -- " as the
+        # top-level boundary.
+        with self._stub_tool():
+            rc, _f, _c = self._run(
+                _args(message="hi", tools=True, stream=False), self._tool_seq(1, 2))
+        self.assertEqual(rc, 0)
+        footer = [ln for ln in self._err.splitlines()
+                  if ln.startswith("chat: ") and "wall" in ln]
+        self.assertEqual(len(footer), 1)
+        self.assertRegex(footer[0], r"^chat: [\d.]+s wall \([\d.]+s tools\) -- cost: ")
+
+    def test_footer_has_no_tools_clause_when_no_tool_ran(self):
+        # A one-turn run: the model answers without dispatching. `assertIn("wall")`
+        # is blind to a wrongly-appended " (0.0s tools)" -- pin the whole field.
+        with self._stub_tool():
+            rc, _f, _c = self._run(
+                _args(message="hi", tools=True, stream=False), self._tool_seq(1))
+        self.assertEqual(rc, 0)
+        footer = [ln for ln in self._err.splitlines()
+                  if ln.startswith("chat: ") and "wall" in ln]
+        self.assertEqual(len(footer), 1)
+        self.assertRegex(footer[0], r"^chat: [\d.]+s wall -- cost: ")
+        self.assertNotIn("tools", footer[0])
+
     def test_plain_chat_footer_has_no_cache_claim(self):
         # The non-`--tools` path renders `_print_usage` off the raw SDK blob and
         # never touches a ledger. Out of scope for #100 (that is #90) -- pinned so

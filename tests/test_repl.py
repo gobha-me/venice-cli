@@ -559,6 +559,30 @@ class TestRepl(unittest.TestCase):
         self.assertIn("1,000 uncached", out)
         self.assertIn("cache hit rate: 90.0%", out)
 
+    def test_slash_usage_shows_the_tool_breakdown(self):
+        # #82 end-to-end, in-process: a real tools turn dispatches `venice_chat`
+        # through `run_loop`, and /usage reports the row. The only test proving the
+        # sink survives the whole path rather than just `_run_one_call` in isolation.
+        err = io.StringIO()
+        seq = [
+            FakeToolCompletion(tool_calls=[
+                _FnCall("c1", "venice_chat", '{"message": "hola"}')]),
+            FakeToolCompletion("final", usage={"prompt_tokens": 100,
+                                               "completion_tokens": 5}),
+        ]
+        with mock.patch(
+            "venice.commands._mcp.chat_tool",
+            return_value={"status": "ok", "content": "hola"},
+        ):
+            rc, fake, calls = _run_repl(
+                _args(interactive=True, tools=True),
+                seq, ["do it", "/usage", "/exit"], stderr=err,
+            )
+        self.assertEqual(rc, 0)
+        out = err.getvalue()
+        self.assertIn("  tools ", out)
+        self.assertRegex(out, r"\n    venice_chat\s+[\d.]+s\s+1 call\(s\)")
+
     def test_slash_usage_reports_unknown_cache_state(self):
         # #98 end-to-end, in-process: a streamed turn whose usage carries no
         # `prompt_tokens_details` at all must reach /usage as "unknown", not 0%.

@@ -198,6 +198,31 @@ class TestLedgerSnapshot(unittest.TestCase):
         led.restore({})                                 # empty -> no crash
         led.restore("garbage")                          # non-dict -> no crash
 
+    # -- per-tool timing across a resume (#82) ------------------------------ #
+
+    def test_tools_block_survives_a_session_round_trip(self):
+        # Additive per NAME through the envelope, so `--resume` reports where the
+        # whole session's tool time went and not just the latest leg.
+        led = CostLedger()
+        led.record_tool("shell", 4.0)
+        led.record_tool("shell", 2.0)
+        led.record_tool("read_file", 1.0)
+        snap = led.to_dict()
+        self.assertEqual(snap["tools"]["shell"], {"seconds": 6.0, "calls": 2})
+        self.assertEqual(snap["tool_seconds"], 7.0)
+        led2 = CostLedger()
+        led2.restore(snap)
+        led2.restore(snap)
+        self.assertEqual(led2.tools["shell"], {"seconds": 12.0, "calls": 4})
+        # Derived, never accumulated: 14.0 and not 28.0 (the `cache_hit_percent` rule).
+        self.assertEqual(led2.tool_seconds(), 14.0)
+
+    def test_a_pre_82_envelope_restores_with_no_tools(self):
+        led = CostLedger()
+        led.restore({"prompt_tokens": 100, "elapsed_seconds": 5.0, "turns": 1})
+        self.assertEqual(led.tools, {})
+        self.assertNotIn("tools", led.usage_report())
+
     # -- three-state cache flags across a resume (#98) ---------------------- #
 
     def test_unreported_flags_survive_a_resume_round_trip(self):
