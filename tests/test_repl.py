@@ -605,6 +605,72 @@ class TestRepl(unittest.TestCase):
         self.assertIn("cache breakdown not reported", out)
         self.assertNotIn("cache hit rate: 0.0%", out)
 
+    def test_slash_usage_shows_the_call_trace(self):
+        # #99 end-to-end, in-process: a streamed turn's usage reaches /usage as a
+        # per-call row, and the row's window is stamped -- the only test proving the
+        # `_stream_turn` bracket survives chunk.usage -> model_dump() -> record().
+        err = io.StringIO()
+        results = [[FakeChunk("hi"),
+                    FakeChunk(usage={
+                        "prompt_tokens": 10000, "completion_tokens": 500,
+                        "total_tokens": 10500,
+                        "prompt_tokens_details": {"cached_tokens": 9000},
+                    })]]
+        rc, fake, calls = _run_repl(
+            _args(interactive=True),
+            results, ["hey", "/usage", "/exit"], stderr=err,
+            urlopen=_urlopen_ok(),
+        )
+        self.assertEqual(rc, 0)
+        out = err.getvalue()
+        self.assertIn("  calls ", out)
+        self.assertRegex(out, r"\n    #1\s+10,000 in\s+90% cached\s+500 out\s+[\d.]+s")
+        # Not `n/a`: the streamed path brackets its own window.
+        self.assertNotRegex(out, r"\n    #1[^\n]*out\s+n/a")
+
+    def test_a_tools_turn_records_more_calls_than_turns(self):
+        # `usage.turns` counts operator waits, `api_calls_total` counts model calls.
+        # One REPL turn that dispatches a tool makes TWO API calls -- pin the
+        # distinction end-to-end so the two counters cannot be collapsed later.
+        err = io.StringIO()
+        seq = [
+            FakeToolCompletion(tool_calls=[
+                _FnCall("c1", "venice_chat", '{"message": "hola"}')]),
+            FakeToolCompletion("final", usage={"prompt_tokens": 100,
+                                               "completion_tokens": 5}),
+        ]
+        with mock.patch(
+            "venice.commands._mcp.chat_tool",
+            return_value={"status": "ok", "content": "hola"},
+        ):
+            rc, fake, calls = _run_repl(
+                _args(interactive=True, tools=True),
+                seq, ["do it", "/usage", "/exit"], stderr=err,
+            )
+        self.assertEqual(rc, 0)
+        out = err.getvalue()
+        self.assertRegex(out, r"\n  calls[^\n]*across 2 API call\(s\)")
+        self.assertRegex(out, r"\n  wall[^\n]*over 1 turn\(s\)")
+
+    def test_slash_compact_records_a_manual_context_event(self):
+        # `/compact` bypasses `maybe_compact` entirely, so it is the call site most
+        # likely to be missed. `trigger` is what tells a self-inflicted sawtooth from
+        # an automatic one afterwards.
+        with tempfile.TemporaryDirectory() as d:
+            resume = self._resume_history(d, pairs=6)
+            err = io.StringIO()
+            rc, fake, calls = _run_repl(
+                _args(interactive=True, resume=resume),
+                [FakeToolCompletion("we discussed u0..u5")],
+                ["/compact 2", "/usage", "/exit"], stderr=err,
+            )
+            self.assertEqual(rc, 0)
+            out = err.getvalue()
+            self.assertRegex(
+                out, r"\n    -- compacted \(manual\) after #0: 12 -> \d+ msgs")
+            # No budget in play, so the estimate must not claim to be measured.
+            self.assertNotIn("measured before", out)
+
     def test_slash_usage_before_any_turn(self):
         err = io.StringIO()
         rc, fake, calls = _run_repl(

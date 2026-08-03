@@ -582,7 +582,10 @@ governs `/cost` and both run footers — plus a
 **wall-clock** row — total, turn count and average
 for the time the CLI kept you waiting, measured from submitting a turn to
 getting the prompt back, so thinking time at the prompt is never counted; it
-accumulates across `--resume`), `/reset` (clear history, keep the system prompt),
+accumulates across `--resume` — plus a **per-API-call trace** with a row per model
+call and a marker wherever compaction moved the prefix, which is what tells a cache
+that was cold from the start apart from one that decayed or is sawtoothing),
+`/reset` (clear history, keep the system prompt),
 `/save [file]` (write the transcript JSON; defaults to the `--resume` file),
 `/paste` (compose a multi-line message a line at a time, ending with `/end` —
 `/cancel` aborts), `/edit [text]` (compose your next message in `$EDITOR`, like
@@ -1309,6 +1312,52 @@ and `usage.tools`, in both the `--json` envelope and the session file:
 venice code --json "..." | jq '.usage.tools.shell.seconds'
 venice code --json "..." | jq '.usage.tool_seconds'
 ```
+
+**Why the cache rate went bad.** A low session-wide hit rate has at least three very
+different causes that all average to the same number: the provider never cached at
+all, the prefix is churning, or auto-compaction is re-firing and resetting it each
+time. The aggregate cannot tell them apart, so `/usage` also traces the individual
+API calls:
+
+```
+  calls        39.7s  across 14 API call(s)
+    #1              11,204 in    0% cached      312 out      4.2s
+    #2              11,530 in   96% cached       88 out      1.1s
+    -- compacted (auto) after #2: 48 -> 13 msgs, ~91,200 -> ~8,210 tok est
+       (88,110 tok measured before, lower bound)
+    #3               8,402 in    0% cached      140 out      2.0s
+    (+6 elided)     76,500 in   58% cached      780 out     15.0s
+    #10             16,600 in   58% cached      158 out      3.2s
+    #11             17,700 in   58% cached      166 out      3.4s
+    #12             18,800 in   58% cached      174 out      3.6s
+    #13             19,900 in   58% cached      182 out      3.8s
+    #14             19,880 in   91% cached      210 out      3.4s
+```
+
+Cold-from-#1, a mid-run cliff and a compaction sawtooth each have a distinct shape
+here. `n/a` means *unknown* and never zero — a response that carried no cache block
+reads `n/a cached`, and an API call whose window was not stamped reads `n/a` for its
+seconds, exactly as the session-wide rate refuses to print a fabricated `0.0%`.
+Compaction markers are never elided, and the elided span carries its own totals so
+the rows still add back up to the header.
+
+Note that **one API call is not one turn**: `usage.turns` counts the times the CLI
+made you wait (one whole `code` run, one REPL turn), while a single turn that
+dispatches tools makes several API calls. The machine-readable half is
+`usage.api_calls` / `usage.api_calls_total` / `usage.context_events`, in both the
+`--json` envelope and the session file:
+
+```sh
+# every call's hit rate, in order -- null means the provider reported nothing
+venice code --json "..." | jq '.usage.api_calls[] | {n, prompt_tokens, cache_read_tokens}'
+# did compaction fire, and what did it cost the prefix?
+jq '.usage.context_events' ~/.config/venice/sessions/<id>.json
+```
+
+Rows are capped at the first 50 plus the most recent 200, so a long session keeps
+both its cold-start evidence and its current state; each row carries its `n`, so a
+jump in the sequence is itself the drop marker. Compaction's own summarization call
+is not yet metered, so the event row deliberately carries no cost.
 
 **Tools** (path-sandboxed to the project root; mutating tools confirm unless `--auto`):
 

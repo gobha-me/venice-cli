@@ -24,6 +24,7 @@ and passes the combined list to :func:`run_loop`. Nothing in the loop changes.
 """
 from __future__ import annotations
 
+import collections
 import contextlib
 import io
 import itertools
@@ -253,6 +254,23 @@ def _cache_tokens(usage: dict, keys) -> Optional[int]:
     return None
 
 
+def _usage_dict(usage) -> Optional[dict]:
+    """Normalize a `usage` block to a plain dict, or None when there isn't one.
+
+    Split out of `record()` (#99) so that method can have exactly ONE return: the
+    per-call trace row has to be appended even for the shapes that carry no tallies
+    (`None`, an SDK object with no `usage`, a garbage value), and hanging an append
+    off each of three early returns is the copy-into-every-exit-path shape that #86
+    and #92 removed everywhere else. A call that happened, blocked for 40 seconds and
+    came back with no usage block is exactly the row whose seconds matter most.
+    """
+    if usage is None:
+        return None
+    if hasattr(usage, "model_dump"):
+        usage = usage.model_dump()
+    return usage if isinstance(usage, dict) else None
+
+
 def _dump_raw_usage(usage) -> None:
     """Echo one API response's raw `usage` block to stderr when opted in (#98).
 
@@ -307,6 +325,16 @@ class CostLedger:
     an unknown price means the turn's tokens are counted but not charged
     (degrade gracefully rather than hard-block on a missing price).
     """
+
+    #: #99: rows of the per-call trace kept from the START of the session, frozen once
+    #: full. This is the cold-start evidence -- the 08-03 collapse was diagnosable only
+    #: because the very first calls were already at 0% -- and a ring buffer would drop
+    #: exactly it after a long enough run.
+    _CALLS_HEAD = 50
+    #: #99: rows kept from the END, as a ring buffer. This is the state an operator is
+    #: debugging *now*. Head+tail together are ~250 rows x ~130 bytes = ~32KB, which is
+    #: small beside the message transcript already in the same session file.
+    _CALLS_TAIL = 200
 
     def __init__(self, max_spend: Optional[float] = None,
                  max_tokens: Optional[int] = None):
@@ -364,6 +392,33 @@ class CostLedger:
         # The lock stays because GIL bytecode-boundary behaviour is not a language
         # guarantee and free-threaded builds drop it outright.
         self._tools_lock = threading.Lock()
+        # #99: the per-API-call trace. The aggregates above cannot tell a cache that was
+        # cold from call 1 apart from one that decayed apart from a compaction sawtooth --
+        # all three average to the same low number, and the 08-03 AAR had to infer the
+        # shape from the total being *exactly* 0 rather than merely low.
+        #
+        # HEAD + TAIL, not one list: a ring buffer loses the cold-start evidence (the
+        # actual 08-03 failure) and a head-only cap goes blind to the state the operator is
+        # debugging right now. Rows carry their own `n`, so the seam between the two is
+        # self-describing -- an `n` jumping 50 -> 441 IS the drop marker, and no separate
+        # counter has to be kept consistent with it.
+        self._calls_head: List[dict] = []
+        self._calls_tail = collections.deque(maxlen=self._CALLS_TAIL)
+        # The TRUE count, which is also the source of each row's `n`. Deliberately not
+        # `len()` of anything: it stays truthful across the cap and across a resume, and it
+        # finally persists the number the `turns` comment above says this class counts but
+        # never stored. Note "ledgered API calls", NOT "API calls": `_compact`'s summary
+        # call (#101) never reaches `record()`, so the rows do not sum to the whole bill.
+        # A `context_events` row is the marker that an unledgered call happened there.
+        self.api_calls_total = 0
+        # #99: prefix-affecting events (compaction today; #104's resume reseed later --
+        # hence `kind`, and hence not naming this `compactions`). Uncapped on purpose:
+        # a compaction is rare and is the highest-signal row in the trace.
+        self.context_events: List[dict] = []
+        # No lock here, unlike `tools` above, and the absence is deliberate rather than an
+        # oversight: `record_tool` is called from pool workers, but `record()` only ever
+        # runs on the thread that owns the ledger (parallel dispatch touches `on_tool`
+        # alone, and every subagent gets its own fresh ledger).
         self._in = None          # per-token input rate (USD)
         self._out = None         # per-token output rate (USD)
         self._cache_in = None    # per-token cache-read rate (USD); None -> use _in
@@ -418,6 +473,16 @@ class CostLedger:
             # different order. Kept LAST because `venice sessions show` prints this dict
             # as a one-line repr, and a nested map belongs after the readable scalars.
             "tools": {k: dict(self.tools[k]) for k in sorted(self.tools)},
+            # #99: the TRUE ledgered-call count, which is also where each row's `n` comes
+            # from. A scalar, so it sits with the readable ones ahead of the two lists.
+            "api_calls_total": self.api_calls_total,
+            # #99: the per-call trace and the prefix events, LAST for `tools`' reason one
+            # key up -- `venice sessions show` renders this dict at a human, and the
+            # nested collections belong after the scalars. Rows are COPIED (like `tools`)
+            # so a caller mutating the envelope -- `code --json` hands it straight to
+            # `json.dump` while the ledger is still live -- cannot reach back in here.
+            "api_calls": [dict(r) for r in self.api_calls()],
+            "context_events": [dict(e) for e in self.context_events],
         }
 
     def restore(self, d) -> None:
@@ -478,6 +543,42 @@ class CostLedger:
         # `tool_seconds` is NOT restored, for the `cache_hit_percent` reason one field
         # over: it is DERIVED from the map the loop above just seeded, so it recomputes
         # for free, and accumulating it would double every resumed run's tool time.
+        #
+        # #99: a THIRD category, and the reason it is spelled out is that the two above
+        # each warn against the other's reflex and neither one is right here. `api_calls`
+        # and `context_events` are SEED-ONCE: they are lists, so the additive treatment
+        # every tally above gets would CONCATENATE a second `restore()` into duplicate
+        # rows, and the derived treatment would drop them -- which is not merely lossy but
+        # DESTRUCTIVE, because the next `_autosave` overwrites `sess.usage` wholesale and
+        # the previous leg's rows would be gone from disk. Seeding only into empty lists
+        # makes the double call a no-op without needing a "have I restored yet" flag.
+        if not self._calls_head and not self._calls_tail:
+            raw_calls = d.get("api_calls")
+            if isinstance(raw_calls, list):
+                for row in raw_calls:
+                    if not isinstance(row, dict):
+                        continue  # tolerant PER ROW, like `tools` above
+                    if len(self._calls_head) < self._CALLS_HEAD:
+                        self._calls_head.append(dict(row))
+                    else:
+                        self._calls_tail.append(dict(row))
+        if not self.context_events:
+            raw_events = d.get("context_events")
+            if isinstance(raw_events, list):
+                self.context_events.extend(
+                    dict(e) for e in raw_events if isinstance(e, dict)
+                )
+        # ADDITIVE, unlike the two lists it indexes: it is a tally like `turns`, and
+        # keeping it additive is what makes a resumed session's next row continue at
+        # `n = 51` instead of restarting at 1 and colliding with a restored row.
+        self.api_calls_total += _as_int(d.get("api_calls_total"))
+        # A hand-edited envelope can carry rows with no (or a truncated) total, which
+        # would restart `n` inside a range the restored rows already occupy and make
+        # `calls_dropped` negative. Floor it at what was actually seeded; the docstring
+        # promise is that `n` is unique and ascending, and that has to survive a bad file.
+        self.api_calls_total = max(
+            self.api_calls_total, len(self._calls_head) + len(self._calls_tail)
+        )
 
     def record_turn(self, seconds) -> None:
         """Add one blocked window's wall-clock and count the turn (#81).
@@ -534,7 +635,54 @@ class CostLedger:
         """
         return sum(r["calls"] for r in self.tools.values())
 
-    def record(self, usage) -> float:
+    def _append_call(self, row: dict) -> None:
+        """Land one trace row in the head/tail buffers (#99).
+
+        `api_calls_total` is bumped FIRST and is what stamps `n`, so the ordinal is the
+        call's true position in the session even after the head froze and the tail began
+        overwriting. Head fills first; everything after it rolls through the deque.
+
+        `n` is rebuilt into the FRONT of the row rather than assigned onto the end: these
+        rows are read by eye in a session file, and the ordinal belongs at the left.
+        """
+        self.api_calls_total += 1
+        row = dict(n=self.api_calls_total, **row)
+        if len(self._calls_head) < self._CALLS_HEAD:
+            self._calls_head.append(row)
+        else:
+            self._calls_tail.append(row)
+
+    def api_calls(self) -> List[dict]:
+        """The retained trace rows in call order: head, then tail (#99).
+
+        A gap between the two is not an error and is not marked: consecutive rows whose
+        `n` jumps say so themselves, which is why nothing stores a drop count.
+        """
+        return self._calls_head + list(self._calls_tail)
+
+    def calls_dropped(self) -> int:
+        """How many trace rows the cap discarded (#99); 0 when nothing was dropped."""
+        return self.api_calls_total - len(self._calls_head) - len(self._calls_tail)
+
+    def record_compaction(self, event: dict) -> None:
+        """Log one prefix-affecting event, anchored to the trace (#99).
+
+        `after_n` is the ordinal of the last call recorded BEFORE the event, so the
+        measured post-compaction prompt size is simply the next row's `prompt_tokens` --
+        which is why no `observed_tokens_after` is stored: the server does not report
+        that number until the next call, and computing it here would be a guess wearing
+        a measurement's name.
+        """
+        row = dict(event)
+        # Rebuilt front-first for `_append_call`'s reason: these are read by eye in a
+        # session file, and "what happened, and where" belongs left of the measurements.
+        self.context_events.append(dict(
+            kind=row.pop("kind", "compaction"),
+            after_n=self.api_calls_total,
+            **row,
+        ))
+
+    def record(self, usage, *, seconds=None) -> float:
         """Add one turn's `usage` (dict or SDK obj); return this turn's cost.
 
         Keeps the cache buckets distinct: cache-read, cache-write, and uncached
@@ -551,59 +699,83 @@ class CostLedger:
         NOT READ: the `/responses` endpoint's second usage shape (`input_tokens` /
         `input_tokens_details.cached_tokens`). The CLI never calls it today, but if it
         ever does this ledger silently zeroes rather than erroring.
+
+        #99: appends one trace row on EVERY path, including the no-usage shapes -- see
+        `_usage_dict`. `seconds` is the caller-stamped duration of the API call, keeping
+        the same never-read-a-clock contract as `record_turn`/`record_tool`; None means
+        the site did not bracket a window and renders as `n/a`, never as `0.0s`.
         """
-        # FIRST, ahead of every bail-out below: `record(None)` dumping `usage-raw: null`
+        # FIRST, ahead of everything below: `record(None)` dumping `usage-raw: null`
         # is exactly the diagnostic that was missing -- it separates "the response had
         # no usage block" from "it had one with no cache fields" (#98).
         _dump_raw_usage(usage)
-        if usage is None:
-            return 0.0
-        if hasattr(usage, "model_dump"):
-            usage = usage.model_dump()
-        if not isinstance(usage, dict):
-            return 0.0
-        pt = _as_int(usage.get("prompt_tokens"))
-        ct = _as_int(usage.get("completion_tokens"))
-        # #98: None means the field was absent, which is not a reported zero. The
-        # flags are what `usage_report` needs to refuse to print a fake 0.0%; the
-        # counts fall back to 0 so the cost math below is untouched.
-        raw_read = _cache_tokens(usage, _CACHE_READ_KEYS)
-        raw_write = _cache_tokens(usage, _CACHE_WRITE_KEYS)
-        if raw_read is None:
-            self.cache_read_unreported = True
-        if raw_write is None:
-            self.cache_write_unreported = True
-        cache_read = 0 if raw_read is None else raw_read
-        cache_write = 0 if raw_write is None else raw_write
-        reasoning = _as_int(
-            _detail(usage, "completion_tokens_details", "reasoning_tokens")
-        )
-        # Clamp to subsets of prompt_tokens so a provider that reports the buckets
-        # additively (rather than as a breakdown) can't drive uncached negative.
-        cache_read = min(cache_read, pt)
-        cache_write = min(cache_write, pt - cache_read)
-        uncached = pt - cache_read - cache_write
-
-        self.prompt_tokens += pt
-        self.completion_tokens += ct
-        self.cache_read_tokens += cache_read
-        self.cache_write_tokens += cache_write
-        self.reasoning_tokens += min(reasoning, ct)
-
-        if self._in is not None or self._out is not None:
-            in_rate = self._in or 0.0
-            read_rate = self._cache_in if self._cache_in is not None else in_rate
-            write_rate = self._cache_write if self._cache_write is not None else in_rate
-            cost = (
-                uncached * in_rate
-                + cache_read * read_rate
-                + cache_write * write_rate
-                + ct * (self._out or 0.0)
+        usage = _usage_dict(usage)
+        cost = 0.0
+        # A response with no usage block still costs wall-clock and still moved the
+        # prefix, so it gets a row -- with null tokens rather than a fabricated 0, the
+        # #98 rule applied one level down.
+        pt = ct = raw_read = raw_write = None
+        if usage is not None:
+            pt = _as_int(usage.get("prompt_tokens"))
+            ct = _as_int(usage.get("completion_tokens"))
+            # #98: None means the field was absent, which is not a reported zero. The
+            # flags are what `usage_report` needs to refuse to print a fake 0.0%; the
+            # counts fall back to 0 so the cost math below is untouched.
+            raw_read = _cache_tokens(usage, _CACHE_READ_KEYS)
+            raw_write = _cache_tokens(usage, _CACHE_WRITE_KEYS)
+            if raw_read is None:
+                self.cache_read_unreported = True
+            if raw_write is None:
+                self.cache_write_unreported = True
+            cache_read = 0 if raw_read is None else raw_read
+            cache_write = 0 if raw_write is None else raw_write
+            reasoning = _as_int(
+                _detail(usage, "completion_tokens_details", "reasoning_tokens")
             )
-        else:
-            cost = 0.0
-            self.unpriced = True
-        self.total += cost
+            # Clamp to subsets of prompt_tokens so a provider that reports the buckets
+            # additively (rather than as a breakdown) can't drive uncached negative.
+            cache_read = min(cache_read, pt)
+            cache_write = min(cache_write, pt - cache_read)
+            uncached = pt - cache_read - cache_write
+
+            self.prompt_tokens += pt
+            self.completion_tokens += ct
+            self.cache_read_tokens += cache_read
+            self.cache_write_tokens += cache_write
+            self.reasoning_tokens += min(reasoning, ct)
+            # The row reports the CLAMPED buckets, so a row's numbers reconcile with the
+            # aggregate they fed -- but only where the field existed at all: `raw_*` is
+            # None-checked first so an absent field stays null through the clamp.
+            raw_read = None if raw_read is None else cache_read
+            raw_write = None if raw_write is None else cache_write
+
+            if self._in is not None or self._out is not None:
+                in_rate = self._in or 0.0
+                read_rate = self._cache_in if self._cache_in is not None else in_rate
+                write_rate = (self._cache_write if self._cache_write is not None
+                              else in_rate)
+                cost = (
+                    uncached * in_rate
+                    + cache_read * read_rate
+                    + cache_write * write_rate
+                    + ct * (self._out or 0.0)
+                )
+            else:
+                self.unpriced = True
+            self.total += cost
+        self._append_call({
+            "prompt_tokens": pt,
+            "cache_read_tokens": raw_read,
+            # Recorded although #99 only asked for cache-READ: a cache-WRITE spike at
+            # call N is what separates a churning prefix from a cold start, i.e. two of
+            # the three failures this trace exists to tell apart.
+            "cache_write_tokens": raw_write,
+            "completion_tokens": ct,
+            "cost": round(cost, 6),
+            # Rounded like `record_turn`'s, so the persisted envelope stays tidy. None
+            # stays None -- an unstamped window is unknown, not instant.
+            "seconds": None if seconds is None else round(_as_float(seconds), 3),
+        })
         return cost
 
     def over(self) -> bool:
@@ -701,7 +873,13 @@ class CostLedger:
         handling; returns a one-line placeholder before any turn is recorded.
         """
         if self.prompt_tokens == 0 and self.completion_tokens == 0:
-            if not self.turns:
+            # #99: `api_calls_total` and `context_events` join `turns` in this gate.
+            # A run whose every response came back without a usage block has real rows
+            # and real seconds and zero tokens, and a `/compact` before any turn has an
+            # event and nothing else (its own summary call is unledgered, #101).
+            # Reporting "(no usage recorded yet)" for either would hide the trace at
+            # precisely the moment it is the only evidence there is.
+            if not self.turns and not self.api_calls_total and not self.context_events:
                 return "(no usage recorded yet)"
             # #81: time was spent but the provider reported no tokens -- a turn that
             # raised, or one aborted mid-flight. Report the clock honestly rather than
@@ -709,9 +887,13 @@ class CostLedger:
             # and a "cache hit rate: 0.0%" that would read as a real measurement.
             # #82: a turn that spent minutes in tools then raised before any usage came
             # back is exactly when the breakdown earns its keep -- wire BOTH sites.
+            # #99: `_timing_line` gets the same `turns` gate it has on the main path --
+            # reaching here with rows but no turn (a subagent ledger) would otherwise
+            # print `over 0 turn(s)  (avg 0.0s)`, which is noise, not a measurement.
             return "\n".join(
-                ["session usage:", "  (no tokens reported)", self._timing_line()]
-                + self._tool_lines()
+                ["session usage:", "  (no tokens reported)"]
+                + ([self._timing_line()] if self.turns else [])
+                + self._tool_lines() + self._call_lines()  # #99: wire BOTH sites, as #82
             )
         uncached = self.prompt_tokens - self.cache_read_tokens - self.cache_write_tokens
         lines = ["session usage:"]
@@ -766,6 +948,7 @@ class CostLedger:
         if self.turns:  # #81
             lines.append(self._timing_line())
         lines.extend(self._tool_lines())  # #82 -- own gate; see `_tool_lines`
+        lines.extend(self._call_lines())  # #99 -- likewise
         return "\n".join(lines)
 
     def _timing_line(self) -> str:
@@ -829,6 +1012,128 @@ class CostLedger:
                          f"{format_duration(sum(r['seconds'] for _, r in rest)):>8}"
                          f"   {sum(r['calls'] for _, r in rest)} call(s)")
         return lines
+
+    #: #99: trace rows shown from the head and the tail of the block before the middle
+    #: folds into one elided line. 3+5 = 8, matching `_TOOL_ROWS` -- the head answers
+    #: "was it cold from call 1", the tail answers "what is it doing now", and those are
+    #: two of the three questions the trace exists for.
+    _CALL_HEAD_ROWS = 3
+    _CALL_TAIL_ROWS = 5
+
+    @staticmethod
+    def _call_row(label: str, w: int, pt, read, ct, secs) -> str:
+        """One `/usage` trace line -- a call row or the elided-span summary (#99).
+
+        `n/a` rather than `0` or `0.0s` for anything the response did not carry: an
+        unstamped window is unknown, not instant, and an absent cache field is unknown,
+        not a miss. That is #98's rule applied to the time and per-row dimensions.
+
+        Both row kinds render through here so the elision line cannot drift out of the
+        columns it sits in -- `_tool_lines` takes its label width from the data for the
+        same reason one method up.
+        """
+        pct = "n/a" if (read is None or not pt) else f"{read / pt * 100:.0f}%"
+        return (f"    {label:<{w}}  {'n/a' if pt is None else format(pt, ','):>9} in"
+                f"  {pct:>4} cached  {'n/a' if ct is None else format(ct, ','):>7} out"
+                f"  {'n/a' if secs is None else format_duration(secs):>8}")
+
+    def _call_lines(self) -> List[str]:
+        """The `/usage` per-API-call trace block (#99); ``[]`` when nothing was recorded.
+
+        Gated on the LIST, not on `self.turns` -- `_tool_lines`' reasoning one method up:
+        a ledger that only ever saw `run_loop` (every per-subagent ledger) has real rows
+        and no turn, and coupling the two would be a false dependency.
+
+        Head + tail with an elided middle, and the elision line carries its OWN totals so
+        the rows still reconcile to the header. A truncated block whose parts do not add
+        up is the #98 lie in a new costume.
+        """
+        rows = self.api_calls()
+        if not rows:
+            # A `/compact` before any turn leaves an event and no rows -- its own
+            # summarization call is unledgered (#101). The event is the only record
+            # that the prefix moved, so it renders on its own rather than vanishing
+            # with the block that would have carried it.
+            return [ln for ev in self.context_events for ln in self._event_lines(ev)]
+        head_n = self._CALL_HEAD_ROWS
+        tail_n = self._CALL_TAIL_ROWS
+        secs = [r.get("seconds") for r in rows]
+        timed = [s for s in secs if s is not None]
+        head = (f"  calls   {format_duration(sum(timed)):>10}  "
+                f"across {self.api_calls_total} API call(s)")
+        # No silent caps: both the rows this render folded away and the rows the storage
+        # cap never kept are named, because a block that quietly shows 8 of 300 reads as
+        # "this is all of it".
+        untimed = len(secs) - len(timed)
+        if untimed:
+            head += f"  [{untimed} untimed]"
+        dropped = self.calls_dropped()
+        if dropped:
+            head += f"  [{dropped} row(s) dropped]"
+        lines = [head]
+        if len(rows) <= head_n + tail_n + 1:
+            shown, elided, tail = rows, [], []
+        else:
+            shown, elided, tail = rows[:head_n], rows[head_n:-tail_n], rows[-tail_n:]
+        elide_label = f"(+{len(elided)} elided)" if elided else ""
+        # Width from the DATA, exactly like `_tool_lines`: the elision label is wider
+        # than any `#N`, and a fixed column would leave it hanging out of the grid.
+        w = max([4, len(elide_label)] + [len(f"#{r.get('n')}") for r in rows])
+
+        def _emit(rs):
+            for r in rs:
+                lines.append(self._call_row(
+                    f"#{r.get('n', '?')}", w, r.get("prompt_tokens"),
+                    r.get("cache_read_tokens"), r.get("completion_tokens"),
+                    r.get("seconds"),
+                ))
+                # Markers ALWAYS render, never elided -- they are rare and are the
+                # highest-signal line in the block. One anchored inside the folded span
+                # surfaces just after the elision line, where `after #N` keeps it placed.
+                for ev in self.context_events:
+                    if ev.get("after_n") == r.get("n"):
+                        lines.extend(self._event_lines(ev))
+
+        _emit(shown)
+        if elided:
+            # The elided span carries its OWN totals so the block still reconciles to the
+            # header -- `_tool_lines`' `(+N more)` rule. Summed with `or 0` because a
+            # no-usage row's fields are None, and the span's cache percentage is over the
+            # input it could actually see.
+            e_secs = [r.get("seconds") for r in elided if r.get("seconds") is not None]
+            lines.append(self._call_row(
+                elide_label, w,
+                sum(r.get("prompt_tokens") or 0 for r in elided),
+                sum(r.get("cache_read_tokens") or 0 for r in elided),
+                sum(r.get("completion_tokens") or 0 for r in elided),
+                sum(e_secs),
+            ))
+            for r in elided:
+                for ev in self.context_events:
+                    if ev.get("after_n") == r.get("n"):
+                        lines.extend(self._event_lines(ev))
+        _emit(tail)
+        # An event anchored at call 0 (a compaction before any call was recorded) has no
+        # row to hang off, so it would otherwise vanish from the block entirely.
+        for ev in self.context_events:
+            if not ev.get("after_n"):
+                lines.extend(self._event_lines(ev))
+        return lines
+
+    @staticmethod
+    def _event_lines(ev: dict) -> List[str]:
+        """The one-or-two-line `/usage` marker for a context event (#99)."""
+        out = [f"    -- compacted ({ev.get('trigger', 'auto')}) "
+               f"after #{ev.get('after_n', '?')}: "
+               f"{ev.get('messages_before', '?')} -> {ev.get('messages_after', '?')} msgs, "
+               f"~{ev.get('est_tokens_before') or 0:,} -> "
+               f"~{ev.get('est_tokens_after') or 0:,} tok est"]
+        obs = ev.get("observed_tokens_before")
+        if obs:
+            # Its own line, and labelled "lower bound": the number is the PREVIOUS call's
+            # prompt size, and the history grew after it was observed.
+            out.append(f"       ({obs:,} tok measured before, lower bound)")
+        return out
 
     def tools_fragment(self) -> str:
         """The run footers' tool-time clause (#82): ``" (2m 41s tools)"`` or ``""``.
@@ -962,7 +1267,8 @@ def run_web_search(oai, model: str, query: str, *, mode: str = "on",
     query = (query or "").strip()
     if not query:
         return {"status": "error", "message": "web_search requires a non-empty 'query'"}
-    resp = oai.chat.completions.create(
+    _t0 = time.monotonic()  # #99: this ledger is a throwaway, but a documented exception
+    resp = oai.chat.completions.create(  # costs more to reason about than the one line
         model=model,
         messages=[{"role": "user", "content": query}],
         extra_body={
@@ -977,7 +1283,7 @@ def run_web_search(oai, model: str, query: str, *, mode: str = "on",
     answer = (getattr(msg, "content", None) or "").strip() if msg is not None else ""
     citations = _web_citations(getattr(resp, "venice_parameters", None))
     led = _build_ledger(None, models, model)
-    cost = led.record(getattr(resp, "usage", None))
+    cost = led.record(getattr(resp, "usage", None), seconds=time.monotonic() - _t0)
     # Best-effort: report None (unknown) -- not $0.00 -- when we can't estimate, i.e. the
     # model price is unknown OR the response carried no usage tokens. A billed feature that
     # reports 0.0 reads as "free", which is worse than an honest "unknown".
@@ -2343,6 +2649,7 @@ def run_loop(
 
     def _force_final(reason: str) -> int:
         print(reason, file=sys.stderr)
+        _t0 = time.monotonic()
         with _Spinner("finishing", enabled=show):
             resp = oai.chat.completions.create(
                 model=model,
@@ -2352,7 +2659,11 @@ def run_loop(
                 **base_kwargs,
             )
         if ledger is not None:
-            ledger.record(getattr(resp, "usage", None))
+            # #99: caller-stamped, like every other window in this file. NOT added to
+            # `elapsed_seconds` -- that is `record_turn`'s job at the command level, and
+            # stamping it here too would double-count the same wall time.
+            ledger.record(getattr(resp, "usage", None),
+                          seconds=time.monotonic() - _t0)
         msg = resp.choices[0].message if getattr(resp, "choices", None) else None
         messages.append(_assistant_dict(msg))
         return _emit_final(resp, json_out)
@@ -2388,7 +2699,9 @@ def run_loop(
             on_compact=lambda b, a: _progress(
                 f"(auto-compacted history: {b} -> {a} messages)", enabled=show,
             ),
+            ledger=ledger,  # #99: log the event; the summary call itself stays unmetered
         )
+        _t0 = time.monotonic()
         with _Spinner("thinking", enabled=show):
             resp = oai.chat.completions.create(
                 model=model,
@@ -2400,7 +2713,12 @@ def run_loop(
         if budget is not None:
             budget.observe(getattr(resp, "usage", None))
         if ledger is not None:
-            ledger.record(getattr(resp, "usage", None))
+            # #99: see `_force_final` -- caller-stamped, and deliberately NOT folded into
+            # `elapsed_seconds`. Unlike the per-tool windows these are strictly serial on
+            # any one ledger (subagents each get their own), so their sum can never exceed
+            # wall and `_call_lines` needs no `[concurrent]` marker.
+            ledger.record(getattr(resp, "usage", None),
+                          seconds=time.monotonic() - _t0)
         msg = resp.choices[0].message if getattr(resp, "choices", None) else None
         messages.append(_assistant_dict(msg))
         tool_calls = getattr(msg, "tool_calls", None) if msg is not None else None
@@ -2450,6 +2768,7 @@ def run_loop(
                 on_compact=lambda b, a: _progress(
                     f"(auto-compacted history: {b} -> {a} messages)", enabled=show,
                 ),
+                ledger=ledger,  # #99
             )
             return _force_final(
                 f"chat: reached --max-tool-calls ({max_tool_calls}); "

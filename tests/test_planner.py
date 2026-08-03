@@ -309,6 +309,23 @@ class TestSubagentTokenCap(_ProjBase):
         self.assertEqual(out["tokens"], 15)
         self.assertEqual(out["token_cap"], 500)
 
+    def test_a_subagent_report_never_carries_the_call_trace(self):
+        # #99 is OPERATOR data and must stay out of the model's context. A subagent's
+        # report IS model-visible (it comes back as a tool result), and today it
+        # deliberately carries SCALARS only. Pin that: a future `out.update(
+        # led.to_dict())` would quietly push per-call rows into the prompt.
+        def _run(oai, model, task, tools, base_kwargs, *, max_tool_calls,
+                 ledger=None, **kw):
+            ledger.record({"prompt_tokens": 10, "completion_tokens": 5})
+            return {"status": "ok", "report": "r", "tool_calls": 1, "truncated": False}
+
+        with mock.patch.object(_agent, "run_spawn", _run):
+            out = _code.spawn_tool(None, "m", {}, [self._paid()],
+                                   max_tokens=500).invoke({"task": "a", "role": "code"})
+        for leaked in ("api_calls", "api_calls_total", "context_events"):
+            self.assertNotIn(leaked, out)
+        self.assertEqual(out["tokens"], 15)  # the scalar provenance stays
+
     def test_scout_is_metered_too(self):
         # Scope proof: the cap applies to the READ-ONLY scout as well, not just spawn.
         with mock.patch.object(_agent, "run_scout", self._run_that_spends(300, 40)):

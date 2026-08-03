@@ -1021,6 +1021,61 @@ class TestCodeUsageSurface(unittest.TestCase):
         self.assertEqual(usage["turns"], 1)
         self.assertEqual(usage["prompt_tokens"], 700)
 
+    def test_session_file_carries_the_call_trace_in_call_order(self):
+        # #99: three API calls -> three rows, and `_usage(n)` makes them individually
+        # identifiable, so this pins that row order matches CALL order rather than
+        # happening to look right because every row is identical.
+        rc, _ = self._run(
+            _code_args(task="x", root=self.root, auto=True), self._full_seq())
+        self.assertEqual(rc, 0)
+        with open(self._sessions()[0]) as f:
+            usage = json.load(f)["usage"]
+        self.assertEqual(usage["api_calls_total"], 3)
+        self.assertEqual([r["n"] for r in usage["api_calls"]], [1, 2, 3])
+        self.assertEqual([r["prompt_tokens"] for r in usage["api_calls"]],
+                         [100, 200, 400])
+        # `_usage()` carries no cache block, so every row must say UNKNOWN, not 0.
+        self.assertEqual([r["cache_read_tokens"] for r in usage["api_calls"]],
+                         [None, None, None])
+
+    def test_every_recorded_call_carries_a_stamped_window(self):
+        # THE test that kills "a call site forgot to bracket its create()". The plan
+        # and acceptance turns run OUTSIDE run_loop (`_no_tool_turn`), so a bracket
+        # added only to the loop would leave the two largest rows reading n/a.
+        rc, _ = self._run(
+            _code_args(task="x", root=self.root, auto=True), self._full_seq())
+        self.assertEqual(rc, 0)
+        with open(self._sessions()[0]) as f:
+            rows = json.load(f)["usage"]["api_calls"]
+        for row in rows:
+            self.assertIsNotNone(row["seconds"], f"call #{row['n']} was not bracketed")
+            self.assertGreaterEqual(row["seconds"], 0.0)
+
+    def test_the_trace_distinguishes_api_calls_from_operator_turns(self):
+        # `usage.turns` is "one time the CLI made you wait" (one whole `code` run);
+        # `api_calls_total` is one model call. Both live in the same dict, so pin the
+        # distinction into the artifact -- otherwise the next reader collapses them.
+        rc, _ = self._run(
+            _code_args(task="x", root=self.root, auto=True), self._full_seq())
+        self.assertEqual(rc, 0)
+        with open(self._sessions()[0]) as f:
+            usage = json.load(f)["usage"]
+        self.assertEqual(usage["turns"], 1)
+        self.assertEqual(usage["api_calls_total"], 3)
+
+    def test_json_envelope_and_session_file_agree_on_the_trace(self):
+        # The four-surfaces contract: `--json` and the session save must not drift.
+        rc, _ = self._run(
+            _code_args(task="x", root=self.root, auto=True, json=True),
+            self._full_seq())
+        self.assertEqual(rc, 0)
+        envelope = json.loads(self._out.getvalue())["usage"]
+        with open(self._sessions()[0]) as f:
+            persisted = json.load(f)["usage"]
+        self.assertEqual(envelope["api_calls"], persisted["api_calls"])
+        self.assertEqual(envelope["api_calls_total"], persisted["api_calls_total"])
+        self.assertEqual(envelope["context_events"], persisted["context_events"])
+
     def test_ctrlc_run_reports_time_and_persists_usage(self):
         # The run an operator most wants a cost readout for: they sat through it and
         # then killed it. A happy-path-only footer would hide exactly this one.

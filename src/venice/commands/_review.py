@@ -53,6 +53,7 @@ import os
 import posixpath
 import re
 import threading
+import time
 from typing import Dict, List, Optional, Tuple
 
 from . import _agent, _code, _exec
@@ -582,6 +583,7 @@ def _retry_for_verdict(oai, model: str, report: str, base_kwargs: dict,
     every run that needed a verdict re-prompt -- and it also escapes the token cap
     it is supposed to be bounded by.
     """
+    _t0 = time.monotonic()
     resp = oai.chat.completions.create(
         model=model,
         messages=[
@@ -592,7 +594,7 @@ def _retry_for_verdict(oai, model: str, report: str, base_kwargs: dict,
         **base_kwargs,
     )
     if ledger is not None:
-        ledger.record(getattr(resp, "usage", None))
+        ledger.record(getattr(resp, "usage", None), seconds=time.monotonic() - _t0)
     if getattr(resp, "choices", None):
         return resp.choices[0].message.content or ""
     return ""

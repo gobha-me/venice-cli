@@ -571,7 +571,16 @@ class TestCostLedger(unittest.TestCase):
         })
         r = L.usage_report()
         self.assertIn("cache hit rate: 0.0%", r)
-        self.assertNotIn("n/a", r)
+        # Scoped to the cache rows rather than the whole report: #99's trace block
+        # legitimately renders `n/a` in its own columns (an unstamped window, an absent
+        # per-row field), and a report-wide assertion would fail on an unrelated truth.
+        # The claim being pinned is about the CACHE state, so pin the cache lines.
+        cache_lines = [ln for ln in r.splitlines()
+                       if "cache" in ln and not ln.startswith("    ")]
+        self.assertEqual(cache_lines, [
+            "  input          100 tok  (100 uncached + 0 cache-read + 0 cache-write)",
+            "  cache hit rate: 0.0%",
+        ])
         self.assertNotIn("[partially unreported]", r)
 
     def test_usage_report_marks_a_partially_unreported_hit_rate(self):
@@ -1092,10 +1101,16 @@ class TestCostLedger(unittest.TestCase):
         return L
 
     def _tool_block(self, report):
-        """The tools block only: the header line and everything indented under it."""
+        """The tools block only: the header line and everything indented under it.
+
+        #99 appended a `calls` block after this one, so the slice has to STOP at it --
+        an open-ended tail would make every assertion below silently about two blocks.
+        """
         lines = report.splitlines()
         i = next(k for k, ln in enumerate(lines) if ln.startswith("  tools "))
-        return lines[i:]
+        rest = lines[i + 1:]
+        j = next((k for k, ln in enumerate(rest) if ln.startswith("  calls ")), len(rest))
+        return lines[i:i + 1 + j]
 
     def test_usage_report_tools_block_pins_the_whole_line(self):
         # assertIn is a substring match and cannot see a wrongly-appended suffix (the
@@ -1198,6 +1213,321 @@ class TestCostLedger(unittest.TestCase):
                          " (2m 41s tools)")
         self.assertEqual(self._seeded([("venice_spawn", 362.0, 3)], turn=40.0)
                          .tools_fragment(), " (6m 02s tools, concurrent)")
+
+
+class TestCallTrace(unittest.TestCase):
+    """#99: the per-API-call trace and the context-event log.
+
+    Pure-function assertions throughout, like `TestCostLedger` above: the ledger never
+    reads a clock, so `seconds` is always a value the test hands in.
+    """
+
+    @staticmethod
+    def _usage(pt=100, ct=5, cached=None, written=None):
+        u = {"prompt_tokens": pt, "completion_tokens": ct}
+        details = {}
+        if cached is not None:
+            details["cached_tokens"] = cached
+        if written is not None:
+            details["cache_creation_input_tokens"] = written
+        if details:
+            u["prompt_tokens_details"] = details
+        return u
+
+    def _call_block(self, report):
+        """The `calls` block only: its header and everything under it."""
+        lines = report.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.startswith("  calls "))
+        return lines[i:]
+
+    # --- rows ------------------------------------------------------------- #
+
+    def test_one_row_per_record_numbered_from_one(self):
+        # Kills an append hung off `record_turn`/`record_tool` (which count DIFFERENT
+        # things -- see the `turns` docstring) and a no-op that never appends.
+        L = _agent.CostLedger()
+        for i in range(3):
+            L.record(self._usage(pt=100 + i))
+        L.record_turn(5.0)
+        L.record_tool("shell", 2.0)
+        self.assertEqual([r["n"] for r in L.api_calls()], [1, 2, 3])
+        self.assertEqual([r["prompt_tokens"] for r in L.api_calls()], [100, 101, 102])
+        self.assertEqual(L.api_calls_total, 3)
+
+    def test_an_absent_cache_field_is_null_in_the_row_not_zero(self):
+        # The #98 three-state, one level down. `record` collapses None->0 for the
+        # AGGREGATE two lines away; a row that copied that collapse would report a
+        # confident 0% miss for a provider that said nothing at all.
+        L = _agent.CostLedger()
+        L.record(self._usage())
+        row = L.api_calls()[0]
+        self.assertIsNone(row["cache_read_tokens"])
+        self.assertIsNone(row["cache_write_tokens"])
+
+    def test_a_reported_zero_stays_zero_in_the_row(self):
+        # The other half of the contract: don't replace one lie with another.
+        L = _agent.CostLedger()
+        L.record(self._usage(cached=0, written=0))
+        row = L.api_calls()[0]
+        self.assertEqual(row["cache_read_tokens"], 0)
+        self.assertEqual(row["cache_write_tokens"], 0)
+
+    def test_a_usage_less_call_still_gets_a_row(self):
+        # THE test for the early-return hole. `record` bails on each of these shapes
+        # before any tally; a row appended at the bottom would be skipped for exactly
+        # the call whose `seconds` matter most -- one that blocked, then returned
+        # nothing. Every field is null, and the window it cost is still on the record.
+        L = _agent.CostLedger()
+        L.record(None, seconds=40.0)
+        L.record("garbage", seconds=1.0)
+        L.record({"prompt_tokens": "nope"}, seconds=2.0)
+        rows = L.api_calls()
+        self.assertEqual(len(rows), 3)
+        self.assertEqual([r["seconds"] for r in rows], [40.0, 1.0, 2.0])
+        for r in rows[:2]:
+            self.assertIsNone(r["prompt_tokens"])
+            self.assertIsNone(r["completion_tokens"])
+        # A dict with a garbage value is a real usage block: it parses to 0, not null.
+        self.assertEqual(rows[2]["prompt_tokens"], 0)
+
+    def test_row_buckets_are_clamped_like_the_aggregate(self):
+        # A row has to reconcile with the total it fed, so it reports the CLAMPED
+        # bucket -- but an absent field stays null through the clamp rather than
+        # becoming a confident 0.
+        L = _agent.CostLedger()
+        L.record(self._usage(pt=100, cached=900))
+        row = L.api_calls()[0]
+        self.assertEqual(row["cache_read_tokens"], 100)
+        self.assertIsNone(row["cache_write_tokens"])
+        self.assertEqual(L.cache_read_tokens, 100)
+
+    def test_an_unstamped_window_is_null_not_zero(self):
+        # `n/a`, never `0.0s`: an unbracketed call site is UNKNOWN, and a fabricated
+        # 0.0s would read as an instant response -- #98's lie in the time dimension.
+        L = _agent.CostLedger()
+        L.record(self._usage())
+        self.assertIsNone(L.api_calls()[0]["seconds"])
+        self.assertEqual(self._call_block(L.usage_report())[0],
+                         "  calls         0.0s  across 1 API call(s)  [1 untimed]")
+
+    def test_the_ledger_never_reads_a_clock(self):
+        # The house contract (`record_turn`/`record_tool` docstrings). If a reflex
+        # `time.monotonic()` ever appears in `record`, this raises instead of passing.
+        L = _agent.CostLedger()
+        with mock.patch("venice.commands._agent.time.monotonic",
+                        side_effect=AssertionError("the ledger read a clock")):
+            L.record(self._usage(), seconds=3.0)
+        self.assertEqual(L.api_calls()[0]["seconds"], 3.0)
+
+    def test_garbage_seconds_degrade_to_zero_but_none_stays_none(self):
+        L = _agent.CostLedger()
+        L.record(self._usage(), seconds="nope")
+        L.record(self._usage(), seconds=None)
+        self.assertEqual(L.api_calls()[0]["seconds"], 0.0)
+        self.assertIsNone(L.api_calls()[1]["seconds"])
+
+    # --- the cap ---------------------------------------------------------- #
+
+    def test_the_cap_keeps_the_head_and_the_tail(self):
+        # Kills a plain ring buffer (which would drop the cold-start evidence that is
+        # the whole reason #99 exists) AND a head-only cap (which would go blind to
+        # what the run is doing now). The seam is self-describing: `n` jumps.
+        L = _agent.CostLedger()
+        for _ in range(300):
+            L.record(self._usage())
+        rows = L.api_calls()
+        self.assertEqual(len(rows), 250)
+        self.assertEqual([r["n"] for r in rows[:3]], [1, 2, 3])
+        self.assertEqual(rows[49]["n"], 50)
+        self.assertEqual(rows[50]["n"], 101)  # the gap IS the drop marker
+        self.assertEqual(rows[-1]["n"], 300)
+        self.assertEqual(L.api_calls_total, 300)
+        self.assertEqual(L.calls_dropped(), 50)
+
+    def test_a_dropped_row_is_never_silent(self):
+        L = _agent.CostLedger()
+        for _ in range(300):
+            L.record(self._usage(), seconds=1.0)
+        self.assertEqual(self._call_block(L.usage_report())[0],
+                         "  calls       4m 10s  across 300 API call(s)"
+                         "  [50 row(s) dropped]")
+
+    def test_to_dict_rows_are_copies(self):
+        # `tools` already copies per row; a list of dicts is the easy miss, and
+        # `code --json` hands this envelope to json.dump while the ledger is live.
+        L = _agent.CostLedger()
+        L.record(self._usage())
+        L.record_compaction({"messages_before": 4, "messages_after": 2})
+        d = L.to_dict()
+        d["api_calls"][0]["prompt_tokens"] = 999999
+        d["context_events"][0]["messages_before"] = 999999
+        self.assertEqual(L.api_calls()[0]["prompt_tokens"], 100)
+        self.assertEqual(L.context_events[0]["messages_before"], 4)
+
+    # --- restore ---------------------------------------------------------- #
+
+    def test_restore_is_seed_once_not_additive(self):
+        # The third `restore` category. Additive (the reflex every tally above invites)
+        # would CONCATENATE the rows into duplicates on a second call.
+        L = _agent.CostLedger()
+        for _ in range(4):
+            L.record(self._usage())
+        L.record_compaction({"messages_before": 8, "messages_after": 3})
+        snap = L.to_dict()
+        R = _agent.CostLedger()
+        R.restore(snap)
+        R.restore(snap)
+        self.assertEqual(len(R.api_calls()), 4)
+        self.assertEqual(len(R.context_events), 1)
+        self.assertEqual(R.api_calls_total, 8)  # the TALLY is additive, the list is not
+
+    def test_a_resumed_ledger_continues_the_numbering(self):
+        # Restarting `n` at 1 would collide with the rows just restored and make the
+        # ordinal useless as a key.
+        L = _agent.CostLedger()
+        for _ in range(4):
+            L.record(self._usage())
+        R = _agent.CostLedger()
+        R.restore(L.to_dict())
+        R.record(self._usage())
+        self.assertEqual(R.api_calls()[-1]["n"], 5)
+
+    def test_rows_with_a_truncated_total_still_number_uniquely(self):
+        # A hand-edited envelope must not be able to make `n` collide or drive
+        # `calls_dropped` negative.
+        R = _agent.CostLedger()
+        R.restore({"api_calls": [{"n": 1}, {"n": 2}], "api_calls_total": 0})
+        self.assertEqual(R.api_calls_total, 2)
+        self.assertEqual(R.calls_dropped(), 0)
+        R.record(self._usage())
+        self.assertEqual(R.api_calls()[-1]["n"], 3)
+
+    def test_a_pre_99_envelope_restores_with_no_trace(self):
+        # Mirrors `test_a_pre_82_envelope_restores_with_no_tools`: no key, no crash,
+        # and crucially no fabricated empty section in the report.
+        R = _agent.CostLedger()
+        R.restore({"prompt_tokens": 100, "completion_tokens": 5})
+        self.assertEqual(R.api_calls(), [])
+        self.assertEqual(R.context_events, [])
+        self.assertEqual(R.api_calls_total, 0)
+        self.assertNotIn("calls ", R.usage_report())
+
+    def test_restore_tolerates_junk_rows(self):
+        R = _agent.CostLedger()
+        R.restore({"api_calls": ["nope", {"n": 1}, 7], "context_events": [None, {}]})
+        self.assertEqual(len(R.api_calls()), 1)
+        self.assertEqual(len(R.context_events), 1)
+
+    # --- render ----------------------------------------------------------- #
+
+    def test_the_trace_block_pins_the_whole_line(self):
+        # Whole-line assertEqual: a suffix appended to a row is invisible to assertIn.
+        L = _agent.CostLedger()
+        L.record(self._usage(pt=11204, ct=312, cached=0), seconds=4.2)
+        L.record(self._usage(pt=11530, ct=88, cached=11069), seconds=1.1)
+        self.assertEqual(self._call_block(L.usage_report()), [
+            "  calls         5.3s  across 2 API call(s)",
+            "    #1       11,204 in    0% cached      312 out      4.2s",
+            "    #2       11,530 in   96% cached       88 out      1.1s",
+        ])
+
+    def test_the_elided_span_carries_its_own_totals(self):
+        # The `_tool_lines` rule: a truncated block whose parts do not add up to its
+        # header is the #98 lie in a new costume.
+        L = _agent.CostLedger()
+        for _ in range(12):
+            L.record(self._usage(pt=1000, ct=10, cached=500), seconds=1.0)
+        block = self._call_block(L.usage_report())
+        self.assertEqual(block[0], "  calls        12.0s  across 12 API call(s)")
+        self.assertEqual(len(block), 1 + 3 + 1 + 5)
+        self.assertEqual(block[4],
+                         "    (+4 elided)      4,000 in   50% cached"
+                         "       40 out      4.0s")
+        self.assertEqual(block[5],
+                         "    #8               1,000 in   50% cached"
+                         "       10 out      1.0s")
+
+    def test_a_null_row_renders_n_a_in_every_column(self):
+        L = _agent.CostLedger()
+        L.record(None)
+        self.assertEqual(self._call_block(L.usage_report())[1],
+                         "    #1          n/a in   n/a cached      n/a out       n/a")
+
+    # --- context events --------------------------------------------------- #
+
+    def test_a_compaction_event_anchors_to_the_last_call(self):
+        L = _agent.CostLedger()
+        L.record(self._usage())
+        L.record(self._usage())
+        L.record_compaction({"trigger": "auto", "messages_before": 48,
+                             "messages_after": 13, "est_tokens_before": 91200,
+                             "est_tokens_after": 8210,
+                             "observed_tokens_before": 88110})
+        ev = L.context_events[0]
+        self.assertEqual(ev["kind"], "compaction")
+        self.assertEqual(ev["after_n"], 2)
+
+    def test_the_marker_renders_after_its_anchor(self):
+        L = _agent.CostLedger()
+        L.record(self._usage(pt=1000, ct=10, cached=0), seconds=1.0)
+        L.record_compaction({"trigger": "auto", "messages_before": 48,
+                             "messages_after": 13, "est_tokens_before": 91200,
+                             "est_tokens_after": 8210,
+                             "observed_tokens_before": 88110})
+        L.record(self._usage(pt=800, ct=10, cached=0), seconds=1.0)
+        self.assertEqual(self._call_block(L.usage_report()), [
+            "  calls         2.0s  across 2 API call(s)",
+            "    #1        1,000 in    0% cached       10 out      1.0s",
+            "    -- compacted (auto) after #1: 48 -> 13 msgs, ~91,200 -> ~8,210 tok est",
+            "       (88,110 tok measured before, lower bound)",
+            "    #2          800 in    0% cached       10 out      1.0s",
+        ])
+
+    def test_an_unmeasured_event_omits_the_lower_bound_line(self):
+        # `/compact` without a budget: the estimate must not wear a measurement's name.
+        L = _agent.CostLedger()
+        L.record(self._usage(pt=1000, ct=10, cached=0), seconds=1.0)
+        L.record_compaction({"trigger": "manual", "messages_before": 48,
+                             "messages_after": 13, "est_tokens_before": 91200,
+                             "est_tokens_after": 8210,
+                             "observed_tokens_before": None})
+        self.assertEqual(self._call_block(L.usage_report())[2],
+                         "    -- compacted (manual) after #1: 48 -> 13 msgs, "
+                         "~91,200 -> ~8,210 tok est")
+        self.assertNotIn("measured", L.usage_report())
+
+    def test_a_marker_inside_the_elided_span_still_renders(self):
+        # Markers are rare and are the highest-signal line in the block; folding one
+        # away silently would violate the no-silent-caps rule the header follows.
+        L = _agent.CostLedger()
+        for _ in range(12):
+            L.record(self._usage(pt=1000, ct=10, cached=0), seconds=1.0)
+            if L.api_calls_total == 6:
+                L.record_compaction({"trigger": "auto", "messages_before": 40,
+                                     "messages_after": 9, "est_tokens_before": 8000,
+                                     "est_tokens_after": 900})
+        block = self._call_block(L.usage_report())
+        self.assertEqual(block[5], "    -- compacted (auto) after #6: 40 -> 9 msgs, "
+                                   "~8,000 -> ~900 tok est")
+        self.assertTrue(block[4].startswith("    (+4 elided)"))
+
+    def test_an_event_before_any_call_still_renders(self):
+        # `after_n` 0 has no row to hang off; without the tail sweep it would vanish.
+        L = _agent.CostLedger()
+        L.record_compaction({"trigger": "manual", "messages_before": 6,
+                             "messages_after": 2, "est_tokens_before": 500,
+                             "est_tokens_after": 90})
+        L.record(self._usage(pt=100, ct=5, cached=0), seconds=1.0)
+        self.assertIn("    -- compacted (manual) after #0: 6 -> 2 msgs, "
+                      "~500 -> ~90 tok est",
+                      self._call_block(L.usage_report()))
+
+    def test_the_event_row_carries_no_cost(self):
+        # #101 owns the summary call's cost. Tokens-saved beside a cost would invite
+        # "the compaction paid for itself", which this data cannot support.
+        L = _agent.CostLedger()
+        L.record_compaction({"messages_before": 4, "messages_after": 2})
+        self.assertNotIn("cost", L.context_events[0])
 
 
 class TestRunLoopSpendGate(unittest.TestCase):

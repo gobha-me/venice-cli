@@ -539,12 +539,16 @@ def _no_tool_turn(oai, model, messages, gen_kwargs, oai_tools, *, ledger=None) -
     carry the whole transcript as prompt, which makes them among the largest calls
     in a run -- a reported cost that skipped them would understate it badly.
     """
+    _t0 = time.monotonic()
     resp = oai.chat.completions.create(
         model=model, messages=messages, tools=oai_tools, tool_choice="none",
         **gen_kwargs,
     )
     if ledger is not None:
-        ledger.record(getattr(resp, "usage", None))
+        # #99: the highest-value bracket in the change. These turns carry the whole
+        # transcript (see above), so they are the largest rows in the trace -- a trace
+        # whose biggest calls read `n/a` would be worse than no trace at all.
+        ledger.record(getattr(resp, "usage", None), seconds=time.monotonic() - _t0)
     if getattr(resp, "choices", None):
         return resp.choices[0].message.content or ""
     return ""

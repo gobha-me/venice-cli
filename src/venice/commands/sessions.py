@@ -128,7 +128,16 @@ def _run_show(args) -> int:
     if sess.gen_kwargs:
         print(f"gen_kwargs: {sess.gen_kwargs}")
     if sess.usage:
-        print(f"usage:   {sess.usage}")
+        # #99: the nested collections are summarized, not dumped. This line prints the
+        # whole dict as a one-line repr, and `usage.api_calls` alone can hold 250 rows --
+        # roughly 30KB on a single line, which would drown every scalar beside it. The
+        # rows themselves stay in the session JSON for `jq`; `/usage` renders them.
+        scalars = {k: v for k, v in sess.usage.items() if not isinstance(v, list)}
+        print(f"usage:   {scalars}")
+        for key in ("api_calls", "context_events"):
+            rows = sess.usage.get(key)
+            if isinstance(rows, list) and rows:
+                print(f"  {key}: {len(rows)} row(s)")
     print(f"messages: {len(sess.messages)}")
     roles: dict = {}
     for m in sess.messages:

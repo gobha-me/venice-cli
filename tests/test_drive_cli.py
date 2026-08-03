@@ -454,6 +454,98 @@ class TestDriveChatRepl(_DriveCase):
         # ...and /reset really cleared the transcript, not just the display.
         self.assertEqual(envelope["messages"], [])
 
+    def test_repl_persists_a_per_call_trace(self):
+        # #99 through the REAL CLI on a real pty. Each queued reply is its own
+        # `create()`, so two turns must leave two rows -- and because the fake's usage
+        # block carries no `prompt_tokens_details` (#114), every row's cache field must
+        # persist as null rather than a confident 0.
+        self.api.reply("FIRST-REPLY")
+        self.api.reply("SECOND-REPLY")
+
+        with self.cli("chat", "-i") as d:
+            d.expect("you> ")
+            d.send("One")
+            d.expect("FIRST-REPLY")
+            d.expect("you> ")
+            d.send("Two")
+            d.expect("SECOND-REPLY")
+            d.expect("you> ")
+            d.send("/exit")
+            self.assertEqual(d.wait(), 0)
+
+        envelope = json.loads(self.sessions()[0].read_text(encoding="utf-8"))
+        usage = envelope["usage"]
+        self.assertEqual(usage["prompt_tokens"], 22)   # the existing aggregate...
+        self.assertEqual(usage["api_calls_total"], 2)  # ...now itemized
+        rows = usage["api_calls"]
+        self.assertEqual([r["n"] for r in rows], [1, 2])
+        self.assertEqual([r["prompt_tokens"] for r in rows], [11, 11])
+        self.assertEqual([r["cache_read_tokens"] for r in rows], [None, None])
+        for r in rows:
+            # The streamed path brackets its own window through the real process.
+            self.assertIsNotNone(r["seconds"])
+        self.assertEqual(usage["context_events"], [])
+
+    def test_repl_records_an_auto_compaction_event(self):
+        # #99's other half, driven end to end. `--compact-threshold 1` makes
+        # `Budget.over` short-circuit on the fake's observed 11 prompt tokens, so the
+        # second turn compacts -- and the event lands in the envelope with the
+        # server-reported number, which is the pre-reset read the ordering depends on.
+        # THREE turns, not two: at the top of turn 2 the history is a single group,
+        # so `split_for_compaction` leaves an empty prefix and declines. Turn 3 is the
+        # first checkpoint with something to summarize -- hence the 4th queued reply,
+        # which is consumed by the summarization call rather than shown.
+        self.api.reply("FIRST-REPLY")
+        self.api.reply("SECOND-REPLY")
+        self.api.reply("SUMMARY-OF-EARLIER")
+        self.api.reply("THIRD-REPLY")
+
+        with self.cli("chat", "-i", "--auto-compact",
+                      "--compact-threshold", "1", "--compact-keep-turns", "1") as d:
+            d.expect("you> ")
+            d.send("One")
+            d.expect("FIRST-REPLY")
+            d.expect("you> ")
+            d.send("Two")
+            d.expect("SECOND-REPLY")
+            d.expect("you> ")
+            d.send("Three")
+            d.expect("auto-compacted history")
+            d.expect("THIRD-REPLY")
+            d.expect("you> ")
+            d.send("/exit")
+            self.assertEqual(d.wait(), 0)
+
+        usage = json.loads(self.sessions()[0].read_text(encoding="utf-8"))["usage"]
+        events = usage["context_events"]
+        self.assertEqual(len(events), 1)
+        ev = events[0]
+        self.assertEqual(ev["kind"], "compaction")
+        self.assertEqual(ev["trigger"], "auto")
+        self.assertEqual(ev["observed_tokens_before"], 11)
+        self.assertGreater(ev["messages_before"], ev["messages_after"])
+
+    def test_sessions_show_stays_bounded_through_the_real_cli(self):
+        # The `sessions show` line is a one-line repr of the whole usage dict; #99
+        # bounds it. Driven through the real process so the fix is proven where an
+        # operator actually meets it.
+        self.api.reply("HELLO-FROM-FAKE")
+
+        with self.cli("chat", "-i") as d:
+            d.expect("you> ")
+            d.send("Say hi")
+            d.expect("HELLO-FROM-FAKE")
+            d.expect("you> ")
+            d.send("/exit")
+            self.assertEqual(d.wait(), 0)
+
+        # `latest` resolves the most recent CODE session, and this is a chat one --
+        # target the id the autosave actually wrote.
+        sid = json.loads(self.sessions()[0].read_text(encoding="utf-8"))["id"]
+        with self.cli("sessions", "show", sid) as d:
+            d.expect("api_calls: 1 row")
+            self.assertEqual(d.wait(), 0)
+
     def test_repl_usage_reports_unknown_cache_state(self):
         # #98 through the REAL CLI on a real pty: the fake server's usage block
         # carries no `prompt_tokens_details` (exactly like a live glm/kimi response,
