@@ -100,7 +100,7 @@ def _python_path() -> str:
     candidates = []
     if hasattr(site, "getsitepackages"):  # absent under some virtualenvs
         candidates.extend(site.getsitepackages())
-    if hasattr(site, "getusersitepackages"):
+    if site.ENABLE_USER_SITE and hasattr(site, "getusersitepackages"):
         candidates.append(site.getusersitepackages())
     for entry in candidates:
         if entry and os.path.isdir(entry) and entry not in parts:
@@ -131,6 +131,10 @@ def build_env(home, *, base_url=None, api_key="test-fake-key") -> dict:
         "PYTHONUTF8": "1",
         "PYTHONIOENCODING": "utf-8",
         "PYTHONDONTWRITEBYTECODE": "1",
+        # The user's effective site configuration is already represented in
+        # PYTHONPATH above. Do not let the child's redirected HOME re-enable a
+        # user site that the parent interpreter deliberately disabled.
+        "PYTHONNOUSERSITE": "1",
         "TERM": "dumb",
         "COLUMNS": "200",
         "LINES": "24",

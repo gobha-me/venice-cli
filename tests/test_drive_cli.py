@@ -23,11 +23,13 @@ import importlib.util
 import json
 import os
 import shutil
+import site
 import stat
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import venice
 from tests import _drive
@@ -37,6 +39,23 @@ _HAS_OPENAI = importlib.util.find_spec("openai") is not None
 
 needs_pty = unittest.skipUnless(_drive.HAS_PEXPECT, _drive.SKIP_REASON)
 needs_openai = unittest.skipUnless(_HAS_OPENAI, "openai SDK not installed")
+
+
+class TestDrivePythonPath(unittest.TestCase):
+    def test_user_site_follows_parent_effective_configuration(self):
+        with tempfile.TemporaryDirectory() as user_site:
+            with mock.patch.object(site, "getusersitepackages", return_value=user_site):
+                with mock.patch.object(site, "ENABLE_USER_SITE", False):
+                    disabled = _drive._python_path().split(os.pathsep)
+                with mock.patch.object(site, "ENABLE_USER_SITE", True):
+                    enabled = _drive._python_path().split(os.pathsep)
+
+        self.assertNotIn(user_site, disabled)
+        self.assertIn(user_site, enabled)
+
+    def test_child_disables_home_derived_user_site(self):
+        with tempfile.TemporaryDirectory() as home:
+            self.assertEqual(_drive.build_env(home)["PYTHONNOUSERSITE"], "1")
 
 
 class _DriveCase(unittest.TestCase):
