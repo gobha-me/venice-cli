@@ -285,6 +285,28 @@ class TestSessionsCLI(_Base):
         self.assertIn(s.id, out)
         self.assertIn("messages: 2", out)
 
+    def test_show_bounds_a_large_usage_trace(self):
+        # #99: `sessions show` prints `usage` as a one-line repr, and `api_calls` can
+        # hold 250 rows -- roughly 30KB on ONE line, drowning every scalar beside it.
+        # The rows stay in the JSON for jq; this surface reports their count.
+        s = self._mk_saved()
+        s.usage = {
+            "total": 1.5, "prompt_tokens": 900, "turns": 2,
+            "api_calls_total": 300,
+            "api_calls": [{"n": i, "prompt_tokens": 100} for i in range(1, 251)],
+            "context_events": [{"kind": "compaction", "after_n": 4}],
+        }
+        S.save(s)
+        rc, out, err = _capture(cli.main, ["sessions", "show", s.id])
+        self.assertEqual(rc, 0)
+        usage_line = next(ln for ln in out.splitlines() if ln.startswith("usage:"))
+        self.assertLess(len(usage_line), 200, "the usage line dumped the whole trace")
+        self.assertIn("'prompt_tokens': 900", usage_line)
+        self.assertIn("'api_calls_total': 300", usage_line)
+        self.assertNotIn("'n': 7", usage_line)
+        self.assertIn("  api_calls: 250 row(s)", out)
+        self.assertIn("  context_events: 1 row(s)", out)
+
     def test_show_missing(self):
         rc, out, err = _capture(cli.main, ["sessions", "show", "nope"])
         self.assertEqual(rc, 1)

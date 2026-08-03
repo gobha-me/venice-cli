@@ -275,3 +275,101 @@ class TestBudgetFromArgs(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCompactionEvents(unittest.TestCase):
+    """#99: a compaction is logged to the ledger as a context event.
+
+    The ledger is duck-typed here (`_compact` imports nothing from `_agent`), so these
+    use a minimal recorder rather than a real `CostLedger` -- what is under test is the
+    contract `_compact` calls, not the ledger's storage.
+    """
+
+    class _Rec:
+        def __init__(self):
+            self.events = []
+
+        def record_compaction(self, ev):
+            self.events.append(ev)
+
+    def test_a_successful_compaction_is_recorded(self):
+        msgs = _history(6)
+        fake, _calls = _fake_oai("summary")
+        led = self._Rec()
+        self.assertTrue(_compact.compact_messages(
+            fake, "m", msgs, keep_turns=2, ledger=led, trigger="manual"))
+        self.assertEqual(len(led.events), 1)
+        ev = led.events[0]
+        self.assertEqual(ev["trigger"], "manual")
+        self.assertEqual(ev["messages_before"], 13)
+        self.assertEqual(ev["messages_after"], len(msgs))
+        # Both estimates use the same yardstick, so the RATIO is the meaningful part.
+        self.assertGreater(ev["est_tokens_before"], ev["est_tokens_after"])
+
+    def test_a_failed_compaction_records_nothing(self):
+        # The module's contract is that a failed summarization leaves history
+        # untouched; an event for a compaction that did not happen would be a fresh
+        # lie in the artifact that exists to stop one.
+        for kw in ({"fail": True}, {"summary": "   "}):
+            with self.subTest(**kw):
+                msgs = _history(6)
+                fake, _calls = _fake_oai(**kw)
+                led = self._Rec()
+                self.assertFalse(_compact.compact_messages(
+                    fake, "m", msgs, keep_turns=2, ledger=led))
+                self.assertEqual(led.events, [])
+
+    def test_nothing_to_compact_records_nothing(self):
+        msgs = _history(3)
+        fake, _calls = _fake_oai()
+        led = self._Rec()
+        self.assertFalse(_compact.compact_messages(
+            fake, "m", msgs, keep_turns=5, ledger=led))
+        self.assertEqual(led.events, [])
+
+    def test_no_ledger_is_a_no_op(self):
+        msgs = _history(6)
+        fake, _calls = _fake_oai("summary")
+        self.assertTrue(_compact.compact_messages(fake, "m", msgs, keep_turns=2))
+
+    def test_the_event_carries_no_cost(self):
+        # #101 owns the summarization call's cost. Tokens-saved beside a cost invites
+        # "the compaction paid for itself", which this data cannot support.
+        msgs = _history(6)
+        fake, _calls = _fake_oai("summary")
+        led = self._Rec()
+        _compact.compact_messages(fake, "m", msgs, keep_turns=2, ledger=led)
+        self.assertNotIn("cost", led.events[0])
+
+    def test_observed_before_is_the_pre_reset_budget_value(self):
+        # THE ordering guard. `maybe_compact` clears `last_prompt_tokens` right after
+        # `compact_messages` returns; recording after that reset would silently null
+        # every automatic event, and the estimate would be the only number left.
+        msgs = _history(6)
+        fake, _calls = _fake_oai("summary")
+        led = self._Rec()
+        b = _compact.Budget(threshold_tokens=1, keep_turns=2)
+        b.last_prompt_tokens = 88110
+        self.assertTrue(_compact.maybe_compact(fake, "m", msgs, b, {}, ledger=led))
+        self.assertEqual(led.events[0]["observed_tokens_before"], 88110)
+        self.assertEqual(led.events[0]["trigger"], "auto")
+        self.assertIsNone(b.last_prompt_tokens)  # and it IS reset afterwards
+
+    def test_without_a_budget_the_measured_number_is_null(self):
+        # `/compact` with auto-compact off: the estimate must not wear a
+        # measurement's name.
+        msgs = _history(6)
+        fake, _calls = _fake_oai("summary")
+        led = self._Rec()
+        _compact.compact_messages(fake, "m", msgs, keep_turns=2, ledger=led)
+        ev = led.events[0]
+        self.assertIsNone(ev["observed_tokens_before"])
+        self.assertIn("est_tokens_before", ev)
+
+    def test_an_under_budget_gate_records_nothing(self):
+        msgs = _history(6)
+        fake, _calls = _fake_oai("summary")
+        led = self._Rec()
+        b = _compact.Budget(threshold_tokens=10_000_000, keep_turns=2)
+        self.assertFalse(_compact.maybe_compact(fake, "m", msgs, b, {}, ledger=led))
+        self.assertEqual(led.events, [])

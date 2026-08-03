@@ -277,6 +277,9 @@ def compact_messages(
     *,
     keep_turns: int = DEFAULT_KEEP_TURNS,
     base_kwargs: Optional[dict] = None,
+    ledger=None,
+    budget: Optional[Budget] = None,
+    trigger: str = "auto",
 ) -> bool:
     """Summarize the older prefix in place; keep system + last `keep_turns`.
 
@@ -284,6 +287,14 @@ def compact_messages(
     to do or the summarization call failed (in which case `messages` is left
     untouched). Only the summary text is taken from the response; the model's
     own wording is never trusted with roles.
+
+    #99: when `ledger` is given, a successful compaction is logged to it as a context
+    event. Recorded HERE, in the worker, rather than at the four call sites -- the gate
+    (`maybe_compact`) is only three of them, `/compact` calls straight into this
+    function, and copying the bookkeeping into each site is the shape that lets one
+    site quietly forget it. `ledger` is duck-typed: this module imports nothing from
+    `_agent` and does not need to. `trigger` distinguishes the automatic gate from a
+    hand-typed `/compact`, which answers "was this sawtooth self-inflicted".
     """
     split = split_for_compaction(messages, keep_turns)
     if split is None:
@@ -311,13 +322,43 @@ def compact_messages(
     if not summary:
         return False
 
+    # #99: measure BEFORE the rewrite below, then record AFTER it, and only on this
+    # success path. The module's contract is that a failed summarization leaves history
+    # untouched, so an event row for a compaction that did not happen would be a fresh
+    # lie in the artifact that exists to stop one.
+    est_before = estimate_tokens(messages)
+    msgs_before = len(messages)
     messages[:] = sys_msgs + [synthetic_message(summary)] + tail
+    if ledger is not None:
+        ledger.record_compaction({
+            "trigger": trigger,
+            "messages_before": msgs_before,
+            "messages_after": len(messages),
+            # `est_*` vs `observed_*` carries the measured-vs-estimated distinction in
+            # the KEY NAMES rather than in a `measured: true` flag -- cheaper, and it
+            # cannot drift out of agreement with the value beside it. Both estimates use
+            # the same 4-chars-per-token yardstick, so neither absolute means much but
+            # the RATIO between them does.
+            "est_tokens_before": est_before,
+            "est_tokens_after": estimate_tokens(messages),
+            # The server-reported prompt size of the PREVIOUS call -- a LOWER BOUND on
+            # what the next one would have cost, since the history grew by an assistant
+            # reply and its tool results after that number was observed. None when there
+            # is no budget (the `/compact`-without-`--auto-compact` shape), which is
+            # exactly the case where an unlabelled number would read as measured.
+            "observed_tokens_before": (
+                None if budget is None else budget.last_prompt_tokens
+            ),
+            # NO cost field, deliberately: the summarization `create()` above is
+            # unledgered (#101). Tokens-saved next to no cost invites the reader to
+            # conclude the compaction paid for itself, which this data cannot support.
+        })
     return True
 
 
 def maybe_compact(oai, model: str, messages: List[dict],
                   budget: Optional[Budget], base_kwargs: Optional[dict] = None,
-                  on_compact=None) -> bool:
+                  on_compact=None, ledger=None) -> bool:
     """Compact `messages` in place when `budget` says they're over budget.
 
     The shared gate for every compaction site (`run_loop`'s per-turn check, its
@@ -326,6 +367,12 @@ def maybe_compact(oai, model: str, messages: List[dict],
     prompt-token count is stale, so it's reset (the next turn re-observes).
     `on_compact(before, after)` is invoked on success (for progress output).
     Returns True iff the history was compacted.
+
+    #99: `ledger` is forwarded, not consumed here. Note the ORDERING that makes
+    `observed_tokens_before` real: `compact_messages` runs (and records) while
+    `budget.last_prompt_tokens` still holds the observed value, and only then does the
+    reset below clear it. Recording after that reset would silently null every
+    automatic event.
     """
     if budget is None or not budget.over(messages):
         return False
@@ -333,6 +380,7 @@ def maybe_compact(oai, model: str, messages: List[dict],
     if not compact_messages(
         oai, model, messages,
         keep_turns=budget.keep_turns, base_kwargs=base_kwargs,
+        ledger=ledger, budget=budget, trigger="auto",
     ):
         return False
     budget.last_prompt_tokens = None  # stale after compaction

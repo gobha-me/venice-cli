@@ -370,6 +370,7 @@ def _turn(oai, openai, chat, text, messages, gen_kwargs, state, args) -> bool:
         on_compact=lambda b, a: print(
             f"(auto-compacted history: {b} -> {a} messages)", file=sys.stderr,
         ),
+        ledger=ledger,  # #99
     )
     # Spend gate (#66): refuse a new turn once the session cap is hit (the
     # tool-loop gates mid-run; a streamed turn gates here).
@@ -400,11 +401,16 @@ def _turn(oai, openai, chat, text, messages, gen_kwargs, state, args) -> bool:
                     parallel=bool(getattr(args, "parallel", None)),  # #52
                 )
         else:
+            _t0 = time.monotonic()
             reply, usage = _stream_turn(oai, chat, state["model"], messages, gen_kwargs)
             if budget is not None:
                 budget.observe(usage)
             if ledger is not None:
-                ledger.record(usage)
+                # #99: `_stream_turn` drains the whole generator, so this window is
+                # time-to-LAST-token, not time-to-response like every other row. The
+                # difference is real -- do not compare a streamed row against a buffered
+                # one and conclude the provider got slower.
+                ledger.record(usage, seconds=time.monotonic() - _t0)
             messages.append({"role": "assistant", "content": reply})
     except KeyboardInterrupt:
         # Ctrl-C aborts just this turn -- roll it back and keep the session. With #79's
@@ -535,6 +541,10 @@ def _dispatch_slash(line, messages, state, args, models, oai=None, gen_kwargs=No
         if _compact.compact_messages(
             oai, state["model"], messages,
             keep_turns=keep, base_kwargs=gen_kwargs,
+            # #99: a hand-typed compaction is still a prefix event and still shows up as
+            # a cache cliff on the next call, so it is traced like the automatic one --
+            # `trigger` is what lets the operator tell the two apart afterwards.
+            ledger=state.get("ledger"), budget=state.get("budget"), trigger="manual",
         ):
             if state.get("budget") is not None:
                 state["budget"].last_prompt_tokens = None
