@@ -379,6 +379,12 @@ class CostLedger:
             "turns": self.turns,
             "cache_read_unreported": self.cache_read_unreported,    # #98
             "cache_write_unreported": self.cache_write_unreported,  # #98
+            # #100: the one DERIVED key here, so a pipeline can alert on a cache
+            # collapse without re-deriving it from two counters. `null` when the rate
+            # is not knowable -- never a fabricated 0.0 (that is the #98 contract).
+            # Rounded because `venice sessions show` prints this dict straight at a
+            # human. Deliberately NOT read back by `restore()`; see the note there.
+            "cache_hit_percent": self.cache_hit_percent(round_to=1),
         }
 
     def restore(self, d) -> None:
@@ -416,6 +422,10 @@ class CostLedger:
             self.cache_read_unreported = True
         if d.get("cache_write_unreported"):
             self.cache_write_unreported = True
+        # #100: `cache_hit_percent` is deliberately NOT restored. Every other field
+        # above is additive because it is a tally; that one is DERIVED from the tallies
+        # this method just seeded, so it recomputes itself for free -- and accumulating
+        # it (the reflex the surrounding lines invite) would add two percentages.
 
     def record_turn(self, seconds) -> None:
         """Add one blocked window's wall-clock and count the turn (#81).
@@ -519,17 +529,71 @@ class CostLedger:
             and (self.prompt_tokens + self.completion_tokens) >= self.max_tokens
         )
 
-    def summary(self) -> str:
-        """A one-line human-readable total (for stderr / --json)."""
+    def cache_hit_percent(self, *, round_to: Optional[int] = None):
+        """Cache-read hit rate as a percent 0-100, or None when unknowable (#98/#100).
+
+        `None` means UNKNOWN and never zero -- the whole point of #98. Two ways to not
+        know: nothing has been recorded (no input tokens to divide by), or every turn
+        that was recorded carried no cache-read field at all. A caller that renders the
+        None must say "n/a"; rendering it as 0.0 recreates the exact lie #98 removed.
+
+        NOT a single source of truth for cache state, despite being the only place the
+        rate is computed. It collapses "unrecorded" and "unreported" into one None, and
+        it says nothing about the *write* bucket, so `usage_report`'s split line and
+        `summary`'s fragment both still read the `*_unreported` flags for their wording.
+
+        `round_to` is for the persisted/JSON surface (`to_dict`), where an unrounded
+        89.10891089108911 lands in a session file and gets printed at a human by
+        `venice sessions show`. The human renderers format with `:.1f` themselves.
+        """
+        if self.prompt_tokens == 0:
+            return None
+        if self.cache_read_unreported and self.cache_read_tokens == 0:
+            return None
+        pct = self.cache_read_tokens / self.prompt_tokens * 100.0
+        return pct if round_to is None else round(pct, round_to)
+
+    def _cache_fragment(self) -> str:
+        """The one-line cache clause for :meth:`summary`, or "" when there is none (#100).
+
+        Vocabulary is `usage_report`'s verbatim -- an operator can run `/cost` and
+        `/usage` seconds apart, and two words for one state reads as two states.
+        """
+        pct = self.cache_hit_percent()
+        if pct is None:
+            # Distinguish "the provider never told us" (worth saying on a run footer --
+            # it is the difference between a cache collapse and a blind spot) from
+            # "nothing was recorded", which has nothing to report at all.
+            return "cache n/a" if self.cache_read_unreported else ""
+        if self.cache_read_unreported:
+            return f"cache {pct:.1f}% hit [partially unreported]"
+        return f"cache {pct:.1f}% hit"
+
+    def summary(self, *, cache: bool = False) -> str:
+        """A one-line human-readable total (for stderr / --json).
+
+        `cache` opts into the #100 hit-rate clause. OFF by default because two of this
+        method's call sites are stop-reason messages -- `run_loop`'s spend and token
+        gates -- on unpriced subagent/review ledgers that are near-always cache-
+        unreported, and "cache n/a" on `worker reached token cap 50,000` answers a
+        question nobody asked there. The run footers and `/cost` opt in.
+        """
+        # Built once so the clause reaches BOTH branches below: the command-level tests
+        # all render the unpriced one (the catalog fake carries no `pricing`), which is
+        # exactly the branch a fragment appended to the priced path would miss.
+        toks = f"tokens prompt={self.prompt_tokens} completion={self.completion_tokens}"
+        frag = self._cache_fragment() if cache else ""
+        if frag:
+            # Inside the clause, not appended with " -- ": the footers render
+            # `code: {duration} wall -- {summary()}`, where " -- " is THE top-level
+            # field boundary (and is documented as one in the README).
+            toks += f", {frag}"
         if self.unpriced and self.total == 0.0:
-            return (
-                f"cost: (unpriced — model rate unknown) "
-                f"tokens prompt={self.prompt_tokens} completion={self.completion_tokens}"
-            )
+            return f"cost: (unpriced — model rate unknown) {toks}"
         s = f"cost: ${self.total:.4f}"
         if self.max_spend is not None:
             s += f" / cap ${self.max_spend:.2f}"
-        s += f" (tokens prompt={self.prompt_tokens} completion={self.completion_tokens})"
+        s += f" ({toks})"
         if self.unpriced:
             s += " [partially unpriced]"
         return s
@@ -551,10 +615,6 @@ class CostLedger:
             # and a "cache hit rate: 0.0%" that would read as a real measurement.
             return "session usage:\n  (no tokens reported)\n" + self._timing_line()
         uncached = self.prompt_tokens - self.cache_read_tokens - self.cache_write_tokens
-        hit = (
-            self.cache_read_tokens / self.prompt_tokens * 100.0
-            if self.prompt_tokens else 0.0
-        )
         lines = ["session usage:"]
         # #98: the two flags govern DIFFERENT rows on purpose. Read-reported-but-
         # write-absent is the normal shape for most Venice models, so a shared marker
@@ -577,14 +637,24 @@ class CostLedger:
         if self.reasoning_tokens:
             out += f"  (incl. {self.reasoning_tokens:,} reasoning)"
         lines.append(out)
-        if not self.cache_read_unreported:
-            lines.append(f"  cache hit rate: {hit:.1f}%")
-        elif self.cache_read_tokens:
+        # #100: the rate itself comes from `cache_hit_percent` so `/usage`, `/cost` and
+        # both run footers cannot drift apart on what "unknown" means.
+        hit = self.cache_hit_percent()
+        if hit is None:
+            # Two distinct unknowns. `no input tokens` is only reachable past the
+            # early-return above with completion tokens but no prompt tokens -- which
+            # `restore()` can seed from a partial envelope, since (unlike `record`) it
+            # does not clamp the cache buckets to the prompt total. Dividing by that
+            # printed a 0.0% measured over nothing, which is the #98 lie one level down.
+            why = ("no cache fields reported" if self.cache_read_unreported
+                   else "no input tokens")
+            lines.append(f"  cache hit rate: n/a ({why})")
+        elif self.cache_read_unreported:
             # Some turns measured, some didn't: the rate is real but understated
             # against a prompt total that includes turns it could not see.
             lines.append(f"  cache hit rate: {hit:.1f}%  [partially unreported]")
         else:
-            lines.append("  cache hit rate: n/a (no cache fields reported)")
+            lines.append(f"  cache hit rate: {hit:.1f}%")
         if self.unpriced and self.total == 0.0:
             lines.append("  cost: (model rate unknown)")
         else:

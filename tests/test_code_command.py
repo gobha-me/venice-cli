@@ -897,6 +897,68 @@ class TestCodeUsageSurface(unittest.TestCase):
         self.assertNotIn("wall", self._err)
         json.loads(self._out.getvalue())        # envelope still parses
 
+    # -- the cache hit rate reaches the footer and the envelope (#100) ------- #
+    #
+    # The regression these exist to catch is the one that motivated the ticket: a
+    # prompt-cache collapse is a silent 3-5x cost event, and before this the number
+    # lived only behind a REPL slash command a one-shot run is never in.
+
+    def _cached_seq(self):
+        """The same three turns, but the provider reports its cache buckets."""
+        def u(n, cached):
+            return {"prompt_tokens": n * 100, "completion_tokens": n,
+                    "prompt_tokens_details": {"cached_tokens": cached}}
+        return [
+            FakeToolCompletion("plan text", usage=u(1, 50)),
+            FakeToolCompletion("done", usage=u(2, 100)),
+            FakeToolCompletion("ACCEPTANCE: PASS", usage=u(4, 200)),
+        ]
+
+    def test_footer_reports_an_unknown_cache_state(self):
+        # `_usage()` carries no `prompt_tokens_details` -- the shape the spec's own
+        # example ships. The footer must say so rather than print a 0.0% that reads
+        # as a measured total miss (#98's contract, now on this surface).
+        rc, _ = self._run(
+            _code_args(task="x", root=self.root, auto=True), self._full_seq())
+        self.assertEqual(rc, 0)
+        self.assertIn("cache n/a", self._err)
+        self.assertNotIn("0.0% hit", self._err)
+
+    def test_footer_reports_a_real_hit_rate(self):
+        # 350 cached of 700 prompt across the three turns.
+        rc, _ = self._run(
+            _code_args(task="x", root=self.root, auto=True), self._cached_seq())
+        self.assertEqual(rc, 0)
+        footer = [ln for ln in self._err.splitlines() if ln.startswith("code: ")
+                  and "wall" in ln]
+        self.assertEqual(len(footer), 1)
+        self.assertTrue(footer[0].endswith("cache 50.0% hit"), footer[0])
+
+    def test_json_envelope_carries_the_cache_hit_rate(self):
+        # So a pipeline can alert on a collapse without re-deriving it from two
+        # counters -- and gets `null`, never a fabricated 0.0, when it is unknown.
+        rc, _ = self._run(
+            _code_args(task="x", root=self.root, auto=True, json=True),
+            self._cached_seq())
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            json.loads(self._out.getvalue())["usage"]["cache_hit_percent"], 50.0)
+        rc, _ = self._run(
+            _code_args(task="x", root=self.root, auto=True, json=True), self._full_seq())
+        self.assertEqual(rc, 0)
+        usage = json.loads(self._out.getvalue())["usage"]
+        self.assertIn("cache_hit_percent", usage)
+        self.assertIsNone(usage["cache_hit_percent"])
+
+    def test_session_file_carries_the_cache_hit_rate(self):
+        # Same shape as the envelope: `jq .usage` agrees on both (code.py's
+        # stated contract), which is what made the 08-03 archaeology possible.
+        rc, _ = self._run(
+            _code_args(task="x", root=self.root, auto=True), self._cached_seq())
+        self.assertEqual(rc, 0)
+        with open(self._sessions()[0]) as f:
+            self.assertEqual(json.load(f)["usage"]["cache_hit_percent"], 50.0)
+
     def test_session_file_carries_usage(self):
         rc, _ = self._run(
             _code_args(task="x", root=self.root, auto=True), self._full_seq())

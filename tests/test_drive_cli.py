@@ -234,6 +234,29 @@ class TestDriveNonInteractive(_DriveCase):
         # *before* spending a plan turn.
         self.assertNotIn("/chat/completions", self.api.paths)
 
+    @needs_openai
+    def test_code_footer_reports_the_cache_state(self):
+        # #100 at the process level. The run footer had NO pty/subprocess coverage
+        # at all before this -- and it is the single surface a one-shot `venice code`
+        # puts a cache collapse in front of an operator, so "it renders in a unit
+        # test" was never the claim that mattered. The fake's usage block carries no
+        # `prompt_tokens_details` (a live glm/kimi response's shape), so the honest
+        # answer is n/a, not the 0.0% that hid a real regression for three days.
+        self.api.reply("PLAN: add a docstring")
+        self.api.reply("done")
+        self.api.reply("ACCEPTANCE: PASS")
+        cp = self.run_cli("code", "add a docstring", "--root", str(self.project),
+                          "--auto")
+        self.assertEqual(cp.returncode, 0, cp.stderr)
+        footer = [ln for ln in cp.stderr.splitlines()
+                  if ln.startswith("code: ") and "wall" in ln]
+        self.assertEqual(len(footer), 1, cp.stderr)
+        self.assertTrue(footer[0].endswith("cache n/a"), footer[0])
+        self.assertNotIn("0.0% hit", cp.stderr)
+        # ...and the machine-readable half agrees, through the same real process.
+        usage = json.loads(self.sessions()[0].read_text(encoding="utf-8"))["usage"]
+        self.assertIsNone(usage["cache_hit_percent"])
+
 
 # --------------------------------------------------------------------------
 # C2. venice review (#80 part 1a) -- the real CLI over a real git repo.
@@ -448,6 +471,13 @@ class TestDriveChatRepl(_DriveCase):
             d.expect("session usage:")
             d.expect("cache breakdown not reported")
             d.expect("cache hit rate: n/a")
+            d.expect("you> ")
+
+            # #100: /cost gained the same claim, and must agree with /usage. An
+            # operator runs these seconds apart, so a disagreement here reads as
+            # two different states rather than one state phrased twice.
+            d.send("/cost")
+            d.expect("cache n/a")
             d.expect("you> ")
 
             d.send("/exit")

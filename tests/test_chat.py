@@ -984,6 +984,43 @@ class TestChatUsageSurface(unittest.TestCase):
         self.assertNotIn("final", doc)   # not code.py's envelope
         self.assertNotIn("venice_usage", doc)
 
+    # --- the cache hit rate on the footer (#100) ---
+
+    def test_footer_reports_an_unknown_cache_state(self):
+        # `_usage()` carries no `prompt_tokens_details`, so the honest answer is
+        # "nobody looked" -- not a 0.0% that reads as a measured total miss.
+        with self._stub_tool():
+            rc, _f, _c = self._run(
+                _args(message="hi", tools=True, stream=False), self._tool_seq(1, 2))
+        self.assertEqual(rc, 0)
+        self.assertIn("cache n/a", self._err)
+        self.assertNotIn("0.0% hit", self._err)
+
+    def test_footer_reports_a_real_hit_rate(self):
+        # 150 cached of 300 prompt. This footer is the ONLY cache surface chat has:
+        # its `--json` is the raw SDK dump with nowhere to carry a number (#88).
+        seq = self._tool_seq(1, 2)
+        for turn, cached in zip(seq, (50, 100)):
+            turn.usage["prompt_tokens_details"] = {"cached_tokens": cached}
+        with self._stub_tool():
+            rc, _f, _c = self._run(
+                _args(message="hi", tools=True, stream=False), seq)
+        self.assertEqual(rc, 0)
+        footer = [ln for ln in self._err.splitlines()
+                  if ln.startswith("chat: ") and "wall" in ln]
+        self.assertEqual(len(footer), 1)
+        self.assertTrue(footer[0].endswith("cache 50.0% hit"), footer[0])
+
+    def test_plain_chat_footer_has_no_cache_claim(self):
+        # The non-`--tools` path renders `_print_usage` off the raw SDK blob and
+        # never touches a ledger. Out of scope for #100 (that is #90) -- pinned so
+        # it is a decision, not a surprise.
+        rc, _f, _c = self._run(
+            _args(message="hi", stream=False),
+            [FakeToolCompletion("hello", usage=self._usage(1))])
+        self.assertEqual(rc, 0)
+        self.assertNotIn("cache", self._err)
+
     # --- the exits that must still report ---
 
     def test_api_error_run_still_reports_time(self):
