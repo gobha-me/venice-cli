@@ -31,14 +31,28 @@ without pip. Don't mix the two: both own `~/.local/bin/venice`.
 ```sh
 make test    # unittest, no network, no API key required
 make lint    # compileall syntax check
+make scan    # invisible-character scan over every tracked file
 make drive   # the drive suite + its fake-API fixture (a subset of `make test`)
 ```
 
-`make test` and `make lint` must be green. Tests are hermetic: `urlopen` is
+`make test`, `make lint` and `make scan` must be green. Tests are hermetic: `urlopen` is
 mocked, `subprocess` and `shutil.which` are patched, `HOME` is redirected to a
 tmpdir, and the OpenAI SDK is mocked. **No test should ever make a real API call
 or need a real key.** If you find yourself wanting to hit the live API in a test,
 that's a sign the seam is in the wrong place.
+
+### The invisible-character scan
+
+`make scan` (and a regression test that runs it under `make test`) rejects
+source containing characters a reviewer cannot see: zero-width joiners, the
+bidi overrides behind "Trojan Source", Unicode tag characters, variation
+selectors, private-use codepoints, and non-ASCII identifiers such as a Cyrillic
+`a` in `api_key`. Reading the diff is how PRs here get reviewed, and a diff is
+exactly what this class of payload is built to survive.
+
+**Visible punctuation is fine** -- em dashes, arrows, `…`, `≤` and friends are
+all in use already. The rule is drawn at invisibility, not at non-ASCII, so if
+the scan ever flags something with a glyph, that's a bug in the scan.
 
 ### The drive suite
 

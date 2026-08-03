@@ -50,6 +50,12 @@ jobs:
       - name: Lint
         run: make lint
 
+      # Its own step rather than only a unittest: `make test` covers it too,
+      # but a named check that goes red on its own line is the difference
+      # between "a test failed" and "someone pushed a hidden character."
+      - name: Scan for invisible characters
+        run: make scan
+
       - name: Test
         run: make test
 

@@ -1,4 +1,4 @@
-.PHONY: install uninstall test drive lint build clean
+.PHONY: install uninstall test drive lint scan build clean
 
 install:
 	@./install.sh
@@ -25,6 +25,14 @@ drive:
 lint:
 	@python3 -m compileall -q src tests
 	@echo "syntax OK"
+
+# Invisible-character scan (#109) -- the review pass a human diff-read can't
+# do. `make test` runs the same scan as a regression test and *skips* it
+# outside a git checkout; this target hard-fails there instead. A security
+# guard that silently scans nothing is worse than no guard, because it prints
+# OK. Same split as test/drive: the suite degrades, the explicit target won't.
+scan:
+	@python3 -m tests._hygiene
 
 build:
 	@rm -rf dist
