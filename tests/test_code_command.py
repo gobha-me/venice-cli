@@ -396,6 +396,26 @@ class TestCodeCommand(unittest.TestCase):
         self.assertEqual(env["acceptance"]["verdict"], "unknown")
         self.assertIsNone(env["acceptance"]["passed"])
 
+    def test_usage_raw_never_writes_to_stdout(self):
+        # #98: the raw-usage dump is a DIAGNOSTIC. `venice code --json` is piped into
+        # jq, so a stray `print()` without file=sys.stderr silently breaks every
+        # caller. Same run as test_json_verdict_unknown, with the dump enabled.
+        out, err = io.StringIO(), io.StringIO()
+        seq = [
+            FakeToolCompletion("plan"),
+            FakeToolCompletion("did the work"),
+            FakeToolCompletion("All criteria met."),
+            FakeToolCompletion("Still looks good."),
+        ]
+        with mock.patch.dict(os.environ, {"VENICE_USAGE_RAW": "1"}):
+            rc, _calls = self._run(
+                _code_args(task="x", root=self.root, auto=True, json=True),
+                seq, stdout=out, stderr=err)
+        self.assertEqual(rc, 10)
+        env = json.loads(out.getvalue())       # stdout still machine-readable
+        self.assertEqual(env["acceptance"]["verdict"], "unknown")
+        self.assertIn("usage-raw:", err.getvalue())   # ...and the dump did happen
+
     # --- fail-safe: non-TTY without --auto aborts before any model call ---
     def test_non_tty_without_auto_aborts(self):
         err = io.StringIO()

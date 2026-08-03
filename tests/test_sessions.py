@@ -198,6 +198,39 @@ class TestLedgerSnapshot(unittest.TestCase):
         led.restore({})                                 # empty -> no crash
         led.restore("garbage")                          # non-dict -> no crash
 
+    # -- three-state cache flags across a resume (#98) ---------------------- #
+
+    def test_unreported_flags_survive_a_resume_round_trip(self):
+        # The whole point of #98 is lost if `/usage` after `--resume` forgets that
+        # the pre-resume turns never reported a cache field.
+        led = CostLedger()
+        led.record({"prompt_tokens": 100, "completion_tokens": 10})
+        snap = led.to_dict()
+        self.assertTrue(snap["cache_read_unreported"])
+        self.assertTrue(snap["cache_write_unreported"])
+        led2 = CostLedger()
+        led2.restore(snap)
+        self.assertTrue(led2.cache_read_unreported)
+        self.assertTrue(led2.cache_write_unreported)
+        self.assertIn("cache hit rate: n/a", led2.usage_report())
+
+    def test_restore_sticky_ors_the_unreported_flags(self):
+        # Sticky like `unpriced`: a later fully-reported snapshot cannot un-say that
+        # some earlier turn was blind. Plain assignment would erase the doubt.
+        led = CostLedger()
+        led.restore({"cache_read_unreported": True, "cache_write_unreported": True})
+        led.restore({"cache_read_unreported": False, "cache_write_unreported": False})
+        self.assertTrue(led.cache_read_unreported)
+        self.assertTrue(led.cache_write_unreported)
+
+    def test_pre_98_envelope_does_not_claim_unknown(self):
+        # A session saved before #98 has neither key. Defaulting those to True would
+        # slap "n/a" on every resumed session that had perfectly good numbers.
+        led = CostLedger()
+        led.restore({"prompt_tokens": 5, "cache_read_tokens": 5})
+        self.assertFalse(led.cache_read_unreported)
+        self.assertFalse(led.cache_write_unreported)
+
 
 class TestSessionsCLI(_Base):
     def _mk_saved(self, command="chat", model="m-1"):

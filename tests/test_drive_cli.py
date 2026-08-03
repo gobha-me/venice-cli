@@ -405,6 +405,28 @@ class TestDriveChatRepl(_DriveCase):
         # ...and /reset really cleared the transcript, not just the display.
         self.assertEqual(envelope["messages"], [])
 
+    def test_repl_usage_reports_unknown_cache_state(self):
+        # #98 through the REAL CLI on a real pty: the fake server's usage block
+        # carries no `prompt_tokens_details` (exactly like a live glm/kimi response,
+        # and like the spec's own nullable example), so /usage must say it does not
+        # know rather than print a "0.0%" that reads as a measurement.
+        self.api.reply("HELLO-FROM-FAKE")
+
+        with self.cli("chat", "-i") as d:
+            d.expect("you> ")
+            d.send("Say hi")
+            d.expect("HELLO-FROM-FAKE")
+            d.expect("you> ")
+
+            d.send("/usage")
+            d.expect("session usage:")
+            d.expect("cache breakdown not reported")
+            d.expect("cache hit rate: n/a")
+            d.expect("you> ")
+
+            d.send("/exit")
+            self.assertEqual(d.wait(), 0)
+
     def test_repl_ctrl_d_exits_zero(self):
         with self.cli("chat", "-i") as d:
             d.expect("you> ")

@@ -4,7 +4,9 @@ Covers the ergonomics work: unlimited `--max-tool-calls` (#53), the TTY-gated
 progress feedback (#54), and the `all`/auto-accept confirm gate (#55). Reuses
 `test_chat`'s fake completions so the fakes stay in lock-step. No network/key.
 """
+import contextlib
 import io
+import json
 import os
 import sys
 import tempfile
@@ -297,6 +299,198 @@ class TestCostLedger(unittest.TestCase):
         self.assertEqual(L.cache_read_tokens, 100)
         self.assertEqual(L.cache_write_tokens, 0)
         self.assertGreaterEqual(L.total, 0.0)
+
+    # -- three-state cache reporting (#98) ---------------------------------- #
+    #
+    # The bug: `cache hit rate: 0.0%` came out of byte-identical code whether the
+    # cache genuinely missed or the response carried no cache field at all. The
+    # spec marks `prompt_tokens_details` nullable, so absence is normal -- these
+    # pin that absence is recorded as UNKNOWN, and that a reported zero is not.
+
+    def test_missing_cache_fields_are_not_a_reported_zero(self):
+        # The shape the OpenAPI spec's own glm example ships.
+        L = _agent.CostLedger()
+        L.record({
+            "prompt_tokens": 10000, "completion_tokens": 500,
+            "prompt_tokens_details": None,
+        })
+        self.assertTrue(L.cache_read_unreported)
+        self.assertTrue(L.cache_write_unreported)
+        self.assertEqual(L.cache_read_tokens, 0)   # count unchanged from pre-#98
+
+    def test_reported_zero_is_not_unreported(self):
+        # THE point of #98: a provider that says "zero cached" has measured
+        # something. Implementing the flag as `if not cache_read` erases exactly
+        # the distinction this ticket exists to draw.
+        L = _agent.CostLedger()
+        L.record({
+            "prompt_tokens": 100, "completion_tokens": 5,
+            "prompt_tokens_details": {
+                "cached_tokens": 0, "cache_creation_input_tokens": 0,
+            },
+        })
+        self.assertFalse(L.cache_read_unreported)
+        self.assertFalse(L.cache_write_unreported)
+
+    def test_null_valued_cache_field_counts_as_unreported(self):
+        # The live kimi-k3/glm/deepseek shape: the key is present, the value null.
+        # A `key in block` membership test would call this "reported".
+        L = _agent.CostLedger()
+        L.record({
+            "prompt_tokens": 100, "completion_tokens": 5,
+            "prompt_tokens_details": {
+                "cached_tokens": 13996, "cache_write_tokens": None,
+            },
+        })
+        self.assertFalse(L.cache_read_unreported)
+        self.assertTrue(L.cache_write_unreported)
+
+    def test_non_numeric_cache_field_counts_as_unreported(self):
+        # A value we cannot read is not a measurement. `bool` is an `int` subclass
+        # but is never a token count (mirrors _as_int).
+        for bad in ("9000", True, [], {}):
+            with self.subTest(bad=bad):
+                L = _agent.CostLedger()
+                L.record({
+                    "prompt_tokens": 100, "completion_tokens": 5,
+                    "prompt_tokens_details": {"cached_tokens": bad},
+                })
+                self.assertTrue(L.cache_read_unreported)
+                self.assertEqual(L.cache_read_tokens, 0)
+
+    def test_cache_write_aliases_are_recognized(self):
+        # Each write key asserted INDIVIDUALLY -- an alias list checked only through
+        # a response carrying both names is vacuous for whichever one loses.
+        for key in ("cache_creation_input_tokens", "cache_write_tokens"):
+            with self.subTest(key=key):
+                L = _agent.CostLedger()
+                L.record({
+                    "prompt_tokens": 1000, "completion_tokens": 0,
+                    "prompt_tokens_details": {"cached_tokens": 0, key: 200},
+                })
+                self.assertFalse(L.cache_write_unreported)
+                self.assertEqual(L.cache_write_tokens, 200)
+
+    def test_documented_write_key_wins_over_the_observed_alias(self):
+        # `cache_creation_input_tokens` is the spec'd name; `cache_write_tokens` is
+        # observed-but-undocumented and must never take precedence.
+        L = _agent.CostLedger()
+        L.record({
+            "prompt_tokens": 1000, "completion_tokens": 0,
+            "prompt_tokens_details": {
+                "cached_tokens": 0,
+                "cache_creation_input_tokens": 200,
+                "cache_write_tokens": 900,
+            },
+        })
+        self.assertEqual(L.cache_write_tokens, 200)
+
+    def test_usage_report_says_n_a_when_no_cache_fields_were_reported(self):
+        L = _agent.CostLedger()
+        L.bind_pricing({"input": {"usd": 3.0}, "output": {"usd": 15.0}})
+        L.record({"prompt_tokens": 10000, "completion_tokens": 500})
+        r = L.usage_report()
+        self.assertIn("cache hit rate: n/a (no cache fields reported)", r)
+        self.assertIn("cache breakdown not reported", r)
+        self.assertNotIn("cache-read", r)   # no fabricated itemization
+        self.assertNotIn("%", r.split("cost:")[0].split("input")[0])
+
+    def test_usage_report_prints_a_real_zero_hit_rate(self):
+        # The other half of the contract: don't replace one lie with another. A
+        # provider-reported zero must still render as 0.0%, not n/a.
+        L = _agent.CostLedger()
+        L.bind_pricing({"input": {"usd": 3.0}, "output": {"usd": 15.0}})
+        L.record({
+            "prompt_tokens": 100, "completion_tokens": 5,
+            "prompt_tokens_details": {
+                "cached_tokens": 0, "cache_creation_input_tokens": 0,
+            },
+        })
+        r = L.usage_report()
+        self.assertIn("cache hit rate: 0.0%", r)
+        self.assertNotIn("n/a", r)
+        self.assertNotIn("[partially unreported]", r)
+
+    def test_usage_report_marks_a_partially_unreported_hit_rate(self):
+        # Turn 1 measured, turn 2 didn't: the rate is real but understated against
+        # a prompt total that includes a turn it could not see.
+        L = _agent.CostLedger()
+        L.bind_pricing({"input": {"usd": 3.0}, "output": {"usd": 15.0}})
+        L.record({
+            "prompt_tokens": 10000, "completion_tokens": 100,
+            "prompt_tokens_details": {"cached_tokens": 9000},
+        })
+        L.record({"prompt_tokens": 100, "completion_tokens": 10})
+        r = L.usage_report()
+        self.assertIn("cache hit rate: 89.1%  [partially unreported]", r)
+        self.assertNotIn("n/a (no cache fields reported)", r)
+
+    def test_cache_write_n_a_does_not_mark_the_hit_rate_line(self):
+        # The regression `assertIn` cannot see: if both flags fed one shared marker,
+        # every ordinary Venice session (read reported, write absent) would grow a
+        # "[partially unreported]" on a rate that does not use the write bucket --
+        # and `assertIn("cache hit rate: 90.0%", r)` would stay green throughout.
+        L = _agent.CostLedger()
+        L.bind_pricing({"input": {"usd": 3.0}, "output": {"usd": 15.0}})
+        L.record({
+            "prompt_tokens": 10000, "completion_tokens": 500,
+            "prompt_tokens_details": {"cached_tokens": 9000},
+        })
+        r = L.usage_report()
+        self.assertIn("cache-write n/a", r)
+        self.assertNotIn("0 cache-write", r)
+        self.assertIn("9,000 cache-read", r)
+        rate_line = [ln for ln in r.splitlines() if "cache hit rate" in ln]
+        self.assertEqual(rate_line, ["  cache hit rate: 90.0%"])
+
+    # -- VENICE_USAGE_RAW opt-in dump (#98) --------------------------------- #
+
+    def _record_with_raw(self, value, usage):
+        """record(usage) with $VENICE_USAGE_RAW = `value` (None = unset); -> stderr."""
+        buf = io.StringIO()
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("VENICE_USAGE_RAW", None)
+            if value is not None:
+                os.environ["VENICE_USAGE_RAW"] = value
+            with contextlib.redirect_stderr(buf):
+                _agent.CostLedger().record(usage)
+        return buf.getvalue()
+
+    def test_usage_raw_dumps_the_verbatim_block_to_stderr(self):
+        usage = {
+            "prompt_tokens": 11, "completion_tokens": 3,
+            "prompt_tokens_details": {"cached_tokens": None},
+        }
+        err = self._record_with_raw("1", usage)
+        self.assertTrue(err.startswith("usage-raw: "))
+        # Round-trips to the SAME block -- a reformatted subset would not have
+        # answered the question the raw dump exists to answer.
+        self.assertEqual(json.loads(err[len("usage-raw: "):]), usage)
+
+    def test_usage_raw_dumps_null_for_a_missing_usage_block(self):
+        # Fires ahead of record()'s `usage is None` bail, so "no usage block at all"
+        # is distinguishable from "a block with no cache fields".
+        self.assertEqual(self._record_with_raw("1", None).strip(), "usage-raw: null")
+
+    def test_usage_raw_is_off_by_default_and_respects_a_false_value(self):
+        # A bare `if os.environ.get(...)` would turn the dump ON for "0"/"false".
+        for value in (None, "", "0", "false", "no", "off"):
+            with self.subTest(value=value):
+                self.assertEqual(self._record_with_raw(value, {"prompt_tokens": 1}), "")
+
+    def test_usage_raw_accepts_the_documented_truthy_spellings(self):
+        for value in ("1", "true", "TRUE", " yes ", "on"):
+            with self.subTest(value=value):
+                err = self._record_with_raw(value, {"prompt_tokens": 1})
+                self.assertIn("usage-raw:", err)
+
+    def test_usage_raw_survives_an_unserializable_usage(self):
+        # Mixed key types are unsortable, so `sort_keys=True` raises TypeError --
+        # a real trigger for the fallback (`default=str` rescues odd *values*, not
+        # this). A diagnostic must never take down the turn that produced it.
+        err = self._record_with_raw("1", {"prompt_tokens": 1, 2: "x"})
+        self.assertIn("usage-raw:", err)
+        self.assertIn("prompt_tokens", err)
 
     def test_reasoning_tokens_captured(self):
         L = _agent.CostLedger()
