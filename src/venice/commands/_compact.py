@@ -46,6 +46,7 @@ Two behavioral notes:
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
@@ -297,6 +298,10 @@ def compact_messages(
     to. `trigger` distinguishes the automatic gate from a hand-typed `/compact`, which
     answers "was this sawtooth self-inflicted".
 
+    #101: the summarization call is billed to the ledger's "compaction" bucket, off to
+    the side of the main-loop counters, and its cost rides the event. Billed on API
+    success rather than compaction success: an empty summary still spent the tokens.
+
     #116: `budget` is now MUTATED, not merely read -- a successful compaction clears
     `last_prompt_tokens`, which the same argument moves in here. It was hand-copied at
     both call sites, so a third one added later would have inherited the event for free
@@ -315,6 +320,7 @@ def compact_messages(
     kwargs.pop("stream_options", None)
     kwargs.pop("tools", None)
     kwargs.setdefault("max_tokens", SUMMARY_MAX_TOKENS)
+    _t0 = time.monotonic()
     try:
         resp = oai.chat.completions.create(
             model=model,
@@ -323,7 +329,26 @@ def compact_messages(
             **kwargs,
         )
     except Exception:
+        # Nothing recorded on this path, deliberately: there is no usage block to read,
+        # and the SDK may have retried or never reached the server at all. `record()`'s
+        # row-on-every-path rule is about calls the caller KNOWS completed.
         return False  # compaction is best-effort; the run continues un-compacted
+    # #101: billed on API SUCCESS, not on compaction success -- note this sits ABOVE the
+    # empty-summary return below. The call has completed and the tokens are spent
+    # whether or not the summary that comes back is usable; a compaction that achieved
+    # nothing is precisely the one an operator needs to see the price of.
+    #
+    # `bucket=` keeps it out of the main-loop counters and out of the per-call trace:
+    # this is a FRESH prefix (system + a flattened transcript), so it reads ~0% cached
+    # every time and would fabricate a cache cliff in the one artifact that exists to
+    # detect real ones.
+    cost = 0.0
+    if ledger is not None:
+        cost = ledger.record(
+            getattr(resp, "usage", None),
+            seconds=time.monotonic() - _t0,
+            bucket="compaction",
+        )
     summary = ""
     if getattr(resp, "choices", None):
         summary = (resp.choices[0].message.content or "").strip()
@@ -357,9 +382,16 @@ def compact_messages(
             "observed_tokens_before": (
                 None if budget is None else budget.last_prompt_tokens
             ),
-            # NO cost field, deliberately: the summarization `create()` above is
-            # unledgered (#101). Tokens-saved next to no cost invites the reader to
-            # conclude the compaction paid for itself, which this data cannot support.
+            # #101: what this compaction COST to perform -- the summarization call
+            # above, which #99 shipped unledgered and which this key finally prices.
+            #
+            # #99 declined the field on the grounds that tokens-saved beside a cost
+            # invites "the compaction paid for itself". That objection was about the
+            # RENDERING, and it is answered there: the marker line reads "$0.0031 to
+            # summarize", which cannot be misread as a saving. Per-event rather than
+            # bucket-only because the bucket totals every compaction, and which ONE of
+            # them was expensive is the question a sawtooth makes you ask.
+            "cost": round(cost, 6),
         })
     # #116: the LAST piece of post-compaction bookkeeping to move in here, and it must
     # stay BELOW the event above -- `observed_tokens_before` reads the value this line
