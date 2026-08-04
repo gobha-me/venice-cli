@@ -10,8 +10,15 @@ from unittest import mock
 from venice.commands import _compact
 
 
-def _fake_oai(summary="A concise summary.", fail=False):
-    """A fake `oai` whose create() returns a canned summary (or raises)."""
+def _fake_oai(summary="A concise summary.", fail=False, usage=None):
+    """A fake `oai` whose create() returns a canned summary (or raises).
+
+    `usage` is set on the response EXPLICITLY, and defaults to None -- "the response
+    carried no usage block". Without this the response is a bare `MagicMock`, whose
+    auto-created `.usage` attribute normalizes to None through `_usage_dict` anyway, so
+    a priced `record()` returns 0.0: every cost assertion written against the old
+    fixture passed vacuously. Pass a real dict to bill a real number (#101).
+    """
     calls = []
 
     def _create(**kw):
@@ -22,11 +29,39 @@ def _fake_oai(summary="A concise summary.", fail=False):
         msg.content = summary
         resp = mock.MagicMock()
         resp.choices = [mock.MagicMock(message=msg)]
+        resp.usage = usage
         return resp
 
     fake = mock.MagicMock()
     fake.chat.completions.create.side_effect = _create
     return fake, calls
+
+
+class _Rec:
+    """A duck-typed stand-in for `CostLedger` (`_compact` imports nothing from `_agent`).
+
+    Implements BOTH hooks `compact_messages` calls, deliberately: the module invokes
+    `record` and `record_compaction` unguarded, so a stand-in carrying only one of them
+    would let a wiring bug read as "nothing to record" rather than fail. `seq` logs the
+    two in call order, which is the only way to pin that the bill is taken before the
+    event that quotes it. `test_a_real_ledger_satisfies_the_duck_type` is what stops this
+    class and the real ledger drifting apart.
+    """
+
+    def __init__(self, cost=0.0):
+        self.events = []
+        self.calls = []
+        self.seq = []
+        self.cost = cost
+
+    def record(self, usage, *, seconds=None, bucket=None):
+        self.calls.append({"usage": usage, "seconds": seconds, "bucket": bucket})
+        self.seq.append("call")
+        return self.cost
+
+    def record_compaction(self, ev):
+        self.events.append(ev)
+        self.seq.append("event")
 
 
 def _history(pairs, *, system=True):
@@ -273,10 +308,6 @@ class TestBudgetFromArgs(unittest.TestCase):
         self.assertIsNone(_compact.budget_from_args(argparse.Namespace()))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestCompactionEvents(unittest.TestCase):
     """#99: a compaction is logged to the ledger as a context event.
 
@@ -285,17 +316,10 @@ class TestCompactionEvents(unittest.TestCase):
     contract `_compact` calls, not the ledger's storage.
     """
 
-    class _Rec:
-        def __init__(self):
-            self.events = []
-
-        def record_compaction(self, ev):
-            self.events.append(ev)
-
     def test_a_successful_compaction_is_recorded(self):
         msgs = _history(6)
         fake, _calls = _fake_oai("summary")
-        led = self._Rec()
+        led = _Rec()
         self.assertTrue(_compact.compact_messages(
             fake, "m", msgs, keep_turns=2, ledger=led, trigger="manual"))
         self.assertEqual(len(led.events), 1)
@@ -314,7 +338,7 @@ class TestCompactionEvents(unittest.TestCase):
             with self.subTest(**kw):
                 msgs = _history(6)
                 fake, _calls = _fake_oai(**kw)
-                led = self._Rec()
+                led = _Rec()
                 self.assertFalse(_compact.compact_messages(
                     fake, "m", msgs, keep_turns=2, ledger=led))
                 self.assertEqual(led.events, [])
@@ -322,7 +346,7 @@ class TestCompactionEvents(unittest.TestCase):
     def test_nothing_to_compact_records_nothing(self):
         msgs = _history(3)
         fake, _calls = _fake_oai()
-        led = self._Rec()
+        led = _Rec()
         self.assertFalse(_compact.compact_messages(
             fake, "m", msgs, keep_turns=5, ledger=led))
         self.assertEqual(led.events, [])
@@ -332,22 +356,114 @@ class TestCompactionEvents(unittest.TestCase):
         fake, _calls = _fake_oai("summary")
         self.assertTrue(_compact.compact_messages(fake, "m", msgs, keep_turns=2))
 
-    def test_the_event_carries_no_cost(self):
-        # #101 owns the summarization call's cost. Tokens-saved beside a cost invites
-        # "the compaction paid for itself", which this data cannot support.
+    def test_the_event_carries_the_summarization_cost(self):
+        # The inversion of #99's `test_the_event_carries_no_cost`, which existed to
+        # hold this line until #101 landed. The objection then was that tokens-saved
+        # beside a cost reads as "it paid for itself"; that is answered in the
+        # RENDERING ("$X to summarize"), not by withholding the number.
         msgs = _history(6)
         fake, _calls = _fake_oai("summary")
-        led = self._Rec()
+        led = _Rec(cost=0.00042)
         _compact.compact_messages(fake, "m", msgs, keep_turns=2, ledger=led)
-        self.assertNotIn("cost", led.events[0])
+        self.assertEqual(led.events[0]["cost"], 0.00042)
+
+    def test_the_summary_call_is_billed_to_the_compaction_bucket(self):
+        msgs = _history(6)
+        fake, _calls = _fake_oai("summary")
+        led = _Rec()
+        _compact.compact_messages(fake, "m", msgs, keep_turns=2, ledger=led)
+        self.assertEqual(len(led.calls), 1)
+        self.assertEqual(led.calls[0]["bucket"], "compaction")
+
+    def test_the_summary_call_window_is_stamped(self):
+        # Same never-read-a-clock contract as the main loop: the caller brackets the
+        # window, the ledger just adds it up.
+        msgs = _history(6)
+        fake, _calls = _fake_oai("summary")
+        led = _Rec()
+        _compact.compact_messages(fake, "m", msgs, keep_turns=2, ledger=led)
+        self.assertIsNotNone(led.calls[0]["seconds"])
+        self.assertGreaterEqual(led.calls[0]["seconds"], 0.0)
+
+    def test_an_empty_summary_is_still_billed(self):
+        # THE billing invariant: the call completed and the tokens are spent whether
+        # or not the summary is usable. A compaction that achieved nothing is exactly
+        # the one whose price an operator needs to see.
+        msgs = _history(6)
+        fake, _calls = _fake_oai(summary="   ")
+        led = _Rec()
+        self.assertFalse(
+            _compact.compact_messages(fake, "m", msgs, keep_turns=2, ledger=led))
+        self.assertEqual(len(led.calls), 1)
+        self.assertEqual(led.events, [])  # ...but no event: nothing was compacted
+
+    def test_a_raised_create_bills_nothing(self):
+        # No usage block to read, and the SDK may never have reached the server.
+        msgs = _history(6)
+        fake, _calls = _fake_oai(fail=True)
+        led = _Rec()
+        self.assertFalse(
+            _compact.compact_messages(fake, "m", msgs, keep_turns=2, ledger=led))
+        self.assertEqual(led.calls, [])
+
+    def test_nothing_to_compact_bills_nothing(self):
+        msgs = _history(3)
+        fake, _calls = _fake_oai()
+        led = _Rec()
+        self.assertFalse(
+            _compact.compact_messages(fake, "m", msgs, keep_turns=5, ledger=led))
+        self.assertEqual(led.calls, [])
+
+    def test_cost_is_recorded_before_the_event(self):
+        # The event quotes the cost, so the bill has to be taken first. Recording the
+        # other way round yields an event whose `cost` is always 0.0.
+        msgs = _history(6)
+        fake, _calls = _fake_oai("summary")
+        led = _Rec(cost=0.00042)
+        _compact.compact_messages(fake, "m", msgs, keep_turns=2, ledger=led)
+        self.assertEqual(led.seq, ["call", "event"])
+
+    def test_a_real_ledger_satisfies_the_duck_type(self):
+        # Anti-drift: `_Rec` stands in for `CostLedger` everywhere above, and nothing
+        # else in this file would notice the two disagreeing about `record`'s
+        # signature or `bucket=`'s effect. Importing `_agent` in the TEST is fine --
+        # the "imports nothing from `_agent`" rule constrains the module, not the suite.
+        from venice.commands import _agent
+        msgs = _history(6)
+        fake, _calls = _fake_oai(
+            "summary", usage={"prompt_tokens": 4000, "completion_tokens": 200})
+        led = _agent.CostLedger()
+        led.bind_pricing({"input": {"usd": 1.0}, "output": {"usd": 2.0}})
+        self.assertTrue(
+            _compact.compact_messages(fake, "m", msgs, keep_turns=2, ledger=led))
+        self.assertAlmostEqual(led.bucket_cost("compaction"), 0.0044)
+        self.assertEqual(led.buckets["compaction"]["calls"], 1)
+        # and the event quotes the same number the bucket accumulated
+        self.assertAlmostEqual(led.context_events[0]["cost"], 0.0044)
+
+    def test_the_summary_call_never_enters_the_call_trace(self):
+        # It is a fresh prefix -- ~0% cached every time -- so inlining it would
+        # manufacture the cache cliff the trace exists to detect.
+        from venice.commands import _agent
+        msgs = _history(6)
+        fake, _calls = _fake_oai(
+            "summary", usage={"prompt_tokens": 4000, "completion_tokens": 200})
+        led = _agent.CostLedger()
+        led.bind_pricing({"input": {"usd": 1.0}, "output": {"usd": 2.0}})
+        _compact.compact_messages(fake, "m", msgs, keep_turns=2, ledger=led)
+        self.assertEqual(
+            (led.api_calls(), led.api_calls_total, led.calls_dropped()), ([], 0, 0))
+        self.assertEqual(led.prompt_tokens, 0)
 
     def test_observed_before_is_the_pre_reset_budget_value(self):
-        # THE ordering guard. `maybe_compact` clears `last_prompt_tokens` right after
-        # `compact_messages` returns; recording after that reset would silently null
-        # every automatic event, and the estimate would be the only number left.
+        # THE ordering guard, seen from the automatic gate. `compact_messages` clears
+        # `last_prompt_tokens` on its way out (#116); recording after that reset would
+        # silently null every automatic event, leaving the estimate as the only number.
+        # `TestBudgetReset.test_the_event_is_recorded_before_the_reset` is the direct
+        # twin -- this one additionally pins that the reset survives the gate wrapper.
         msgs = _history(6)
         fake, _calls = _fake_oai("summary")
-        led = self._Rec()
+        led = _Rec()
         b = _compact.Budget(threshold_tokens=1, keep_turns=2)
         b.last_prompt_tokens = 88110
         self.assertTrue(_compact.maybe_compact(fake, "m", msgs, b, {}, ledger=led))
@@ -360,7 +476,7 @@ class TestCompactionEvents(unittest.TestCase):
         # measurement's name.
         msgs = _history(6)
         fake, _calls = _fake_oai("summary")
-        led = self._Rec()
+        led = _Rec()
         _compact.compact_messages(fake, "m", msgs, keep_turns=2, ledger=led)
         ev = led.events[0]
         self.assertIsNone(ev["observed_tokens_before"])
@@ -369,7 +485,88 @@ class TestCompactionEvents(unittest.TestCase):
     def test_an_under_budget_gate_records_nothing(self):
         msgs = _history(6)
         fake, _calls = _fake_oai("summary")
-        led = self._Rec()
+        led = _Rec()
         b = _compact.Budget(threshold_tokens=10_000_000, keep_turns=2)
         self.assertFalse(_compact.maybe_compact(fake, "m", msgs, b, {}, ledger=led))
         self.assertEqual(led.events, [])
+
+
+class TestBudgetReset(unittest.TestCase):
+    """#116: `compact_messages` owns the post-compaction budget reset.
+
+    It used to be hand-copied into `maybe_compact` and into `/compact`, so nothing
+    forced the two to agree and a third compaction site would have inherited the event
+    recording for free while silently missing the reset.
+    """
+
+    def _budget(self, observed=88110):
+        b = _compact.Budget(threshold_tokens=1, keep_turns=2)
+        b.last_prompt_tokens = observed
+        return b
+
+    def test_compact_messages_clears_the_stale_observed_count(self):
+        # Called DIRECTLY, not through `maybe_compact` -- that is the whole point of
+        # the move, and it is the `/compact` path.
+        msgs = _history(6)
+        fake, _calls = _fake_oai("summary")
+        b = self._budget()
+        self.assertTrue(_compact.compact_messages(
+            fake, "m", msgs, keep_turns=2, budget=b))
+        self.assertIsNone(b.last_prompt_tokens)
+
+    def test_the_reset_happens_without_a_ledger(self):
+        # The reset must not be nested inside the `if ledger is not None` block that
+        # records the event: a `/compact` in a session with a budget and no ledger
+        # still has a stale count to clear.
+        msgs = _history(6)
+        fake, _calls = _fake_oai("summary")
+        b = self._budget()
+        self.assertTrue(_compact.compact_messages(
+            fake, "m", msgs, keep_turns=2, ledger=None, budget=b))
+        self.assertIsNone(b.last_prompt_tokens)
+
+    def test_a_failed_compaction_leaves_the_observed_count_alone(self):
+        # History is untouched on failure, so the observed count still describes it.
+        for kw in ({"fail": True}, {"summary": "   "}):
+            with self.subTest(**kw):
+                msgs = _history(6)
+                fake, _calls = _fake_oai(**kw)
+                b = self._budget()
+                self.assertFalse(_compact.compact_messages(
+                    fake, "m", msgs, keep_turns=2, budget=b))
+                self.assertEqual(b.last_prompt_tokens, 88110)
+
+    def test_nothing_to_compact_leaves_the_observed_count_alone(self):
+        msgs = _history(3)
+        fake, _calls = _fake_oai()
+        b = self._budget()
+        self.assertFalse(_compact.compact_messages(
+            fake, "m", msgs, keep_turns=5, budget=b))
+        self.assertEqual(b.last_prompt_tokens, 88110)
+
+    def test_the_event_is_recorded_before_the_reset(self):
+        # The direct-call twin of `test_observed_before_is_the_pre_reset_budget_value`:
+        # that one routes through `maybe_compact`, which no longer contains the reset,
+        # so it can no longer see a reset hoisted above the recording.
+        msgs = _history(6)
+        fake, _calls = _fake_oai("summary")
+        led = _Rec()
+        b = self._budget()
+        self.assertTrue(_compact.compact_messages(
+            fake, "m", msgs, keep_turns=2, ledger=led, budget=b))
+        self.assertEqual(led.events[0]["observed_tokens_before"], 88110)
+        self.assertIsNone(b.last_prompt_tokens)
+
+    def test_no_budget_is_not_an_error(self):
+        msgs = _history(6)
+        fake, _calls = _fake_oai("summary")
+        self.assertTrue(_compact.compact_messages(fake, "m", msgs, keep_turns=2))
+
+
+# Stays at the BOTTOM. It used to sit above `TestCompactionEvents`, which meant a direct
+# `python tests/test_compact.py` ran `unittest.main()` before that class was defined and
+# silently skipped every test below it -- 23 collected instead of 31. `make test` uses
+# `python -m unittest`, which imports the module and runs them all, so CI was green and
+# the gap was invisible from the only place anyone looked.
+if __name__ == "__main__":
+    unittest.main()

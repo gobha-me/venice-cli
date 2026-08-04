@@ -485,6 +485,7 @@ class TestDriveChatRepl(_DriveCase):
             # The streamed path brackets its own window through the real process.
             self.assertIsNotNone(r["seconds"])
         self.assertEqual(usage["context_events"], [])
+        self.assertEqual(usage["buckets"], {})  # #101: nothing off-loop happened
 
     def test_repl_records_an_auto_compaction_event(self):
         # #99's other half, driven end to end. `--compact-threshold 1` makes
@@ -524,6 +525,14 @@ class TestDriveChatRepl(_DriveCase):
         self.assertEqual(ev["trigger"], "auto")
         self.assertEqual(ev["observed_tokens_before"], 11)
         self.assertGreater(ev["messages_before"], ev["messages_after"])
+        # #101: the summarization call is billed, and this tier is the only one that
+        # proves it survives the real `_autosave` -> `to_dict` -> JSON round trip.
+        self.assertIn("cost", ev)
+        self.assertEqual(usage["buckets"]["compaction"]["calls"], 1)
+        self.assertGreater(usage["buckets"]["compaction"]["prompt_tokens"], 0)
+        # ...and stays OUT of the main-loop trace, which is the whole isolation claim.
+        self.assertEqual(usage["api_calls_total"], len(usage["api_calls"]))
+        self.assertNotIn("compaction", str(usage["api_calls"]))
 
     def test_sessions_show_stays_bounded_through_the_real_cli(self):
         # The `sessions show` line is a one-line repr of the whole usage dict; #99

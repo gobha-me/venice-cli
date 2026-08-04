@@ -324,8 +324,9 @@ def _do_turn(oai, openai, chat, text, messages, gen_kwargs, state, args) -> None
     This is the "input -> able to type again" seam: `input(_PROMPT)` sits outside it
     in `run`, so time spent thinking at the prompt is excluded for free, and all three
     call sites are covered at once. It is also strictly more accurate than stamping
-    inside `run_loop` -- auto-compaction makes its own uncounted completion, and it
-    falls inside this window automatically.
+    inside `run_loop` -- auto-compaction makes its own separate completion (billed to
+    the ledger's off-loop bucket as of #101, but never a `run_loop` turn), and it falls
+    inside this window automatically.
 
     The stamp lands in `finally` so the gate-skip, both rollback paths and an
     unexpected exception are all timed; a turn that cost you 40 seconds and then
@@ -361,10 +362,26 @@ def _turn(oai, openai, chat, text, messages, gen_kwargs, state, args) -> bool:
     window -- a turn failure then rolls back only that turn, not the compaction.
     Tool turns pass the budget to `run_loop`, which compacts between calls and
     observes `usage` itself; streamed turns compact here and observe usage from
-    the stream's final chunk.
+    the stream's final chunk. It happens AFTER the spend gate below, not before
+    (#101): compaction costs money now, so a capped session must not pay to
+    prepare a turn it is about to refuse.
     """
     budget = state.get("budget")
     ledger = state.get("ledger")
+    # Spend gate (#66): refuse a new turn once the session cap is hit (the
+    # tool-loop gates mid-run; a streamed turn gates here).
+    #
+    # #101: this now runs BEFORE compaction, where it used to run after. Compaction
+    # costs real money as of this issue, so gating second meant a capped session paid
+    # to compact and then refused the very turn the compaction was preparing -- and
+    # again on the next message, and the next, spending without bound on work it would
+    # never use. `run_loop` has always had this order (gate, then compact); this makes
+    # the REPL agree. Still outside the rollback window either way: the user message is
+    # appended below, after this returns, so a skipped turn leaves nothing behind.
+    if ledger is not None and ledger.over():
+        print(f"(max-spend reached: {ledger.summary()}; turn skipped)",
+              file=sys.stderr)
+        return False
     _compact.maybe_compact(
         oai, state["model"], messages, budget, gen_kwargs,
         on_compact=lambda b, a: print(
@@ -372,12 +389,6 @@ def _turn(oai, openai, chat, text, messages, gen_kwargs, state, args) -> bool:
         ),
         ledger=ledger,  # #99
     )
-    # Spend gate (#66): refuse a new turn once the session cap is hit (the
-    # tool-loop gates mid-run; a streamed turn gates here).
-    if ledger is not None and ledger.over():
-        print(f"(max-spend reached: {ledger.summary()}; turn skipped)",
-              file=sys.stderr)
-        return False
     # Mid-run steering: a tool-loop turn drains this session's mailbox at each
     # checkpoint (#78, detached). On an interactive tty, #79 also makes the first Ctrl+C
     # pause and prompt for a steering line at the checkpoint; a second Ctrl+C (or Ctrl+C
@@ -546,8 +557,9 @@ def _dispatch_slash(line, messages, state, args, models, oai=None, gen_kwargs=No
             # `trigger` is what lets the operator tell the two apart afterwards.
             ledger=state.get("ledger"), budget=state.get("budget"), trigger="manual",
         ):
-            if state.get("budget") is not None:
-                state["budget"].last_prompt_tokens = None
+            # #116: no budget reset here any more -- `compact_messages` owns it, so this
+            # site cannot forget it and cannot disagree with `maybe_compact` about when
+            # it happens. Only the wording below is this site's to keep.
             print(
                 f"(compacted: {before} -> {len(messages)} messages; "
                 f"last {keep} turn(s) verbatim)",

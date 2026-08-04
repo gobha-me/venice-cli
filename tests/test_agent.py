@@ -1215,6 +1215,388 @@ class TestCostLedger(unittest.TestCase):
                          .tools_fragment(), " (6m 02s tools, concurrent)")
 
 
+class TestOffLoopBuckets(unittest.TestCase):
+    """#101: off-loop spend (compaction today) is metered in its own partition.
+
+    The whole point is ISOLATION: a bucketed call must be costed like any other and
+    then land nowhere near the main-loop counters, because `_compact`'s summary call is
+    a fresh prefix that reads ~0% cached every time and would fabricate exactly the
+    cache cliff the #99 trace exists to detect.
+    """
+
+    P = {"input": {"usd": 1.0}, "output": {"usd": 2.0}}
+
+    def _led(self, cap=None):
+        L = _agent.CostLedger(max_spend=cap)
+        L.bind_pricing(self.P)
+        return L
+
+    def _bucketed(self, cap=None):
+        """A ledger with one main-loop turn and one compaction call."""
+        L = self._led(cap)
+        L.record({"prompt_tokens": 1000, "completion_tokens": 500}, seconds=2.0)
+        L.record({"prompt_tokens": 4000, "completion_tokens": 200}, seconds=1.5,
+                 bucket="compaction")
+        return L
+
+    # -- isolation -------------------------------------------------------------
+
+    def test_a_bucket_record_leaves_the_main_counters_untouched(self):
+        L = self._led()
+        L.record({"prompt_tokens": 4000, "completion_tokens": 200}, bucket="compaction")
+        self.assertEqual(
+            (L.prompt_tokens, L.completion_tokens, L.total), (0, 0, 0.0))
+
+    def test_a_bucket_record_never_appends_a_trace_row(self):
+        # Counting the call in `api_calls_total` without a row would drive
+        # `calls_dropped()` positive and print a phantom "[N row(s) dropped]".
+        L = self._led()
+        L.record({"prompt_tokens": 4000, "completion_tokens": 200}, bucket="compaction")
+        self.assertEqual(
+            (L.api_calls(), L.api_calls_total, L.calls_dropped()), ([], 0, 0))
+
+    def test_a_bucket_record_does_not_set_the_cache_unreported_flags(self):
+        # They drive `/usage`'s refusal to print a rate; an off-loop call reporting no
+        # cache block says nothing about the conversation's cache.
+        L = self._led()
+        L.record({"prompt_tokens": 4000, "completion_tokens": 200}, bucket="compaction")
+        self.assertEqual(
+            (L.cache_read_unreported, L.cache_write_unreported), (False, False))
+
+    def test_a_bucket_record_still_returns_its_cost(self):
+        L = self._led()
+        c = L.record({"prompt_tokens": 4000, "completion_tokens": 200},
+                     bucket="compaction")
+        self.assertAlmostEqual(c, 0.0044)  # 4000*1e-6 + 200*2e-6
+
+    def test_the_bucket_row_accumulates_across_calls(self):
+        L = self._led()
+        for _ in range(3):
+            L.record({"prompt_tokens": 1000, "completion_tokens": 100}, seconds=0.5,
+                     bucket="compaction")
+        self.assertEqual(L.buckets["compaction"], {
+            "calls": 3, "cost": L.buckets["compaction"]["cost"],
+            "prompt_tokens": 3000, "completion_tokens": 300,
+            "seconds": 1.5, "unpriced": False, "unreported": False,
+        })
+
+    def test_an_unstamped_bucket_window_adds_no_seconds(self):
+        L = self._led()
+        L.record({"prompt_tokens": 10, "completion_tokens": 1}, bucket="compaction")
+        self.assertEqual(L.buckets["compaction"]["seconds"], 0.0)
+
+    def test_an_unpriced_bucket_call_is_flagged_not_zeroed(self):
+        L = _agent.CostLedger()  # no pricing bound
+        L.record({"prompt_tokens": 4000, "completion_tokens": 200}, bucket="compaction")
+        self.assertIs(L.buckets["compaction"]["unpriced"], True)
+        self.assertFalse(L.unpriced)  # the MAIN flag is untouched
+
+    # -- totals and gates ------------------------------------------------------
+
+    def test_billed_total_is_main_plus_buckets(self):
+        L = self._bucketed()
+        self.assertAlmostEqual(L.total, 0.002)      # 1000*1e-6 + 500*2e-6
+        self.assertAlmostEqual(L.bucket_cost(), 0.0044)
+        self.assertAlmostEqual(L.billed_total(), 0.0064)
+
+    def test_bucket_cost_and_calls_can_be_asked_by_name(self):
+        L = self._bucketed()
+        self.assertAlmostEqual(L.bucket_cost("compaction"), 0.0044)
+        self.assertEqual(L.bucket_calls("compaction"), 1)
+        self.assertEqual(L.bucket_cost("nope"), 0.0)
+        self.assertEqual(L.bucket_calls("nope"), 0)
+
+    def test_over_counts_bucket_spend(self):
+        # THE #101 ask: --session-max-spend must see off-loop money.
+        L = self._led(cap=0.001)
+        L.record({"prompt_tokens": 4000, "completion_tokens": 200}, bucket="compaction")
+        self.assertEqual(L.total, 0.0)   # nothing in the main loop at all
+        self.assertTrue(L.over())
+
+    def test_over_tokens_ignores_bucket_tokens(self):
+        # `--subagent-max-tokens` is #52's per-worker ceiling on the worker's OWN
+        # conversation; off-loop tokens are not part of it.
+        L = _agent.CostLedger(max_tokens=1000)
+        L.bind_pricing(self.P)
+        L.record({"prompt_tokens": 50_000, "completion_tokens": 5000},
+                 bucket="compaction")
+        self.assertFalse(L.over_tokens())
+
+    # -- summary() -------------------------------------------------------------
+
+    def test_summary_names_the_compaction_split(self):
+        L = self._bucketed()
+        self.assertEqual(
+            L.summary(),
+            "cost: $0.0064 (tokens prompt=1000 completion=500)"
+            " [incl. $0.0044 compaction]")
+
+    def test_summary_is_unchanged_without_a_bucket(self):
+        # The subagent-safety pin. `run_loop`'s two stop-reason messages render this on
+        # subagent ledgers, which can never acquire a bucket (they are never passed a
+        # `budget`, so `maybe_compact` short-circuits). The rails slice of #101 deletes
+        # that invariant -- when it does, this expectation is what should fail first.
+        L = self._led()
+        L.record({"prompt_tokens": 1000, "completion_tokens": 500})
+        self.assertEqual(
+            L.summary(), "cost: $0.0020 (tokens prompt=1000 completion=500)")
+
+    def test_summary_on_an_unpriced_bucket_says_nothing_extra(self):
+        L = _agent.CostLedger()
+        L.record({"prompt_tokens": 4000, "completion_tokens": 200}, bucket="compaction")
+        self.assertEqual(
+            L.summary(),
+            "cost: (unpriced — model rate unknown) tokens prompt=0 completion=0")
+
+    def test_summary_before_any_turn_with_only_a_compaction(self):
+        # Odd-looking but honest: `/compact` before the first turn really did spend
+        # money on zero conversation tokens. Pinned so nobody "fixes" it into the
+        # unpriced branch, which would print "(model rate unknown)" over a real cost.
+        L = self._led()
+        L.record({"prompt_tokens": 4000, "completion_tokens": 200}, bucket="compaction")
+        self.assertEqual(
+            L.summary(),
+            "cost: $0.0044 (tokens prompt=0 completion=0)"
+            " [incl. $0.0044 compaction]")
+
+    # -- usage_report() --------------------------------------------------------
+
+    def test_usage_report_renders_the_bucket_block(self):
+        L = self._bucketed()
+        lines = L.usage_report().split("\n")
+        self.assertIn(
+            "  off-loop      1.5s  across 1 API call(s)  [not in the trace above]",
+            lines)
+        self.assertIn(
+            "    compaction  1 call(s)      4,000 in      200 out     $0.0044", lines)
+
+    def test_the_calls_header_names_the_off_loop_calls(self):
+        L = self._bucketed()
+        lines = L.usage_report().split("\n")
+        self.assertIn(
+            "  calls         2.0s  across 1 API call(s)  [+1 off-loop]", lines)
+
+    def test_usage_report_renders_the_bucket_block_with_no_tokens(self):
+        # `/compact` before any turn lands in the "(no tokens reported)" branch -- the
+        # one state where the bucket is the only money on the page. #82's "wire BOTH
+        # sites" rule, third time.
+        L = self._led()
+        L.record({"prompt_tokens": 9000, "completion_tokens": 300}, seconds=1.1,
+                 bucket="compaction")
+        lines = L.usage_report().split("\n")
+        self.assertIn("  (no tokens reported)", lines)
+        self.assertIn(
+            "  off-loop      1.1s  across 1 API call(s)  [not in the trace above]",
+            lines)
+
+    def test_no_usage_recorded_yet_yields_to_a_bucket(self):
+        L = self._led()
+        self.assertEqual(L.usage_report(), "(no usage recorded yet)")
+        L.record({"prompt_tokens": 9000, "completion_tokens": 300}, bucket="compaction")
+        self.assertNotEqual(L.usage_report(), "(no usage recorded yet)")
+
+    def test_usage_report_cost_line_is_the_billed_total(self):
+        # `/usage` and `/cost` are run seconds apart; two numbers for one question
+        # reads as two questions.
+        L = self._bucketed(cap=5.0)
+        self.assertIn("  cost: $0.0064 / cap $5.00", L.usage_report().split("\n"))
+
+    def test_a_no_usage_bucket_call_renders_as_n_a_not_zero(self):
+        # A PRICED ledger whose response carried no usage block knows nothing: the
+        # tokens are unknown and so is the cost. "0 in  0 out  $0.0000" would be a
+        # measurement that never happened -- #98's rule, in the one partition that has
+        # neither the trace's per-row nulls nor the "(no tokens reported)" branch.
+        L = self._led()
+        L.record(None, seconds=0.4, bucket="compaction")
+        self.assertIs(L.buckets["compaction"]["unreported"], True)
+        self.assertIn(
+            "    compaction  1 call(s)        n/a in      n/a out         n/a"
+            "  [unreported]",
+            L.usage_report().split("\n"))
+
+    def test_a_partly_blind_bucket_says_so_instead_of_looking_complete(self):
+        # A bucket mixing a usage-less call with a usage-bearing one has real numbers
+        # that are nonetheless an UNDERCOUNT. The first cut tested
+        # `unreported and not (pt or ct)`, which has no partial state -- one reporting
+        # call hid the marker and the shortfall rendered as a full measurement. Same
+        # shape as the main token block's `[partially unreported]` since #98.
+        L = self._led()
+        L.record(None, bucket="compaction")
+        L.record({"prompt_tokens": 4000, "completion_tokens": 200}, bucket="compaction")
+        self.assertIs(L.buckets["compaction"]["unreported"], True)
+        lines = L.usage_report().split("\n")
+        self.assertIn(
+            "    compaction  2 call(s)      4,000 in      200 out     $0.0044"
+            "  [partially unreported]", lines)
+        # ...and the cost line carries it too, so `/usage`'s total is not read as exact
+        self.assertIn("  cost: $0.0044  [partially unreported]", lines)
+
+    def test_restore_keeps_bucket_unreported_sticky(self):
+        R = self._led()
+        R.restore({"buckets": {"compaction": {"calls": 1, "unreported": True}}})
+        R.restore({"buckets": {"compaction": {"calls": 1, "unreported": False}}})
+        self.assertIs(R.buckets["compaction"]["unreported"], True)
+
+    def test_an_unpriced_bucket_renders_as_unknown_not_zero(self):
+        L = _agent.CostLedger()
+        L.record({"prompt_tokens": 9000, "completion_tokens": 300}, bucket="compaction")
+        self.assertIn(
+            "    compaction  1 call(s)      9,000 in      300 out  (unpriced)",
+            L.usage_report().split("\n"))
+
+    # -- the event's cost clause ----------------------------------------------
+
+    def _ev(self, **kw):
+        ev = {"trigger": "auto", "after_n": 2, "messages_before": 48,
+              "messages_after": 13, "est_tokens_before": 91200,
+              "est_tokens_after": 8210, "observed_tokens_before": None}
+        ev.update(kw)
+        return ev
+
+    def test_an_event_line_carries_the_summarization_cost(self):
+        self.assertEqual(
+            _agent.CostLedger._event_lines(self._ev(cost=0.0031))[0],
+            "    -- compacted (auto) after #2: 48 -> 13 msgs,"
+            " ~91,200 -> ~8,210 tok est, $0.0031 to summarize")
+
+    def test_an_event_line_omits_a_zero_cost(self):
+        # A static method cannot see `self.unpriced`, so a `"cost" in ev` gate would
+        # print "$0.0000" for every unpriced session -- #98's fabricated zero.
+        self.assertEqual(
+            _agent.CostLedger._event_lines(self._ev(cost=0.0))[0],
+            "    -- compacted (auto) after #2: 48 -> 13 msgs,"
+            " ~91,200 -> ~8,210 tok est")
+
+    def test_an_event_line_without_a_cost_key_is_unchanged(self):
+        # Pre-#101 envelopes, restored from a session file.
+        self.assertEqual(
+            _agent.CostLedger._event_lines(self._ev())[0],
+            "    -- compacted (auto) after #2: 48 -> 13 msgs,"
+            " ~91,200 -> ~8,210 tok est")
+
+    # -- persistence -----------------------------------------------------------
+
+    def test_a_sub_hundredth_cent_bucket_does_not_claim_a_zero_share(self):
+        # `off > 0` is true for 3.3e-05 but `f"{off:.4f}"` is "0.0000", so the clause
+        # would read `[incl. $0.0000 compaction]` -- a share of nothing. #98's rule:
+        # the gate has to test what will RENDER, not the raw float.
+        L = _agent.CostLedger()
+        L.bind_pricing({"input": {"usd": 0.05}, "output": {"usd": 0.10}})
+        L.record({"prompt_tokens": 1000, "completion_tokens": 500})
+        L.record({"prompt_tokens": 500, "completion_tokens": 80}, bucket="compaction")
+        self.assertGreater(L.bucket_cost(), 0)          # real money...
+        self.assertNotIn("incl.", L.summary())          # ...too small to name
+
+    def test_a_sub_hundredth_cent_event_does_not_render_a_zero(self):
+        line = _agent.CostLedger._event_lines(self._ev(cost=3.3e-05))[0]
+        self.assertNotIn("$0.0000", line)
+        self.assertEqual(
+            line,
+            "    -- compacted (auto) after #2: 48 -> 13 msgs,"
+            " ~91,200 -> ~8,210 tok est")
+
+    def test_a_bucket_row_renders_sub_cent_spend_as_a_bound(self):
+        L = _agent.CostLedger()
+        L.bind_pricing({"input": {"usd": 0.05}, "output": {"usd": 0.10}})
+        L.record({"prompt_tokens": 500, "completion_tokens": 80}, bucket="compaction")
+        self.assertIn(
+            "    compaction  1 call(s)        500 in       80 out    <$0.0001",
+            L.usage_report().split("\n"))
+
+    def test_an_event_cost_from_a_hand_edited_file_cannot_crash_usage(self):
+        # `restore()` seeds `context_events` VERBATIM -- rows are copied, never
+        # validated field by field -- so `/usage` on a resumed session is where a
+        # foreign `"cost": "0.0031"` would land. A raw `:.4f` raises there.
+        for junk in ("0.0031", True, {}, None, [], float("nan")):
+            with self.subTest(cost=junk):
+                line = _agent.CostLedger._event_lines(self._ev(cost=junk))[0]
+                self.assertTrue(line.startswith("    -- compacted (auto) after #2:"))
+
+    def test_usage_report_shows_the_cost_and_cap_when_only_a_bucket_spent(self):
+        # `/usage` and `/cost` must not disagree. The no-tokens branch used to omit
+        # the cost line entirely, which was harmless only while that state implied
+        # zero spend -- a `/compact` before the first turn lands here with real money.
+        L = self._led(cap=0.50)
+        L.record({"prompt_tokens": 4000, "completion_tokens": 200}, bucket="compaction")
+        lines = L.usage_report().split("\n")
+        self.assertIn("  (no tokens reported)", lines)
+        self.assertIn("  cost: $0.0044 / cap $0.50", lines)
+        self.assertIn("cost: $0.0044 / cap $0.50", L.summary())  # ...and they agree
+
+    def test_the_no_tokens_branch_stays_silent_when_nothing_was_spent(self):
+        # ...but the line must NOT appear for a run that merely reported no usage:
+        # `cost: $0.0000` there is the fabricated zero the branch exists to avoid.
+        L = self._led()
+        L.record(None, seconds=1.0)
+        lines = L.usage_report().split("\n")
+        self.assertIn("  (no tokens reported)", lines)
+        self.assertFalse([ln for ln in lines if ln.startswith("  cost:")])
+
+    def test_buckets_round_trip_through_to_dict(self):
+        L = self._bucketed()
+        R = self._led()
+        R.restore(L.to_dict())
+        self.assertEqual(R.to_dict()["buckets"], L.to_dict()["buckets"])
+
+    def test_to_dict_carries_the_derived_billed_total(self):
+        L = self._bucketed()
+        self.assertAlmostEqual(L.to_dict()["billed_total"], 0.0064)
+
+    def test_restore_is_additive_per_bucket(self):
+        L = self._bucketed()
+        R = self._led()
+        d = L.to_dict()
+        R.restore(d)
+        R.restore(d)
+        self.assertEqual(R.buckets["compaction"]["calls"], 2)
+        self.assertEqual(R.buckets["compaction"]["prompt_tokens"], 8000)
+
+    def test_restore_ignores_the_derived_billed_total(self):
+        # `total` and `buckets` are both restored additively; reading `billed_total`
+        # back as well would count the whole bill a second time.
+        L = self._bucketed()
+        R = self._led()
+        d = L.to_dict()
+        R.restore(d)
+        R.restore(d)
+        self.assertAlmostEqual(R.billed_total(), 2 * 0.0064)
+
+    def test_restore_keeps_bucket_unpriced_sticky(self):
+        # `cur[k] += v` over a heterogeneous row evaluates `False + True` to 1 and
+        # silently turns a flag into a count.
+        R = self._led()
+        R.restore({"buckets": {"compaction": {"calls": 1, "unpriced": True}}})
+        R.restore({"buckets": {"compaction": {"calls": 1, "unpriced": False}}})
+        self.assertIs(R.buckets["compaction"]["unpriced"], True)
+
+    def test_restore_tolerates_a_garbage_bucket_row(self):
+        R = self._led()
+        R.restore({"buckets": {"compaction": {"calls": 1}, "junk": "not a dict",
+                               "": {"calls": 9}}})
+        self.assertEqual(sorted(R.buckets), ["compaction"])
+        self.assertEqual(R.buckets["compaction"]["calls"], 1)
+
+    def test_a_priced_loop_beside_an_unpriced_bucket_is_marked_partial(self):
+        # The bill genuinely excludes an unknown amount, so the figure must say so.
+        # `self.unpriced` alone cannot answer this -- it stays main-loop-only.
+        L = _agent.CostLedger()
+        L.bind_pricing(self.P)
+        L.record({"prompt_tokens": 1000, "completion_tokens": 500})
+        L._in = L._out = L._cache_in = L._cache_write = None  # rate lost mid-session
+        L.record({"prompt_tokens": 4000, "completion_tokens": 200}, bucket="compaction")
+        self.assertFalse(L.unpriced)
+        self.assertTrue(L.any_unpriced())
+        self.assertEqual(
+            L.summary(),
+            "cost: $0.0020 (tokens prompt=1000 completion=500) [partially unpriced]")
+
+    def test_a_pre_101_envelope_restores_to_no_buckets(self):
+        R = self._led()
+        R.restore({"total": 0.5, "prompt_tokens": 10})
+        self.assertEqual(R.buckets, {})
+        self.assertAlmostEqual(R.billed_total(), 0.5)
+
+
 class TestCallTrace(unittest.TestCase):
     """#99: the per-API-call trace and the context-event log.
 

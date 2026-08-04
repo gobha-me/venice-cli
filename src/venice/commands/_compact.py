@@ -46,6 +46,7 @@ Two behavioral notes:
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
@@ -289,12 +290,24 @@ def compact_messages(
     own wording is never trusted with roles.
 
     #99: when `ledger` is given, a successful compaction is logged to it as a context
-    event. Recorded HERE, in the worker, rather than at the four call sites -- the gate
-    (`maybe_compact`) is only three of them, `/compact` calls straight into this
+    event. Recorded HERE, in the worker, rather than at the compaction sites -- the gate
+    (`maybe_compact`) is only three of the four, `/compact` calls straight into this
     function, and copying the bookkeeping into each site is the shape that lets one
-    site quietly forget it. `ledger` is duck-typed: this module imports nothing from
-    `_agent` and does not need to. `trigger` distinguishes the automatic gate from a
-    hand-typed `/compact`, which answers "was this sawtooth self-inflicted".
+    site quietly forget it. (Two callers reach this function; four sites compact.)
+    `ledger` is duck-typed: this module imports nothing from `_agent` and does not need
+    to. `trigger` distinguishes the automatic gate from a hand-typed `/compact`, which
+    answers "was this sawtooth self-inflicted".
+
+    #101: the summarization call is billed to the ledger's "compaction" bucket, off to
+    the side of the main-loop counters, and its cost rides the event. Billed on API
+    success rather than compaction success: an empty summary still spent the tokens.
+
+    #116: `budget` is now MUTATED, not merely read -- a successful compaction clears
+    `last_prompt_tokens`, which the same argument moves in here. It was hand-copied at
+    both call sites, so a third one added later would have inherited the event for free
+    and silently missed the reset, leaving `Budget.over` reading a count larger than the
+    history it now describes -- i.e. re-firing compaction immediately, a sawtooth #99's
+    trace would show and nothing would prevent.
     """
     split = split_for_compaction(messages, keep_turns)
     if split is None:
@@ -307,6 +320,7 @@ def compact_messages(
     kwargs.pop("stream_options", None)
     kwargs.pop("tools", None)
     kwargs.setdefault("max_tokens", SUMMARY_MAX_TOKENS)
+    _t0 = time.monotonic()
     try:
         resp = oai.chat.completions.create(
             model=model,
@@ -315,7 +329,26 @@ def compact_messages(
             **kwargs,
         )
     except Exception:
+        # Nothing recorded on this path, deliberately: there is no usage block to read,
+        # and the SDK may have retried or never reached the server at all. `record()`'s
+        # row-on-every-path rule is about calls the caller KNOWS completed.
         return False  # compaction is best-effort; the run continues un-compacted
+    # #101: billed on API SUCCESS, not on compaction success -- note this sits ABOVE the
+    # empty-summary return below. The call has completed and the tokens are spent
+    # whether or not the summary that comes back is usable; a compaction that achieved
+    # nothing is precisely the one an operator needs to see the price of.
+    #
+    # `bucket=` keeps it out of the main-loop counters and out of the per-call trace:
+    # this is a FRESH prefix (system + a flattened transcript), so it reads ~0% cached
+    # every time and would fabricate a cache cliff in the one artifact that exists to
+    # detect real ones.
+    cost = 0.0
+    if ledger is not None:
+        cost = ledger.record(
+            getattr(resp, "usage", None),
+            seconds=time.monotonic() - _t0,
+            bucket="compaction",
+        )
     summary = ""
     if getattr(resp, "choices", None):
         summary = (resp.choices[0].message.content or "").strip()
@@ -349,10 +382,25 @@ def compact_messages(
             "observed_tokens_before": (
                 None if budget is None else budget.last_prompt_tokens
             ),
-            # NO cost field, deliberately: the summarization `create()` above is
-            # unledgered (#101). Tokens-saved next to no cost invites the reader to
-            # conclude the compaction paid for itself, which this data cannot support.
+            # #101: what this compaction COST to perform -- the summarization call
+            # above, which #99 shipped unledgered and which this key finally prices.
+            #
+            # #99 declined the field on the grounds that tokens-saved beside a cost
+            # invites "the compaction paid for itself". That objection was about the
+            # RENDERING, and it is answered there: the marker line reads "$0.0031 to
+            # summarize", which cannot be misread as a saving. Per-event rather than
+            # bucket-only because the bucket totals every compaction, and which ONE of
+            # them was expensive is the question a sawtooth makes you ask.
+            "cost": round(cost, 6),
         })
+    # #116: the LAST piece of post-compaction bookkeeping to move in here, and it must
+    # stay BELOW the event above -- `observed_tokens_before` reads the value this line
+    # clears, so a reset hoisted above the recording silently nulls every automatic
+    # event and leaves the estimate as the only number. Deliberately NOT nested inside
+    # the `if ledger is not None` block one line up: a `/compact` in a session with a
+    # budget and no ledger still has a stale count to clear.
+    if budget is not None:
+        budget.last_prompt_tokens = None  # stale after compaction
     return True
 
 
@@ -363,16 +411,15 @@ def maybe_compact(oai, model: str, messages: List[dict],
 
     The shared gate for every compaction site (`run_loop`'s per-turn check, its
     forced-final turn, and the REPL). `budget=None` (auto-compact off) or an
-    under-budget history is a no-op. After a successful compaction the observed
-    prompt-token count is stale, so it's reset (the next turn re-observes).
-    `on_compact(before, after)` is invoked on success (for progress output).
-    Returns True iff the history was compacted.
+    under-budget history is a no-op. `on_compact(before, after)` is invoked on
+    success (for progress output). Returns True iff the history was compacted.
 
-    #99: `ledger` is forwarded, not consumed here. Note the ORDERING that makes
-    `observed_tokens_before` real: `compact_messages` runs (and records) while
-    `budget.last_prompt_tokens` still holds the observed value, and only then does the
-    reset below clear it. Recording after that reset would silently null every
-    automatic event.
+    #99/#116: `ledger` and `budget` are forwarded, not consumed here. Everything that
+    must happen when a compaction succeeds -- the event, the bill, and clearing the now
+    stale observed prompt-token count -- belongs to `compact_messages`, because this
+    gate is only three of the four compaction sites and `/compact` calls straight past
+    it. `on_compact` stays here: it is presentation (the REPL and `run_loop` word it
+    differently), not an invariant.
     """
     if budget is None or not budget.over(messages):
         return False
@@ -383,7 +430,6 @@ def maybe_compact(oai, model: str, messages: List[dict],
         ledger=ledger, budget=budget, trigger="auto",
     ):
         return False
-    budget.last_prompt_tokens = None  # stale after compaction
     if on_compact is not None:
         on_compact(before, len(messages))
     return True

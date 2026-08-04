@@ -13,7 +13,7 @@ by default and there is no command that could surface a stored credential.
 import json
 import sys
 
-from . import _mailbox, _session
+from . import _agent, _mailbox, _session
 
 
 def register(subparsers) -> None:
@@ -132,12 +132,38 @@ def _run_show(args) -> int:
         # whole dict as a one-line repr, and `usage.api_calls` alone can hold 250 rows --
         # roughly 30KB on a single line, which would drown every scalar beside it. The
         # rows themselves stay in the session JSON for `jq`; `/usage` renders them.
-        scalars = {k: v for k, v in sess.usage.items() if not isinstance(v, list)}
+        # #101: filters BOTH nested types and walks whatever is left, rather than
+        # naming the collections. The old version excluded lists only, so `tools`
+        # (#82) was already being dumped inline here and `buckets` would have joined
+        # it -- the same regression, twice, because the rule was written per-key
+        # instead of per-shape. Structural now: `usage:` is scalars-only by
+        # construction and no nested key added later can regress it.
+        scalars = {k: v for k, v in sess.usage.items()
+                   if not isinstance(v, (list, dict))}
         print(f"usage:   {scalars}")
-        for key in ("api_calls", "context_events"):
-            rows = sess.usage.get(key)
-            if isinstance(rows, list) and rows:
-                print(f"  {key}: {len(rows)} row(s)")
+        for key in sorted(sess.usage):
+            val = sess.usage[key]
+            if isinstance(val, list) and val:
+                print(f"  {key}: {len(val)} row(s)")
+            elif isinstance(val, dict) and val:
+                if key == "buckets":
+                    # Worth detail rather than a count: one row today, and the count
+                    # alone ("buckets: 1 entry") hides the only thing anyone wants.
+                    # The MONEY is formatted by the ledger, not here -- a second
+                    # hand-rolled formatter printed a measured-looking `$0.0000` over
+                    # an unpriced bucket, and read the cost through a bare `float()`
+                    # that a hand-edited session file could crash. This surface exists
+                    # to inspect suspect files; it has to survive one.
+                    print(f"  {key}:")
+                    for name in sorted(val):
+                        row = val[name]
+                        calls = _agent._as_int(
+                            row.get("calls") if isinstance(row, dict) else None)
+                        print(f"    {name}: "
+                              f"{_agent.CostLedger.bucket_money(row)}"
+                              f" over {calls} call(s)")
+                else:
+                    print(f"  {key}: {len(val)} entr{'y' if len(val) == 1 else 'ies'}")
     print(f"messages: {len(sess.messages)}")
     roles: dict = {}
     for m in sess.messages:
