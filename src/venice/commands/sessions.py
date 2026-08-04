@@ -132,12 +132,29 @@ def _run_show(args) -> int:
         # whole dict as a one-line repr, and `usage.api_calls` alone can hold 250 rows --
         # roughly 30KB on a single line, which would drown every scalar beside it. The
         # rows themselves stay in the session JSON for `jq`; `/usage` renders them.
-        scalars = {k: v for k, v in sess.usage.items() if not isinstance(v, list)}
+        # #101: filters BOTH nested types and walks whatever is left, rather than
+        # naming the collections. The old version excluded lists only, so `tools`
+        # (#82) was already being dumped inline here and `buckets` would have joined
+        # it -- the same regression, twice, because the rule was written per-key
+        # instead of per-shape. Structural now: `usage:` is scalars-only by
+        # construction and no nested key added later can regress it.
+        scalars = {k: v for k, v in sess.usage.items()
+                   if not isinstance(v, (list, dict))}
         print(f"usage:   {scalars}")
-        for key in ("api_calls", "context_events"):
-            rows = sess.usage.get(key)
-            if isinstance(rows, list) and rows:
-                print(f"  {key}: {len(rows)} row(s)")
+        for key in sorted(sess.usage):
+            val = sess.usage[key]
+            if isinstance(val, list) and val:
+                print(f"  {key}: {len(val)} row(s)")
+            elif isinstance(val, dict) and val:
+                if key == "buckets":
+                    # Worth a line rather than a count: one row today, and the count
+                    # alone ("buckets: 1 entry") hides the only thing anyone wants.
+                    for name in sorted(val):
+                        row = val[name] if isinstance(val[name], dict) else {}
+                        print(f"  buckets: {name} ({row.get('calls', 0)} call(s), "
+                              f"${float(row.get('cost', 0.0) or 0.0):.4f})")
+                else:
+                    print(f"  {key}: {len(val)} entr{'y' if len(val) == 1 else 'ies'}")
     print(f"messages: {len(sess.messages)}")
     roles: dict = {}
     for m in sess.messages:

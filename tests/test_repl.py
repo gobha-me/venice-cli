@@ -666,8 +666,14 @@ class TestRepl(unittest.TestCase):
             )
             self.assertEqual(rc, 0)
             out = err.getvalue()
-            self.assertRegex(
-                out, r"\n    -- compacted \(manual\) after #0: 12 -> \d+ msgs")
+            # Whole line, not a prefix regex: `assertRegex` here was blind to
+            # anything appended after "msgs", which is exactly where #101's cost
+            # clause lands. The fake carries no usage, so the cost is falsy and the
+            # clause must be ABSENT -- "$0.0000" would be #98's fabricated zero.
+            self.assertIn(
+                "    -- compacted (manual) after #0: 12 -> 5 msgs,"
+                " ~60 -> ~38 tok est",
+                out.split("\n"))
             # No budget in play, so the estimate must not claim to be measured.
             self.assertNotIn("measured before", out)
 
@@ -776,6 +782,42 @@ class TestRepl(unittest.TestCase):
         fake.chat.completions.create.assert_not_called()       # ...genuinely skipped
         self.assertEqual(led.turns, 1)                         # ...and still counted
         self.assertGreater(led.elapsed_seconds, 0)
+
+    def test_a_capped_session_does_not_compact_before_refusing_the_turn(self):
+        # #101: compaction costs money now, so the spend gate has to run FIRST. With
+        # the old order a capped session paid to summarize and then refused the very
+        # turn the summary was for -- and did it again on the next message, and the
+        # next, spending without bound on work it would never use. `run_loop` has
+        # always gated first; this is the REPL agreeing.
+        import openai
+        from venice.commands import chat, _agent as _ag
+
+        led = _ag.CostLedger(max_spend=0.01)
+        led.bind_pricing({"input": {"usd": 1000.0}, "output": {"usd": 1000.0}})
+        led.record({"prompt_tokens": 100000, "completion_tokens": 100000})
+        self.assertTrue(led.over())          # precondition, not the assertion
+
+        # A budget that is over on any history at all, so compaction WOULD fire.
+        budget = _compact.Budget(threshold_tokens=1, keep_turns=1)
+        msgs = []
+        for i in range(6):
+            msgs.append({"role": "user", "content": f"u{i}"})
+            msgs.append({"role": "assistant", "content": f"a{i}"})
+
+        fake = mock.MagicMock()
+        state = {"model": "m", "tools": [], "tools_on": False, "yes": True,
+                 "max_tool_calls": 0, "session": None, "ledger": led,
+                 "budget": budget}
+        err = io.StringIO()
+        with _fake_clock(), mock.patch.object(sys, "stderr", err):
+            _repl._do_turn(fake, openai, chat, "do it", msgs, {}, state,
+                           _args(interactive=True))
+        self.assertIn("max-spend reached", err.getvalue())
+        # THE assertion: not one API call, so not one cent. The summarization call
+        # would have been the only `create()` here.
+        self.assertEqual(fake.chat.completions.create.call_count, 0)
+        self.assertEqual(led.bucket_calls("compaction"), 0)
+        self.assertNotIn("auto-compacted", err.getvalue())
 
     def _turn_state(self, ledger, session=None):
         return {"model": "m", "tools": [], "tools_on": False, "yes": True,

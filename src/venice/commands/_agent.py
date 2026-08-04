@@ -585,7 +585,8 @@ class CostLedger:
                     continue
                 cur = self.buckets.setdefault(key, {
                     "calls": 0, "cost": 0.0, "prompt_tokens": 0,
-                    "completion_tokens": 0, "seconds": 0.0, "unpriced": False,
+                    "completion_tokens": 0, "seconds": 0.0,
+                    "unpriced": False, "unreported": False,
                 })
                 cur["calls"] += _as_int(row.get("calls"))
                 cur["cost"] += _as_float(row.get("cost"))
@@ -593,8 +594,13 @@ class CostLedger:
                 cur["completion_tokens"] += _as_int(row.get("completion_tokens"))
                 cur["seconds"] = round(
                     cur["seconds"] + _as_float(row.get("seconds")), 3)
+                # Both flags sticky-OR, like the top-level `unpriced` and the #98 pair:
+                # one blind call in the bucket taints the bucket, and a later
+                # well-reported one must not clear it.
                 if row.get("unpriced"):
                     cur["unpriced"] = True
+                if row.get("unreported"):
+                    cur["unreported"] = True
         # `billed_total` is NOT restored, joining `cache_hit_percent` and `tool_seconds`
         # below: it is DERIVED from `total` and `buckets`, both of which the lines above
         # already seeded additively, so reading it back would count the whole bill twice.
@@ -892,9 +898,17 @@ class CostLedger:
             # PREFIX-cache diagnostic that a fresh-prefix call would only pollute.
             row = self.buckets.setdefault(bucket, {
                 "calls": 0, "cost": 0.0, "prompt_tokens": 0,
-                "completion_tokens": 0, "seconds": 0.0, "unpriced": False,
+                "completion_tokens": 0, "seconds": 0.0,
+                "unpriced": False, "unreported": False,
             })
             row["calls"] += 1
+            # #98's rule, one partition over: a response with no usage block leaves the
+            # tokens and the cost UNKNOWN, not zero. The main loop can say so per-row
+            # (the trace stores null) and dodges it in aggregate by having a
+            # "(no tokens reported)" branch; a bucket has neither, so it needs its own
+            # sticky marker or `0 in  0 out  $0.0000` would read as a measurement.
+            if usage is None:
+                row["unreported"] = True
             row["cost"] += cost
             row["prompt_tokens"] += _as_int(pt)
             row["completion_tokens"] += _as_int(ct)
@@ -1340,13 +1354,23 @@ class CostLedger:
         for name in sorted(self.buckets):
             row = self.buckets[name]
             cost = float(row.get("cost", 0.0))
-            # "(unpriced)" rather than "$0.0000": a bucket whose model had no catalog
-            # rate did not cost nothing, it cost an unknown amount. #98's rule.
-            money = "(unpriced)" if row.get("unpriced") and not cost else f"${cost:.4f}"
+            pt = int(row.get("prompt_tokens", 0))
+            ct = int(row.get("completion_tokens", 0))
+            blind = bool(row.get("unreported")) and not (pt or ct)
+            # Three ways this can be zero and only one of them is a measurement, so
+            # they get three renderings -- #98's rule, applied to a partition that has
+            # neither the trace's per-row nulls nor the main block's "(no tokens
+            # reported)" escape hatch to fall back on.
+            if row.get("unpriced") and not cost:
+                money = "(unpriced)"       # no catalog rate for the model
+            elif blind:
+                money = "n/a"              # the response carried no usage block
+            else:
+                money = f"${cost:.4f}"     # actually measured
             lines.append(
                 f"    {name:<{w}}  {row.get('calls', 0)} call(s)"
-                f"  {row.get('prompt_tokens', 0):>9,} in"
-                f"  {row.get('completion_tokens', 0):>7,} out"
+                f"  {('n/a' if blind else format(pt, ',')):>9} in"
+                f"  {('n/a' if blind else format(ct, ',')):>7} out"
                 f"  {money:>10}"
             )
         return lines

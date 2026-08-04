@@ -361,10 +361,26 @@ def _turn(oai, openai, chat, text, messages, gen_kwargs, state, args) -> bool:
     window -- a turn failure then rolls back only that turn, not the compaction.
     Tool turns pass the budget to `run_loop`, which compacts between calls and
     observes `usage` itself; streamed turns compact here and observe usage from
-    the stream's final chunk.
+    the stream's final chunk. It happens AFTER the spend gate below, not before
+    (#101): compaction costs money now, so a capped session must not pay to
+    prepare a turn it is about to refuse.
     """
     budget = state.get("budget")
     ledger = state.get("ledger")
+    # Spend gate (#66): refuse a new turn once the session cap is hit (the
+    # tool-loop gates mid-run; a streamed turn gates here).
+    #
+    # #101: this now runs BEFORE compaction, where it used to run after. Compaction
+    # costs real money as of this issue, so gating second meant a capped session paid
+    # to compact and then refused the very turn the compaction was preparing -- and
+    # again on the next message, and the next, spending without bound on work it would
+    # never use. `run_loop` has always had this order (gate, then compact); this makes
+    # the REPL agree. Still outside the rollback window either way: the user message is
+    # appended below, after this returns, so a skipped turn leaves nothing behind.
+    if ledger is not None and ledger.over():
+        print(f"(max-spend reached: {ledger.summary()}; turn skipped)",
+              file=sys.stderr)
+        return False
     _compact.maybe_compact(
         oai, state["model"], messages, budget, gen_kwargs,
         on_compact=lambda b, a: print(
@@ -372,12 +388,6 @@ def _turn(oai, openai, chat, text, messages, gen_kwargs, state, args) -> bool:
         ),
         ledger=ledger,  # #99
     )
-    # Spend gate (#66): refuse a new turn once the session cap is hit (the
-    # tool-loop gates mid-run; a streamed turn gates here).
-    if ledger is not None and ledger.over():
-        print(f"(max-spend reached: {ledger.summary()}; turn skipped)",
-              file=sys.stderr)
-        return False
     # Mid-run steering: a tool-loop turn drains this session's mailbox at each
     # checkpoint (#78, detached). On an interactive tty, #79 also makes the first Ctrl+C
     # pause and prompt for a steering line at the checkpoint; a second Ctrl+C (or Ctrl+C

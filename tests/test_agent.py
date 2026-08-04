@@ -1277,7 +1277,7 @@ class TestOffLoopBuckets(unittest.TestCase):
         self.assertEqual(L.buckets["compaction"], {
             "calls": 3, "cost": L.buckets["compaction"]["cost"],
             "prompt_tokens": 3000, "completion_tokens": 300,
-            "seconds": 1.5, "unpriced": False,
+            "seconds": 1.5, "unpriced": False, "unreported": False,
         })
 
     def test_an_unstamped_bucket_window_adds_no_seconds(self):
@@ -1400,6 +1400,34 @@ class TestOffLoopBuckets(unittest.TestCase):
         # reads as two questions.
         L = self._bucketed(cap=5.0)
         self.assertIn("  cost: $0.0064 / cap $5.00", L.usage_report().split("\n"))
+
+    def test_a_no_usage_bucket_call_renders_as_n_a_not_zero(self):
+        # A PRICED ledger whose response carried no usage block knows nothing: the
+        # tokens are unknown and so is the cost. "0 in  0 out  $0.0000" would be a
+        # measurement that never happened -- #98's rule, in the one partition that has
+        # neither the trace's per-row nulls nor the "(no tokens reported)" branch.
+        L = self._led()
+        L.record(None, seconds=0.4, bucket="compaction")
+        self.assertIs(L.buckets["compaction"]["unreported"], True)
+        self.assertIn(
+            "    compaction  1 call(s)        n/a in      n/a out         n/a",
+            L.usage_report().split("\n"))
+
+    def test_a_reported_bucket_call_after_a_blind_one_still_shows_numbers(self):
+        # The flag is sticky but must not blind a bucket that DID report something.
+        L = self._led()
+        L.record(None, bucket="compaction")
+        L.record({"prompt_tokens": 4000, "completion_tokens": 200}, bucket="compaction")
+        self.assertIs(L.buckets["compaction"]["unreported"], True)
+        self.assertIn(
+            "    compaction  2 call(s)      4,000 in      200 out     $0.0044",
+            L.usage_report().split("\n"))
+
+    def test_restore_keeps_bucket_unreported_sticky(self):
+        R = self._led()
+        R.restore({"buckets": {"compaction": {"calls": 1, "unreported": True}}})
+        R.restore({"buckets": {"compaction": {"calls": 1, "unreported": False}}})
+        self.assertIs(R.buckets["compaction"]["unreported"], True)
 
     def test_an_unpriced_bucket_renders_as_unknown_not_zero(self):
         L = _agent.CostLedger()

@@ -322,7 +322,8 @@ class TestSubagentTokenCap(_ProjBase):
         with mock.patch.object(_agent, "run_spawn", _run):
             out = _code.spawn_tool(None, "m", {}, [self._paid()],
                                    max_tokens=500).invoke({"task": "a", "role": "code"})
-        for leaked in ("api_calls", "api_calls_total", "context_events"):
+        for leaked in ("api_calls", "api_calls_total", "context_events",
+                       "buckets", "billed_total"):
             self.assertNotIn(leaked, out)
         self.assertEqual(out["tokens"], 15)  # the scalar provenance stays
 
