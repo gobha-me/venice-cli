@@ -10,8 +10,15 @@ from unittest import mock
 from venice.commands import _compact
 
 
-def _fake_oai(summary="A concise summary.", fail=False):
-    """A fake `oai` whose create() returns a canned summary (or raises)."""
+def _fake_oai(summary="A concise summary.", fail=False, usage=None):
+    """A fake `oai` whose create() returns a canned summary (or raises).
+
+    `usage` is set on the response EXPLICITLY, and defaults to None -- "the response
+    carried no usage block". Without this the response is a bare `MagicMock`, whose
+    auto-created `.usage` attribute normalizes to None through `_usage_dict` anyway, so
+    a priced `record()` returns 0.0: every cost assertion written against the old
+    fixture passed vacuously. Pass a real dict to bill a real number (#101).
+    """
     calls = []
 
     def _create(**kw):
@@ -22,11 +29,39 @@ def _fake_oai(summary="A concise summary.", fail=False):
         msg.content = summary
         resp = mock.MagicMock()
         resp.choices = [mock.MagicMock(message=msg)]
+        resp.usage = usage
         return resp
 
     fake = mock.MagicMock()
     fake.chat.completions.create.side_effect = _create
     return fake, calls
+
+
+class _Rec:
+    """A duck-typed stand-in for `CostLedger` (`_compact` imports nothing from `_agent`).
+
+    Implements BOTH hooks `compact_messages` calls, deliberately: the module invokes
+    `record` and `record_compaction` unguarded, so a stand-in carrying only one of them
+    would let a wiring bug read as "nothing to record" rather than fail. `seq` logs the
+    two in call order, which is the only way to pin that the bill is taken before the
+    event that quotes it. `test_a_real_ledger_satisfies_the_duck_type` is what stops this
+    class and the real ledger drifting apart.
+    """
+
+    def __init__(self, cost=0.0):
+        self.events = []
+        self.calls = []
+        self.seq = []
+        self.cost = cost
+
+    def record(self, usage, *, seconds=None, bucket=None):
+        self.calls.append({"usage": usage, "seconds": seconds, "bucket": bucket})
+        self.seq.append("call")
+        return self.cost
+
+    def record_compaction(self, ev):
+        self.events.append(ev)
+        self.seq.append("event")
 
 
 def _history(pairs, *, system=True):
@@ -273,10 +308,6 @@ class TestBudgetFromArgs(unittest.TestCase):
         self.assertIsNone(_compact.budget_from_args(argparse.Namespace()))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestCompactionEvents(unittest.TestCase):
     """#99: a compaction is logged to the ledger as a context event.
 
@@ -285,17 +316,10 @@ class TestCompactionEvents(unittest.TestCase):
     contract `_compact` calls, not the ledger's storage.
     """
 
-    class _Rec:
-        def __init__(self):
-            self.events = []
-
-        def record_compaction(self, ev):
-            self.events.append(ev)
-
     def test_a_successful_compaction_is_recorded(self):
         msgs = _history(6)
         fake, _calls = _fake_oai("summary")
-        led = self._Rec()
+        led = _Rec()
         self.assertTrue(_compact.compact_messages(
             fake, "m", msgs, keep_turns=2, ledger=led, trigger="manual"))
         self.assertEqual(len(led.events), 1)
@@ -314,7 +338,7 @@ class TestCompactionEvents(unittest.TestCase):
             with self.subTest(**kw):
                 msgs = _history(6)
                 fake, _calls = _fake_oai(**kw)
-                led = self._Rec()
+                led = _Rec()
                 self.assertFalse(_compact.compact_messages(
                     fake, "m", msgs, keep_turns=2, ledger=led))
                 self.assertEqual(led.events, [])
@@ -322,7 +346,7 @@ class TestCompactionEvents(unittest.TestCase):
     def test_nothing_to_compact_records_nothing(self):
         msgs = _history(3)
         fake, _calls = _fake_oai()
-        led = self._Rec()
+        led = _Rec()
         self.assertFalse(_compact.compact_messages(
             fake, "m", msgs, keep_turns=5, ledger=led))
         self.assertEqual(led.events, [])
@@ -337,7 +361,7 @@ class TestCompactionEvents(unittest.TestCase):
         # "the compaction paid for itself", which this data cannot support.
         msgs = _history(6)
         fake, _calls = _fake_oai("summary")
-        led = self._Rec()
+        led = _Rec()
         _compact.compact_messages(fake, "m", msgs, keep_turns=2, ledger=led)
         self.assertNotIn("cost", led.events[0])
 
@@ -347,7 +371,7 @@ class TestCompactionEvents(unittest.TestCase):
         # every automatic event, and the estimate would be the only number left.
         msgs = _history(6)
         fake, _calls = _fake_oai("summary")
-        led = self._Rec()
+        led = _Rec()
         b = _compact.Budget(threshold_tokens=1, keep_turns=2)
         b.last_prompt_tokens = 88110
         self.assertTrue(_compact.maybe_compact(fake, "m", msgs, b, {}, ledger=led))
@@ -360,7 +384,7 @@ class TestCompactionEvents(unittest.TestCase):
         # measurement's name.
         msgs = _history(6)
         fake, _calls = _fake_oai("summary")
-        led = self._Rec()
+        led = _Rec()
         _compact.compact_messages(fake, "m", msgs, keep_turns=2, ledger=led)
         ev = led.events[0]
         self.assertIsNone(ev["observed_tokens_before"])
@@ -369,7 +393,16 @@ class TestCompactionEvents(unittest.TestCase):
     def test_an_under_budget_gate_records_nothing(self):
         msgs = _history(6)
         fake, _calls = _fake_oai("summary")
-        led = self._Rec()
+        led = _Rec()
         b = _compact.Budget(threshold_tokens=10_000_000, keep_turns=2)
         self.assertFalse(_compact.maybe_compact(fake, "m", msgs, b, {}, ledger=led))
         self.assertEqual(led.events, [])
+
+
+# Stays at the BOTTOM. It used to sit above `TestCompactionEvents`, which meant a direct
+# `python tests/test_compact.py` ran `unittest.main()` before that class was defined and
+# silently skipped every test below it -- 23 collected instead of 31. `make test` uses
+# `python -m unittest`, which imports the module and runs them all, so CI was green and
+# the gap was invisible from the only place anyone looked.
+if __name__ == "__main__":
+    unittest.main()
