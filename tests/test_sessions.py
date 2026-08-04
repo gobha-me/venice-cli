@@ -314,12 +314,32 @@ class TestSessionsCLI(_Base):
         # the nested maps are summarized below the line, never inside it
         self.assertNotIn("tool_0", usage_line)
         self.assertNotIn("compaction", usage_line)
-        self.assertIn("  buckets: compaction (2 call(s), $0.0031)", out)
+        self.assertIn("  buckets:", out.split("\n"))
+        self.assertIn("    compaction: $0.0031 over 2 call(s)", out.split("\n"))
         self.assertIn("  tools: 40 entries", out)
-        self.assertIn("  api_calls: 250 row(s)", out)
         self.assertNotIn("'n': 7", usage_line)
         self.assertIn("  api_calls: 250 row(s)", out)
         self.assertIn("  context_events: 1 row(s)", out)
+
+    def test_show_survives_a_hand_edited_bucket_row(self):
+        # This command exists to inspect a suspect session file, so it has to survive
+        # one. The first cut read the cost through a bare `float()`, which turned a
+        # junk value into an uncaught ValueError mid-output -- after `id:` and `usage:`
+        # had already printed. `CostLedger.restore` reads the same field tolerantly.
+        s = self._mk_saved()
+        s.usage = {"total": 0.1, "buckets": {
+            "compaction": {"calls": "two", "cost": "oops"},
+            "broken": "not a dict",
+            "unpriced_one": {"calls": 1, "cost": 0.0, "unpriced": True},
+        }}
+        S.save(s)
+        rc, out, err = _capture(cli.main, ["sessions", "show", s.id])
+        self.assertEqual(rc, 0)
+        self.assertIn("    compaction: $0.0000 over 0 call(s)", out.split("\n"))
+        self.assertIn("    broken: $0.0000 over 0 call(s)", out.split("\n"))
+        # an unpriced bucket must not render a measured-looking zero
+        self.assertIn("    unpriced_one: (unpriced) over 1 call(s)", out.split("\n"))
+        self.assertIn("messages: 2", out)  # ...and the rest of the page still printed
 
     def test_show_missing(self):
         rc, out, err = _capture(cli.main, ["sessions", "show", "nope"])

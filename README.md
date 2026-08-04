@@ -815,11 +815,14 @@ Details and safety:
   priced against the session model's per-1M-token catalog rate; once the running
   total reaches the cap the loop stops starting new turns and forces a final
   answer (chat has no pre-call quote, so it bounds *further* spend, not a turn
-  already in flight). It counts auto-compaction's own summarization calls as well
-  as conversation turns; it does **not** yet count subagent turns (`--scout`,
-  `--spawn`, `--review`, `--web-search`), which still build their own throwaway
-  ledgers — that half of #101 is tracked separately, so on a rail-heavy run the cap
-  still bounds less than its name suggests. Config-backable via
+  already in flight). What it caps is **starting new turns**, not every API call:
+  auto-compaction's summarization calls are now counted toward the total, and are
+  skipped when the cap has already tripped and no turn will follow — but a forced
+  final answer still compacts if it must (shipping the full history would fail the
+  turn outright), and an explicit `/compact` still runs. It does **not** yet count
+  subagent turns (`--scout`, `--spawn`, `--review`, `--web-search`), which still
+  build their own throwaway ledgers — that half is tracked separately, so on a
+  rail-heavy run the cap bounds less than its name suggests. Config-backable via
   `defaults.chat.session_max_spend` /
   `defaults.code.session_max_spend`. Distinct from `--max-spend` (the per-call
   tool cap). A model with unknown pricing is counted (tokens) but not charged.

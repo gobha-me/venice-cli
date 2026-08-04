@@ -585,11 +585,7 @@ class CostLedger:
                 key = str(name).strip()
                 if not key:
                     continue
-                cur = self.buckets.setdefault(key, {
-                    "calls": 0, "cost": 0.0, "prompt_tokens": 0,
-                    "completion_tokens": 0, "seconds": 0.0,
-                    "unpriced": False, "unreported": False,
-                })
+                cur = self.buckets.setdefault(key, self.new_bucket_row())
                 cur["calls"] += _as_int(row.get("calls"))
                 cur["cost"] += _as_float(row.get("cost"))
                 cur["prompt_tokens"] += _as_int(row.get("prompt_tokens"))
@@ -761,6 +757,56 @@ class CostLedger:
             return int(self.buckets.get(name, {}).get("calls", 0))
         return sum(int(b.get("calls", 0)) for b in self.buckets.values())
 
+    @staticmethod
+    def new_bucket_row() -> dict:
+        """A zeroed off-loop bucket row (#101).
+
+        ONE definition, used by `record()` and by `restore()`. Written out twice it
+        would drift: seed a new field in `record` only, and a RESUMED ledger's rows
+        silently lack the key while a live one has it -- a resume-only divergence with
+        no crash and no failing test.
+        """
+        return {"calls": 0, "cost": 0.0, "prompt_tokens": 0,
+                "completion_tokens": 0, "seconds": 0.0,
+                "unpriced": False, "unreported": False}
+
+    @staticmethod
+    def bucket_money(row) -> str:
+        """How to render one bucket row's cost (#101), or "" when it is knowable-zero.
+
+        Three ways this number can be absent and only one of them is a measurement, so
+        they get three renderings. Shared with `venice sessions show`, which reads the
+        same rows out of a session file -- a second hand-rolled formatter there was
+        already printing a measured-looking `$0.0000` over an unpriced bucket.
+
+        Tolerant of a hand-edited envelope, like `restore()` and unlike a bare
+        `float()`: this also runs against JSON nobody validated.
+        """
+        row = row if isinstance(row, dict) else {}
+        cost = _as_float(row.get("cost"))
+        pt = _as_int(row.get("prompt_tokens"))
+        ct = _as_int(row.get("completion_tokens"))
+        if row.get("unpriced") and not cost:
+            return "(unpriced)"          # the model had no catalog rate
+        if row.get("unreported") and not (pt or ct):
+            return "n/a"                 # the response carried no usage block
+        if cost and f"${cost:.4f}" == "$0.0000":
+            # Real spend that rounds away at 4dp -- cheap model, small prefix. Printing
+            # `$0.0000` would be a measurement of nothing; `<$0.0001` is the truth.
+            return "<$0.0001"
+        return f"${cost:.4f}"
+
+    def any_unreported(self) -> bool:
+        """True when any bucket holds a call whose response carried no usage (#101).
+
+        The reporting-axis twin of `any_unpriced`. `_bucket_lines` used to derive this
+        per row as "unreported AND no tokens at all", which has no PARTIAL state: one
+        usage-bearing call in the bucket hid the marker entirely and the undercount
+        rendered as a complete measurement. The main token block has said
+        `[partially unreported]` for this since #98; the partition needs to as well.
+        """
+        return any(bool(b.get("unreported")) for b in self.buckets.values())
+
     def any_unpriced(self) -> bool:
         """True when ANY recorded call had no catalog rate -- main loop or bucket (#101).
 
@@ -898,11 +944,7 @@ class CostLedger:
             # is `api_calls_total - head - tail`, so counting a call that never appended
             # a row would make `/usage` report phantom dropped rows; and the trace is a
             # PREFIX-cache diagnostic that a fresh-prefix call would only pollute.
-            row = self.buckets.setdefault(bucket, {
-                "calls": 0, "cost": 0.0, "prompt_tokens": 0,
-                "completion_tokens": 0, "seconds": 0.0,
-                "unpriced": False, "unreported": False,
-            })
+            row = self.buckets.setdefault(bucket, self.new_bucket_row())
             row["calls"] += 1
             # #98's rule, one partition over: a response with no usage block leaves the
             # tokens and the cost UNKNOWN, not zero. The main loop can say so per-row
@@ -1030,29 +1072,37 @@ class CostLedger:
             # `code: {duration} wall -- {summary()}`, where " -- " is THE top-level
             # field boundary (and is documented as one in the README).
             toks += f", {frag}"
+        # Each computed ONCE and reused below. Read twice, they are two chances for a
+        # later edit to touch one and not its twin, and the result would be a footer
+        # that contradicts itself (`$0.0000 ... [incl. $0.0031 compaction]`).
         billed = self.billed_total()
+        unpriced = self.any_unpriced()
+        off = self.bucket_cost()
         # #101: `billed`, not `total`, in the GUARD too. Today they agree whenever this
         # branch is reachable (one model, one set of rates, so unpriced main implies
         # unpriced bucket). The rails slice breaks that -- a differently-priced subagent
         # would leave `total == 0.0` next to a real bucket cost, and this branch would
         # print "(unpriced — model rate unknown)" over the top of it.
-        if self.any_unpriced() and billed == 0.0:
+        if unpriced and billed == 0.0:
             return f"cost: (unpriced — model rate unknown) {toks}"
         s = f"cost: ${billed:.4f}"
         if self.max_spend is not None:
             s += f" / cap ${self.max_spend:.2f}"
         s += f" ({toks})"
-        if self.any_unpriced():
+        if unpriced:
             s += " [partially unpriced]"
         # #101: at the END, beside `[partially unpriced]`, rather than inside the parens
         # #100's cache clause uses -- those parens are labelled "tokens", and a dollar
         # figure is not one. This is also the only position that works on both branches.
         # Gated on there being off-loop spend, so every ledger that never compacted (and
         # every unpriced one) renders exactly as it did before.
-        off = self.bucket_cost()
-        if off > 0:
+        #
+        # Gated on what will actually RENDER, not on the raw float: a cost below 5e-5 is
+        # non-zero but formats as `$0.0000`, and `[incl. $0.0000 compaction]` names a
+        # share of nothing -- #98's fabricated zero wearing a clause.
+        if off > 0 and f"{off:.4f}" != "0.0000":
             names = "/".join(sorted(
-                k for k, v in self.buckets.items() if float(v.get("cost", 0.0)) > 0
+                k for k, v in self.buckets.items() if _as_float(v.get("cost")) > 0
             ))
             s += f" [incl. ${off:.4f} {names}]"
         return s
@@ -1091,8 +1141,19 @@ class CostLedger:
             # third time. This branch is exactly where a `/compact`-before-any-turn
             # session lands, i.e. the one state where the bucket is the only money on
             # the page, so omitting it here would hide precisely what it exists to show.
+            # #101: the cost line renders HERE too when there is off-loop money. A
+            # `/compact` before the first turn reports no main-loop tokens but has
+            # really spent, and `/cost` seconds later prints the figure AND the cap --
+            # omitting them here is the two-surfaces-disagree failure `_cache_fragment`
+            # warns about, in the one state where the cap is what you need to see.
             return "\n".join(
                 ["session usage:", "  (no tokens reported)"]
+                # ...but only when there is money to report. A run whose responses
+                # simply carried no usage block has nothing to say here, and printing
+                # `cost: $0.0000` for it would be the fabricated zero this branch was
+                # built to avoid -- the line earns its place only once a bucket has
+                # real spend that the token counters above cannot account for.
+                + (self._cost_lines() if self.billed_total() > 0 else [])
                 + ([self._timing_line()] if self.turns else [])
                 + self._tool_lines() + self._call_lines() + self._bucket_lines()
             )
@@ -1137,21 +1198,7 @@ class CostLedger:
             lines.append(f"  cache hit rate: {hit:.1f}%  [partially unreported]")
         else:
             lines.append(f"  cache hit rate: {hit:.1f}%")
-        # #101: the billed total here as in `summary`, and for a sharper version of the
-        # same reason -- `_cache_fragment` already notes an operator runs `/cost` and
-        # `/usage` seconds apart, so two numbers for one question reads as two questions.
-        # The off-loop share is broken out by `_bucket_lines` below rather than clause'd
-        # here, since this block has the room that a one-liner does not.
-        billed = self.billed_total()
-        if self.any_unpriced() and billed == 0.0:
-            lines.append("  cost: (model rate unknown)")
-        else:
-            cost = f"  cost: ${billed:.4f}"
-            if self.max_spend is not None:
-                cost += f" / cap ${self.max_spend:.2f}"
-            if self.any_unpriced():
-                cost += "  [partially unpriced]"
-            lines.append(cost)
+        lines.extend(self._cost_lines())
         if self.turns:  # #81
             lines.append(self._timing_line())
         lines.extend(self._tool_lines())  # #82 -- own gate; see `_tool_lines`
@@ -1337,6 +1384,33 @@ class CostLedger:
                 lines.extend(self._event_lines(ev))
         return lines
 
+    def _cost_lines(self) -> List[str]:
+        """`/usage`'s cost line (#101), shared by both of `usage_report`'s branches.
+
+        Extracted because the no-tokens branch used to omit it entirely -- harmless
+        while that state implied zero spend, wrong the moment a `/compact` before the
+        first turn could land there with real money in a bucket. One definition means
+        the two branches cannot disagree about the cap.
+
+        The billed total here as in `summary`, for a sharper version of the same
+        reason: `_cache_fragment` already notes an operator runs `/cost` and `/usage`
+        seconds apart, so two numbers for one question read as two questions. The
+        off-loop share is broken out by `_bucket_lines` rather than clause'd here,
+        since this block has the room a one-liner does not.
+        """
+        billed = self.billed_total()
+        unpriced = self.any_unpriced()
+        if unpriced and billed == 0.0:
+            return ["  cost: (model rate unknown)"]
+        cost = f"  cost: ${billed:.4f}"
+        if self.max_spend is not None:
+            cost += f" / cap ${self.max_spend:.2f}"
+        if unpriced:
+            cost += "  [partially unpriced]"
+        if self.any_unreported():
+            cost += "  [partially unreported]"
+        return [cost]
+
     def _bucket_lines(self) -> List[str]:
         """The `/usage` off-loop spend block (#101); ``[]`` when nothing was bucketed.
 
@@ -1348,33 +1422,31 @@ class CostLedger:
         if not self.buckets:
             return []
         w = max(len(k) for k in self.buckets)
-        secs = sum(float(b.get("seconds", 0.0)) for b in self.buckets.values())
+        secs = sum(_as_float(b.get("seconds")) for b in self.buckets.values())
         # Leads with a right-aligned duration in the same column as `wall`/`tools`/
-        # `calls`, because it answers the same shape of question and a block that broke
-        # the grid would read as belonging to something else.
-        lines = [f"  off-loop{format_duration(secs):>10}  "
+        # `calls`. The label is padded to the same 10 columns those three hard-code,
+        # explicitly rather than by luck -- "off-loop" happens to be 8 characters, and
+        # renaming it would otherwise slide the duration out of the shared grid.
+        dur = "n/a" if (not secs and self.bucket_calls()) else format_duration(secs)
+        lines = [f"  {'off-loop':<8}{dur:>10}  "
                  f"across {self.bucket_calls()} API call(s)  [not in the trace above]"]
         for name in sorted(self.buckets):
             row = self.buckets[name]
-            cost = float(row.get("cost", 0.0))
-            pt = int(row.get("prompt_tokens", 0))
-            ct = int(row.get("completion_tokens", 0))
-            blind = bool(row.get("unreported")) and not (pt or ct)
-            # Three ways this can be zero and only one of them is a measurement, so
-            # they get three renderings -- #98's rule, applied to a partition that has
-            # neither the trace's per-row nulls nor the main block's "(no tokens
-            # reported)" escape hatch to fall back on.
-            if row.get("unpriced") and not cost:
-                money = "(unpriced)"       # no catalog rate for the model
-            elif blind:
-                money = "n/a"              # the response carried no usage block
-            else:
-                money = f"${cost:.4f}"     # actually measured
+            pt = _as_int(row.get("prompt_tokens"))
+            ct = _as_int(row.get("completion_tokens"))
+            # PARTIALLY blind, not all-or-nothing: a bucket mixing one usage-bearing
+            # call with one usage-less call has real numbers that are nonetheless an
+            # undercount, and the earlier `unreported and not (pt or ct)` test hid the
+            # marker the moment any call reported. Same shape as the main token block's
+            # `[partially unreported]`, which has said this since #98.
+            blind = bool(row.get("unreported"))
+            mark = "" if not blind else ("  [unreported]" if not (pt or ct)
+                                         else "  [partially unreported]")
             lines.append(
-                f"    {name:<{w}}  {row.get('calls', 0)} call(s)"
-                f"  {('n/a' if blind else format(pt, ',')):>9} in"
-                f"  {('n/a' if blind else format(ct, ',')):>7} out"
-                f"  {money:>10}"
+                f"    {name:<{w}}  {_as_int(row.get('calls'))} call(s)"
+                f"  {('n/a' if blind and not pt else format(pt, ',')):>9} in"
+                f"  {('n/a' if blind and not ct else format(ct, ',')):>7} out"
+                f"  {self.bucket_money(row):>10}{mark}"
             )
         return lines
 
@@ -1394,8 +1466,14 @@ class CostLedger:
         # `self.unpriced`, and an unpriced session would otherwise render `$0.0000` --
         # #98's fabricated zero, one surface over. Pre-#101 envelopes have no key at all
         # and render exactly as they did.
-        if ev.get("cost"):
-            out[0] += f", ${ev['cost']:.4f} to summarize"
+        # COERCED, not formatted raw. `restore()` seeds `context_events` verbatim from
+        # the session file (rows are copied, never validated field by field), so a
+        # hand-edited or foreign-writer `"cost": "0.0031"` would make `:.4f` raise and
+        # take `/usage` down with it -- on a resumed session, which is exactly when this
+        # renders. Every sibling field on this line hedges the same way.
+        cost = _as_float(ev.get("cost"))
+        if cost and f"{cost:.4f}" != "0.0000":
+            out[0] += f", ${cost:.4f} to summarize"
         obs = ev.get("observed_tokens_before")
         if obs:
             # Its own line, and labelled "lower bound": the number is the PREVIOUS call's

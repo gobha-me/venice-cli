@@ -1410,18 +1410,26 @@ class TestOffLoopBuckets(unittest.TestCase):
         L.record(None, seconds=0.4, bucket="compaction")
         self.assertIs(L.buckets["compaction"]["unreported"], True)
         self.assertIn(
-            "    compaction  1 call(s)        n/a in      n/a out         n/a",
+            "    compaction  1 call(s)        n/a in      n/a out         n/a"
+            "  [unreported]",
             L.usage_report().split("\n"))
 
-    def test_a_reported_bucket_call_after_a_blind_one_still_shows_numbers(self):
-        # The flag is sticky but must not blind a bucket that DID report something.
+    def test_a_partly_blind_bucket_says_so_instead_of_looking_complete(self):
+        # A bucket mixing a usage-less call with a usage-bearing one has real numbers
+        # that are nonetheless an UNDERCOUNT. The first cut tested
+        # `unreported and not (pt or ct)`, which has no partial state -- one reporting
+        # call hid the marker and the shortfall rendered as a full measurement. Same
+        # shape as the main token block's `[partially unreported]` since #98.
         L = self._led()
         L.record(None, bucket="compaction")
         L.record({"prompt_tokens": 4000, "completion_tokens": 200}, bucket="compaction")
         self.assertIs(L.buckets["compaction"]["unreported"], True)
+        lines = L.usage_report().split("\n")
         self.assertIn(
-            "    compaction  2 call(s)      4,000 in      200 out     $0.0044",
-            L.usage_report().split("\n"))
+            "    compaction  2 call(s)      4,000 in      200 out     $0.0044"
+            "  [partially unreported]", lines)
+        # ...and the cost line carries it too, so `/usage`'s total is not read as exact
+        self.assertIn("  cost: $0.0044  [partially unreported]", lines)
 
     def test_restore_keeps_bucket_unreported_sticky(self):
         R = self._led()
@@ -1467,6 +1475,62 @@ class TestOffLoopBuckets(unittest.TestCase):
             " ~91,200 -> ~8,210 tok est")
 
     # -- persistence -----------------------------------------------------------
+
+    def test_a_sub_hundredth_cent_bucket_does_not_claim_a_zero_share(self):
+        # `off > 0` is true for 3.3e-05 but `f"{off:.4f}"` is "0.0000", so the clause
+        # would read `[incl. $0.0000 compaction]` -- a share of nothing. #98's rule:
+        # the gate has to test what will RENDER, not the raw float.
+        L = _agent.CostLedger()
+        L.bind_pricing({"input": {"usd": 0.05}, "output": {"usd": 0.10}})
+        L.record({"prompt_tokens": 1000, "completion_tokens": 500})
+        L.record({"prompt_tokens": 500, "completion_tokens": 80}, bucket="compaction")
+        self.assertGreater(L.bucket_cost(), 0)          # real money...
+        self.assertNotIn("incl.", L.summary())          # ...too small to name
+
+    def test_a_sub_hundredth_cent_event_does_not_render_a_zero(self):
+        line = _agent.CostLedger._event_lines(self._ev(cost=3.3e-05))[0]
+        self.assertNotIn("$0.0000", line)
+        self.assertEqual(
+            line,
+            "    -- compacted (auto) after #2: 48 -> 13 msgs,"
+            " ~91,200 -> ~8,210 tok est")
+
+    def test_a_bucket_row_renders_sub_cent_spend_as_a_bound(self):
+        L = _agent.CostLedger()
+        L.bind_pricing({"input": {"usd": 0.05}, "output": {"usd": 0.10}})
+        L.record({"prompt_tokens": 500, "completion_tokens": 80}, bucket="compaction")
+        self.assertIn(
+            "    compaction  1 call(s)        500 in       80 out    <$0.0001",
+            L.usage_report().split("\n"))
+
+    def test_an_event_cost_from_a_hand_edited_file_cannot_crash_usage(self):
+        # `restore()` seeds `context_events` VERBATIM -- rows are copied, never
+        # validated field by field -- so `/usage` on a resumed session is where a
+        # foreign `"cost": "0.0031"` would land. A raw `:.4f` raises there.
+        for junk in ("0.0031", True, {}, None, [], float("nan")):
+            with self.subTest(cost=junk):
+                line = _agent.CostLedger._event_lines(self._ev(cost=junk))[0]
+                self.assertTrue(line.startswith("    -- compacted (auto) after #2:"))
+
+    def test_usage_report_shows_the_cost_and_cap_when_only_a_bucket_spent(self):
+        # `/usage` and `/cost` must not disagree. The no-tokens branch used to omit
+        # the cost line entirely, which was harmless only while that state implied
+        # zero spend -- a `/compact` before the first turn lands here with real money.
+        L = self._led(cap=0.50)
+        L.record({"prompt_tokens": 4000, "completion_tokens": 200}, bucket="compaction")
+        lines = L.usage_report().split("\n")
+        self.assertIn("  (no tokens reported)", lines)
+        self.assertIn("  cost: $0.0044 / cap $0.50", lines)
+        self.assertIn("cost: $0.0044 / cap $0.50", L.summary())  # ...and they agree
+
+    def test_the_no_tokens_branch_stays_silent_when_nothing_was_spent(self):
+        # ...but the line must NOT appear for a run that merely reported no usage:
+        # `cost: $0.0000` there is the fabricated zero the branch exists to avoid.
+        L = self._led()
+        L.record(None, seconds=1.0)
+        lines = L.usage_report().split("\n")
+        self.assertIn("  (no tokens reported)", lines)
+        self.assertFalse([ln for ln in lines if ln.startswith("  cost:")])
 
     def test_buckets_round_trip_through_to_dict(self):
         L = self._bucketed()

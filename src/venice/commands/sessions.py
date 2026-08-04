@@ -13,7 +13,7 @@ by default and there is no command that could surface a stored credential.
 import json
 import sys
 
-from . import _mailbox, _session
+from . import _agent, _mailbox, _session
 
 
 def register(subparsers) -> None:
@@ -147,12 +147,21 @@ def _run_show(args) -> int:
                 print(f"  {key}: {len(val)} row(s)")
             elif isinstance(val, dict) and val:
                 if key == "buckets":
-                    # Worth a line rather than a count: one row today, and the count
+                    # Worth detail rather than a count: one row today, and the count
                     # alone ("buckets: 1 entry") hides the only thing anyone wants.
+                    # The MONEY is formatted by the ledger, not here -- a second
+                    # hand-rolled formatter printed a measured-looking `$0.0000` over
+                    # an unpriced bucket, and read the cost through a bare `float()`
+                    # that a hand-edited session file could crash. This surface exists
+                    # to inspect suspect files; it has to survive one.
+                    print(f"  {key}:")
                     for name in sorted(val):
-                        row = val[name] if isinstance(val[name], dict) else {}
-                        print(f"  buckets: {name} ({row.get('calls', 0)} call(s), "
-                              f"${float(row.get('cost', 0.0) or 0.0):.4f})")
+                        row = val[name]
+                        calls = _agent._as_int(
+                            row.get("calls") if isinstance(row, dict) else None)
+                        print(f"    {name}: "
+                              f"{_agent.CostLedger.bucket_money(row)}"
+                              f" over {calls} call(s)")
                 else:
                     print(f"  {key}: {len(val)} entr{'y' if len(val) == 1 else 'ies'}")
     print(f"messages: {len(sess.messages)}")
