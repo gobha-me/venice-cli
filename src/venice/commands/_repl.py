@@ -324,8 +324,9 @@ def _do_turn(oai, openai, chat, text, messages, gen_kwargs, state, args) -> None
     This is the "input -> able to type again" seam: `input(_PROMPT)` sits outside it
     in `run`, so time spent thinking at the prompt is excluded for free, and all three
     call sites are covered at once. It is also strictly more accurate than stamping
-    inside `run_loop` -- auto-compaction makes its own uncounted completion, and it
-    falls inside this window automatically.
+    inside `run_loop` -- auto-compaction makes its own separate completion (billed to
+    the ledger's off-loop bucket as of #101, but never a `run_loop` turn), and it falls
+    inside this window automatically.
 
     The stamp lands in `finally` so the gate-skip, both rollback paths and an
     unexpected exception are all timed; a turn that cost you 40 seconds and then

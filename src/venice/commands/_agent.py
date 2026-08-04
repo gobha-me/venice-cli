@@ -407,9 +407,11 @@ class CostLedger:
         # The TRUE count, which is also the source of each row's `n`. Deliberately not
         # `len()` of anything: it stays truthful across the cap and across a resume, and it
         # finally persists the number the `turns` comment above says this class counts but
-        # never stored. Note "ledgered API calls", NOT "API calls": `_compact`'s summary
-        # call (#101) never reaches `record()`, so the rows do not sum to the whole bill.
-        # A `context_events` row is the marker that an unledgered call happened there.
+        # never stored. Note "MAIN-LOOP API calls", NOT "API calls": `_compact`'s summary
+        # call reaches `record()` as of #101, but with `bucket="compaction"`, which
+        # deliberately appends no row and does not bump this counter -- so the trace's
+        # rows still do not sum to the whole bill. `self.buckets` holds the remainder,
+        # `billed_total()` adds the two, and the `calls` header names the difference.
         self.api_calls_total = 0
         # #99: prefix-affecting events (compaction today; #104's resume reseed later --
         # hence `kind`, and hence not naming this `compactions`). Uncapped on purpose:
@@ -1067,7 +1069,7 @@ class CostLedger:
             # #99: `api_calls_total` and `context_events` join `turns` in this gate.
             # A run whose every response came back without a usage block has real rows
             # and real seconds and zero tokens, and a `/compact` before any turn has an
-            # event and nothing else (its own summary call is unledgered, #101).
+            # event and an off-loop bucket but no main-loop tokens at all (#101).
             # Reporting "(no usage recorded yet)" for either would hide the trace at
             # precisely the moment it is the only evidence there is.
             # #101: `buckets` joins that gate. A `/compact` before any turn has an event
@@ -1257,9 +1259,10 @@ class CostLedger:
         rows = self.api_calls()
         if not rows:
             # A `/compact` before any turn leaves an event and no rows -- its own
-            # summarization call is unledgered (#101). The event is the only record
-            # that the prefix moved, so it renders on its own rather than vanishing
-            # with the block that would have carried it.
+            # summarization call is billed to a bucket, which appends no row (#101).
+            # The event is the only record HERE that the prefix moved, so it renders on
+            # its own rather than vanishing with the block that would have carried it;
+            # the money is one block down, in `_bucket_lines`.
             return [ln for ev in self.context_events for ln in self._event_lines(ev)]
         head_n = self._CALL_HEAD_ROWS
         tail_n = self._CALL_TAIL_ROWS
@@ -2964,7 +2967,7 @@ def run_loop(
             on_compact=lambda b, a: _progress(
                 f"(auto-compacted history: {b} -> {a} messages)", enabled=show,
             ),
-            ledger=ledger,  # #99: log the event; the summary call itself stays unmetered
+            ledger=ledger,  # #99: log the event; #101: and bill the summary call
         )
         _t0 = time.monotonic()
         with _Spinner("thinking", enabled=show):

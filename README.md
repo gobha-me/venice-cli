@@ -815,7 +815,12 @@ Details and safety:
   priced against the session model's per-1M-token catalog rate; once the running
   total reaches the cap the loop stops starting new turns and forces a final
   answer (chat has no pre-call quote, so it bounds *further* spend, not a turn
-  already in flight). Config-backable via `defaults.chat.session_max_spend` /
+  already in flight). It counts auto-compaction's own summarization calls as well
+  as conversation turns; it does **not** yet count subagent turns (`--scout`,
+  `--spawn`, `--review`, `--web-search`), which still build their own throwaway
+  ledgers — that half of #101 is tracked separately, so on a rail-heavy run the cap
+  still bounds less than its name suggests. Config-backable via
+  `defaults.chat.session_max_spend` /
   `defaults.code.session_max_spend`. Distinct from `--max-spend` (the per-call
   tool cap). A model with unknown pricing is counted (tokens) but not charged.
 - `--output DIR` sets where generated files are written (default: cwd).
@@ -1320,10 +1325,10 @@ time. The aggregate cannot tell them apart, so `/usage` also traces the individu
 API calls:
 
 ```
-  calls        39.7s  across 14 API call(s)
+  calls        39.7s  across 14 API call(s)  [+1 off-loop]
     #1              11,204 in    0% cached      312 out      4.2s
     #2              11,530 in   96% cached       88 out      1.1s
-    -- compacted (auto) after #2: 48 -> 13 msgs, ~91,200 -> ~8,210 tok est
+    -- compacted (auto) after #2: 48 -> 13 msgs, ~91,200 -> ~8,210 tok est, $0.0031 to summarize
        (88,110 tok measured before, lower bound)
     #3               8,402 in    0% cached      140 out      2.0s
     (+6 elided)     76,500 in   58% cached      780 out     15.0s
@@ -1332,6 +1337,8 @@ API calls:
     #12             18,800 in   58% cached      174 out      3.6s
     #13             19,900 in   58% cached      182 out      3.8s
     #14             19,880 in   91% cached      210 out      3.4s
+  off-loop      2.4s  across 1 API call(s)  [not in the trace above]
+    compaction  1 call(s)     88,110 in      420 out     $0.0031
 ```
 
 Cold-from-#1, a mid-run cliff and a compaction sawtooth each have a distinct shape
@@ -1340,6 +1347,13 @@ reads `n/a cached`, and an API call whose window was not stamped reads `n/a` for
 seconds, exactly as the session-wide rate refuses to print a fabricated `0.0%`.
 Compaction markers are never elided, and the elided span carries its own totals so
 the rows still add back up to the header.
+
+The `off-loop` block is the calls this CLI made that were **not** conversation turns
+— today just compaction's own summarization call. They are billed and shown, but kept
+out of the trace above on purpose: each one is a fresh prefix that reads ~0% cached,
+so averaging it in would manufacture exactly the cliff the trace exists to detect.
+`[+1 off-loop]` on the header is what stops the smaller `across 14` reading as the
+whole story.
 
 Note that **one API call is not one turn**: `usage.turns` counts the times the CLI
 made you wait (one whole `code` run, one REPL turn), while a single turn that
@@ -1356,8 +1370,21 @@ jq '.usage.context_events' ~/.config/venice/sessions/<id>.json
 
 Rows are capped at the first 50 plus the most recent 200, so a long session keeps
 both its cold-start evidence and its current state; each row carries its `n`, so a
-jump in the sequence is itself the drop marker. Compaction's own summarization call
-is not yet metered, so the event row deliberately carries no cost.
+jump in the sequence is itself the drop marker.
+
+Compaction's own summarization call **is** metered, into a separate `usage.buckets`
+partition rather than into the rows above — it is a fresh prefix, so it reads ~0%
+cached every time and would fabricate a cache cliff if it were averaged in with the
+conversation. The event row carries what that one compaction cost; the bucket carries
+the running total. `usage.api_calls_total` therefore counts **main-loop** calls only,
+and the `calls` header names the difference (`[+2 off-loop]`).
+
+```bash
+# what has compaction cost this session?
+jq '.usage.buckets.compaction' ~/.config/venice/sessions/<id>.json
+# the whole bill, main loop + off-loop
+jq '.usage.billed_total' ~/.config/venice/sessions/<id>.json
+```
 
 **Tools** (path-sandboxed to the project root; mutating tools confirm unless `--auto`):
 
