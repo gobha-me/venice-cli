@@ -28,7 +28,7 @@ from tests.test_chat import (
     _args,
 )
 
-from venice.commands import _repl  # noqa: E402
+from venice.commands import _compact, _repl  # noqa: E402
 
 _EMPTY_CFG = {"version": 1, "mcpServers": {}, "defaults": {}}
 
@@ -670,6 +670,33 @@ class TestRepl(unittest.TestCase):
                 out, r"\n    -- compacted \(manual\) after #0: 12 -> \d+ msgs")
             # No budget in play, so the estimate must not claim to be measured.
             self.assertNotIn("measured before", out)
+
+    def test_slash_compact_clears_the_stale_observed_count(self):
+        # #116: `/compact` used to hand-copy the budget reset that `maybe_compact` also
+        # hand-copied. `compact_messages` owns it now, and nothing pinned this path
+        # before -- a reset that stayed behind in only one of the two files would leave
+        # `Budget.over` reading a count larger than the history it now describes, so the
+        # very next turn compacts again. Sawtooth, forever.
+        held = []
+        real = _compact.budget_from_args
+
+        def _capture(args):
+            b = real(args) or _compact.Budget(threshold_tokens=10**9, keep_turns=2)
+            b.last_prompt_tokens = 88110
+            held.append(b)
+            return b
+
+        with tempfile.TemporaryDirectory() as d:
+            resume = self._resume_history(d, pairs=6)
+            with mock.patch.object(_compact, "budget_from_args", _capture):
+                rc, fake, calls = _run_repl(
+                    _args(interactive=True, resume=resume),
+                    [FakeToolCompletion("we discussed u0..u5")],
+                    ["/compact 2", "/exit"], stderr=io.StringIO(),
+                )
+            self.assertEqual(rc, 0)
+            self.assertEqual(len(calls), 1)  # the compaction actually ran
+            self.assertIsNone(held[0].last_prompt_tokens)
 
     def test_slash_usage_before_any_turn(self):
         err = io.StringIO()

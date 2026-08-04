@@ -366,9 +366,11 @@ class TestCompactionEvents(unittest.TestCase):
         self.assertNotIn("cost", led.events[0])
 
     def test_observed_before_is_the_pre_reset_budget_value(self):
-        # THE ordering guard. `maybe_compact` clears `last_prompt_tokens` right after
-        # `compact_messages` returns; recording after that reset would silently null
-        # every automatic event, and the estimate would be the only number left.
+        # THE ordering guard, seen from the automatic gate. `compact_messages` clears
+        # `last_prompt_tokens` on its way out (#116); recording after that reset would
+        # silently null every automatic event, leaving the estimate as the only number.
+        # `TestBudgetReset.test_the_event_is_recorded_before_the_reset` is the direct
+        # twin -- this one additionally pins that the reset survives the gate wrapper.
         msgs = _history(6)
         fake, _calls = _fake_oai("summary")
         led = _Rec()
@@ -397,6 +399,78 @@ class TestCompactionEvents(unittest.TestCase):
         b = _compact.Budget(threshold_tokens=10_000_000, keep_turns=2)
         self.assertFalse(_compact.maybe_compact(fake, "m", msgs, b, {}, ledger=led))
         self.assertEqual(led.events, [])
+
+
+class TestBudgetReset(unittest.TestCase):
+    """#116: `compact_messages` owns the post-compaction budget reset.
+
+    It used to be hand-copied into `maybe_compact` and into `/compact`, so nothing
+    forced the two to agree and a third compaction site would have inherited the event
+    recording for free while silently missing the reset.
+    """
+
+    def _budget(self, observed=88110):
+        b = _compact.Budget(threshold_tokens=1, keep_turns=2)
+        b.last_prompt_tokens = observed
+        return b
+
+    def test_compact_messages_clears_the_stale_observed_count(self):
+        # Called DIRECTLY, not through `maybe_compact` -- that is the whole point of
+        # the move, and it is the `/compact` path.
+        msgs = _history(6)
+        fake, _calls = _fake_oai("summary")
+        b = self._budget()
+        self.assertTrue(_compact.compact_messages(
+            fake, "m", msgs, keep_turns=2, budget=b))
+        self.assertIsNone(b.last_prompt_tokens)
+
+    def test_the_reset_happens_without_a_ledger(self):
+        # The reset must not be nested inside the `if ledger is not None` block that
+        # records the event: a `/compact` in a session with a budget and no ledger
+        # still has a stale count to clear.
+        msgs = _history(6)
+        fake, _calls = _fake_oai("summary")
+        b = self._budget()
+        self.assertTrue(_compact.compact_messages(
+            fake, "m", msgs, keep_turns=2, ledger=None, budget=b))
+        self.assertIsNone(b.last_prompt_tokens)
+
+    def test_a_failed_compaction_leaves_the_observed_count_alone(self):
+        # History is untouched on failure, so the observed count still describes it.
+        for kw in ({"fail": True}, {"summary": "   "}):
+            with self.subTest(**kw):
+                msgs = _history(6)
+                fake, _calls = _fake_oai(**kw)
+                b = self._budget()
+                self.assertFalse(_compact.compact_messages(
+                    fake, "m", msgs, keep_turns=2, budget=b))
+                self.assertEqual(b.last_prompt_tokens, 88110)
+
+    def test_nothing_to_compact_leaves_the_observed_count_alone(self):
+        msgs = _history(3)
+        fake, _calls = _fake_oai()
+        b = self._budget()
+        self.assertFalse(_compact.compact_messages(
+            fake, "m", msgs, keep_turns=5, budget=b))
+        self.assertEqual(b.last_prompt_tokens, 88110)
+
+    def test_the_event_is_recorded_before_the_reset(self):
+        # The direct-call twin of `test_observed_before_is_the_pre_reset_budget_value`:
+        # that one routes through `maybe_compact`, which no longer contains the reset,
+        # so it can no longer see a reset hoisted above the recording.
+        msgs = _history(6)
+        fake, _calls = _fake_oai("summary")
+        led = _Rec()
+        b = self._budget()
+        self.assertTrue(_compact.compact_messages(
+            fake, "m", msgs, keep_turns=2, ledger=led, budget=b))
+        self.assertEqual(led.events[0]["observed_tokens_before"], 88110)
+        self.assertIsNone(b.last_prompt_tokens)
+
+    def test_no_budget_is_not_an_error(self):
+        msgs = _history(6)
+        fake, _calls = _fake_oai("summary")
+        self.assertTrue(_compact.compact_messages(fake, "m", msgs, keep_turns=2))
 
 
 # Stays at the BOTTOM. It used to sit above `TestCompactionEvents`, which meant a direct

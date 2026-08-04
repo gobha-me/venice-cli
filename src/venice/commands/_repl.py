@@ -546,8 +546,9 @@ def _dispatch_slash(line, messages, state, args, models, oai=None, gen_kwargs=No
             # `trigger` is what lets the operator tell the two apart afterwards.
             ledger=state.get("ledger"), budget=state.get("budget"), trigger="manual",
         ):
-            if state.get("budget") is not None:
-                state["budget"].last_prompt_tokens = None
+            # #116: no budget reset here any more -- `compact_messages` owns it, so this
+            # site cannot forget it and cannot disagree with `maybe_compact` about when
+            # it happens. Only the wording below is this site's to keep.
             print(
                 f"(compacted: {before} -> {len(messages)} messages; "
                 f"last {keep} turn(s) verbatim)",
