@@ -337,7 +337,7 @@ class CostLedger:
     _CALLS_TAIL = 200
 
     def __init__(self, max_spend: Optional[float] = None,
-                 max_tokens: Optional[int] = None):
+                 max_tokens: Optional[int] = None, *, mirror=None):
         # A non-positive cap means "uncapped" (mirrors --max-tool-calls 0).
         cap = float(max_spend) if max_spend is not None else None
         self.max_spend = cap if (cap is not None and cap > 0) else None
@@ -422,9 +422,9 @@ class CostLedger:
         # WHICH SPEND PARTITION a call belongs to. They are not the same question and
         # must not share a name.
         self.context_events: List[dict] = []
-        # #101: off-loop spend, partitioned by bucket name ("compaction" today;
-        # "subagent" when the rails slice lands). name -> {calls, cost, prompt_tokens,
-        # completion_tokens, seconds, unpriced}.
+        # #101: off-loop spend, partitioned by bucket name -- "compaction", plus one per
+        # subagent rail as of #117 ("scout"/"spawn"/"review"/"web_search"). name ->
+        # {calls, cost, prompt_tokens, completion_tokens, seconds, unpriced, unreported}.
         #
         # A SEPARATE partition rather than more weight on the counters above, because
         # merging would corrupt the one signal the main-loop numbers exist to carry:
@@ -436,10 +436,24 @@ class CostLedger:
         # "cache buckets" (the `cache_read`/`cache_write` split above) is an unrelated
         # use of the word; it is never a `bucket=` argument and never a key in here.
         self.buckets: Dict[str, dict] = {}
-        # No lock here, unlike `tools` above, and the absence is deliberate rather than an
-        # oversight: `record_tool` is called from pool workers, but `record()` only ever
-        # runs on the thread that owns the ledger (parallel dispatch touches `on_tool`
-        # alone, and every subagent gets its own fresh ledger).
+        # #117: this DID go unlocked, on the reasoning that `record()` only ever ran on
+        # the thread owning the ledger. The rails slice ends that: a mirrored child
+        # (below) writes its parent's row from whatever pool worker ran the subagent, and
+        # under `--parallel` up to `_MAX_PARALLEL` scouts/spawns do it at once. Same
+        # read-modify-write shape as `_tools_lock`, same GIL caveat -- see that comment.
+        # Held around the row mutation ONLY (never the cost arithmetic), and never nested
+        # with `_tools_lock`, so the two cannot deadlock.
+        self._buckets_lock = threading.Lock()
+        # #117: `(parent_ledger, bucket_name)`, or None for every main-loop ledger. Set on
+        # a SUBAGENT ledger so each of its API calls is also banked into the parent's
+        # off-loop bucket -- see `record`. Bound here rather than passed per call because
+        # `record()` is the one chokepoint every rail's usage already flows through, so no
+        # call site *can* forget it (the two rails that call the API outside `run_loop`,
+        # `_review._retry_for_verdict` and `run_web_search`, are covered for free).
+        if mirror is not None and mirror[0] is self:
+            # Would double-count the ledger into its own bucket on every record.
+            raise ValueError("CostLedger: a ledger cannot mirror into itself")
+        self._mirror = mirror
         self._in = None          # per-token input rate (USD)
         self._out = None         # per-token output rate (USD)
         self._cache_in = None    # per-token cache-read rate (USD); None -> use _in
@@ -745,17 +759,63 @@ class CostLedger:
             **row,
         ))
 
+    def record_bucket(self, name: str, *, cost: float = 0.0,
+                      prompt_tokens: int = 0, completion_tokens: int = 0,
+                      seconds=None, unpriced: bool = False,
+                      unreported: bool = False) -> None:
+        """Accumulate one off-loop API call into the `name` bucket (#101/#117).
+
+        A PURE accumulator, like `record_turn`/`record_tool`: it takes numbers that have
+        already been costed and never reads a `usage` block, so `record()` below remains
+        the one and only place any API usage is parsed. That split is what lets a
+        mirrored child (#117) hand its parent an already-priced row without the parent
+        re-reading -- and re-mis-pricing, at the wrong model's rate -- the same usage.
+
+        The ONE live writer of a bucket row: `record()`'s off-loop branch delegates here
+        rather than keeping a second copy of these seven lines (`restore()` is the other
+        writer, and `new_bucket_row` already exists because that duplication drifts).
+
+        Callers must not hold `_buckets_lock`; this takes it, and takes it around the
+        mutation only.
+        """
+        with self._buckets_lock:
+            row = self.buckets.setdefault(name, self.new_bucket_row())
+            row["calls"] += 1
+            # #98's rule, one partition over: a response with no usage block leaves the
+            # tokens and the cost UNKNOWN, not zero. The main loop can say so per-row
+            # (the trace stores null) and dodges it in aggregate by having a
+            # "(no tokens reported)" branch; a bucket has neither, so it needs its own
+            # sticky marker or `0 in  0 out  $0.0000` would read as a measurement.
+            if unreported:
+                row["unreported"] = True
+            row["cost"] += cost
+            row["prompt_tokens"] += _as_int(prompt_tokens)
+            row["completion_tokens"] += _as_int(completion_tokens)
+            # Rounded on the way in like `record_turn`'s; an unstamped window adds 0.
+            row["seconds"] = round(row["seconds"] + _as_float(seconds), 3)
+            # Sticky-OR, mirroring the top-level `unpriced` -- one uncosted call in the
+            # bucket taints the bucket's total, and a later priced one must not clear it.
+            row["unpriced"] = row["unpriced"] or unpriced
+
     def bucket_cost(self, name=None) -> float:
         """Off-loop spend (#101): one bucket's cost, or every bucket's when `name` is None."""
         if name is not None:
             return float(self.buckets.get(name, {}).get("cost", 0.0))
-        return sum(float(b.get("cost", 0.0)) for b in self.buckets.values())
+        # #117: snapshot under the lock. A mirrored child adds a NEW KEY on a pool
+        # worker, and iterating a dict while another thread inserts into it raises
+        # outright. Reads happen on the main thread while workers are joined today, so
+        # this is insurance rather than a live fix -- but it is two lines.
+        with self._buckets_lock:
+            rows = list(self.buckets.values())
+        return sum(float(b.get("cost", 0.0)) for b in rows)
 
     def bucket_calls(self, name=None) -> int:
         """Off-loop API calls (#101) -- deliberately NOT part of `api_calls_total`."""
         if name is not None:
             return int(self.buckets.get(name, {}).get("calls", 0))
-        return sum(int(b.get("calls", 0)) for b in self.buckets.values())
+        with self._buckets_lock:      # #117: see `bucket_cost`
+            rows = list(self.buckets.values())
+        return sum(int(b.get("calls", 0)) for b in rows)
 
     @staticmethod
     def new_bucket_row() -> dict:
@@ -865,7 +925,14 @@ class CostLedger:
         This stays the ONE place any API usage is read. `bucket=` is a parameter rather
         than a second method for that reason: a `record_offloop()` sibling would be a
         second read site to keep in agreement with this one, which is how the
-        bookkeeping #86/#92/#99 kept centralizing gets scattered again.
+        bookkeeping #86/#92/#99 kept centralizing gets scattered again. `record_bucket`
+        is not a counter-example -- it takes already-costed numbers and never parses a
+        usage block, which is exactly why the #117 mirror below can route through it.
+
+        #117: if this ledger was built with a `mirror`, the call is ALSO banked into the
+        parent's bucket, at the tail. Everything above is unchanged by that -- a mirrored
+        child keeps its own full main-loop accounting, which is what `over_tokens()` and
+        so `--subagent-max-tokens` read.
         """
         # FIRST, ahead of everything below: `record(None)` dumping `usage-raw: null`
         # is exactly the diagnostic that was missing -- it separates "the response had
@@ -944,23 +1011,11 @@ class CostLedger:
             # is `api_calls_total - head - tail`, so counting a call that never appended
             # a row would make `/usage` report phantom dropped rows; and the trace is a
             # PREFIX-cache diagnostic that a fresh-prefix call would only pollute.
-            row = self.buckets.setdefault(bucket, self.new_bucket_row())
-            row["calls"] += 1
-            # #98's rule, one partition over: a response with no usage block leaves the
-            # tokens and the cost UNKNOWN, not zero. The main loop can say so per-row
-            # (the trace stores null) and dodges it in aggregate by having a
-            # "(no tokens reported)" branch; a bucket has neither, so it needs its own
-            # sticky marker or `0 in  0 out  $0.0000` would read as a measurement.
-            if usage is None:
-                row["unreported"] = True
-            row["cost"] += cost
-            row["prompt_tokens"] += _as_int(pt)
-            row["completion_tokens"] += _as_int(ct)
-            # Rounded on the way in like `record_turn`'s; an unstamped window adds 0.
-            row["seconds"] = round(row["seconds"] + _as_float(seconds), 3)
-            # Sticky-OR, mirroring the top-level `unpriced` -- one uncosted call in the
-            # bucket taints the bucket's total, and a later priced one must not clear it.
-            row["unpriced"] = row["unpriced"] or unpriced_turn
+            self.record_bucket(
+                bucket, cost=cost, prompt_tokens=_as_int(pt),
+                completion_tokens=_as_int(ct), seconds=seconds,
+                unpriced=unpriced_turn, unreported=usage is None,
+            )
         else:
             self._append_call({
                 "prompt_tokens": pt,
@@ -975,6 +1030,34 @@ class CostLedger:
                 # None stays None -- an unstamped window is unknown, not instant.
                 "seconds": None if seconds is None else round(_as_float(seconds), 3),
             })
+        # #117: a SUBAGENT ledger also banks this call into its parent's off-loop bucket.
+        # Placed at the one chokepoint every rail's usage already flows through, so the
+        # two rails that call the API outside `run_loop` (`_review._retry_for_verdict`,
+        # `run_web_search`) are covered without either site knowing a parent exists.
+        #
+        # `record_bucket`, NOT `parent.record(usage, bucket=...)`, and all three reasons
+        # are load-bearing:
+        #   - PRICING. `cost` above was computed at THIS ledger's rate. `--review-model`
+        #     and `--web-search-model` are deliberately a different model from the
+        #     parent's, so re-costing the same usage over there would quietly bill the
+        #     reviewer's tokens at the author's rate -- a fabricated number, which is the
+        #     one thing this ledger refuses to print.
+        #   - ONE RAW DUMP. `_dump_raw_usage` fires at the top of this method; routing
+        #     through `record()` again would emit a second `usage-raw:` line for one API
+        #     call, interleaved with other workers' lines under `--parallel`.
+        #   - NO RECURSION. `record_bucket` is a leaf, so a mirror does not propagate to
+        #     a grandparent. That is also the correct arithmetic: a grandparent bucket
+        #     would double-count spend a parent bucket has already banked.
+        # `usage is None` (not `pt is None`) is the unreported test, evaluated after
+        # `_usage_dict` above, so an SDK object that normalized to nothing counts as
+        # unreported rather than as a measured zero.
+        if self._mirror is not None:
+            parent, name = self._mirror
+            parent.record_bucket(
+                name, cost=cost, prompt_tokens=_as_int(pt),
+                completion_tokens=_as_int(ct), seconds=seconds,
+                unpriced=unpriced_turn, unreported=usage is None,
+            )
         return cost
 
     def over(self) -> bool:
@@ -1055,12 +1138,17 @@ class CostLedger:
         on the one surface that cannot afford to. The `[incl. ...]` clause names the
         off-loop share, gated on there being one.
 
-        The three sites that can receive a SUBAGENT ledger are byte-identical today,
-        and by structure rather than luck: `run_scout`/`run_spawn`/`run_review` never
-        pass a `budget`, `maybe_compact` short-circuits without one, so a subagent
-        ledger can never acquire a bucket. **The rails slice of #101 deletes exactly
-        that invariant** -- when subagent spend starts landing in a bucket, re-walk
-        these six call sites.
+        The three sites that can receive a SUBAGENT ledger are byte-identical, and by
+        structure rather than luck: `run_scout`/`run_spawn`/`run_review` never pass a
+        `budget`, `maybe_compact` short-circuits without one, so a subagent ledger can
+        never acquire a bucket.
+
+        #117 was expected to delete that invariant and did NOT -- worth stating, because
+        the issue predicted the opposite and the next reader will assume it landed. A
+        mirrored subagent ledger writes its parent's `buckets`, never its own, so these
+        messages still render `cost: $X (tokens ...)` with no clause. What DID change is
+        that the parent now has more bucket NAMES, which is why the clause below is
+        bounded instead of joining an unbounded list.
         """
         # Built once so the clause reaches BOTH branches below: the command-level tests
         # all render the unpriced one (the catalog fake carries no `pricing`), which is
@@ -1078,11 +1166,12 @@ class CostLedger:
         billed = self.billed_total()
         unpriced = self.any_unpriced()
         off = self.bucket_cost()
-        # #101: `billed`, not `total`, in the GUARD too. Today they agree whenever this
-        # branch is reachable (one model, one set of rates, so unpriced main implies
-        # unpriced bucket). The rails slice breaks that -- a differently-priced subagent
-        # would leave `total == 0.0` next to a real bucket cost, and this branch would
-        # print "(unpriced — model rate unknown)" over the top of it.
+        # #101: `billed`, not `total`, in the GUARD too, and as of #117 that is no longer
+        # a precaution. The rails made mixed pricing REACHABLE: `--review-model` can be a
+        # priced model while the author's is not, leaving `total == 0.0` beside a real
+        # `review` bucket cost. Guarding on `total` would print
+        # "(unpriced — model rate unknown)" straight over the top of money we did measure.
+        # `any_unpriced()` still flags the half we could not price, below.
         if unpriced and billed == 0.0:
             return f"cost: (unpriced — model rate unknown) {toks}"
         s = f"cost: ${billed:.4f}"
@@ -1101,10 +1190,18 @@ class CostLedger:
         # non-zero but formats as `$0.0000`, and `[incl. $0.0000 compaction]` names a
         # share of nothing -- #98's fabricated zero wearing a clause.
         if off > 0 and f"{off:.4f}" != "0.0000":
-            names = "/".join(sorted(
+            names = sorted(
                 k for k, v in self.buckets.items() if _as_float(v.get("cost")) > 0
-            ))
-            s += f" [incl. ${off:.4f} {names}]"
+            )
+            # #117: BOUNDED. One or two names are the useful case and read well; five
+            # (`compaction/review/scout/spawn/web_search`, reachable with
+            # `--planner --review --web-search`) is 44 characters of clause on a footer
+            # that is also two stop-reason messages, and it grows again with every future
+            # bucket. Past two, defer to `/usage`, which breaks the same partition down
+            # per row -- and reuse ITS word for the whole partition rather than coining a
+            # third, so `[incl. $X off-loop]` and the `off-loop` block name one thing.
+            label = "/".join(names) if len(names) <= 2 else "off-loop"
+            s += f" [incl. ${off:.4f} {label}]"
         return s
 
     def usage_report(self) -> str:
@@ -1416,8 +1513,15 @@ class CostLedger:
 
         These calls are deliberately absent from the `calls` trace above, so without
         this block the money would be in `to_dict()` and on no human surface at all.
-        Sorted by NAME, like `to_dict`: one row today, two after the rails slice, so
-        the stable order matters more than a by-cost ranking would.
+        Sorted by NAME, like `to_dict`: `compaction` plus one row per subagent rail as
+        of #117, so the stable order matters more than a by-cost ranking would.
+
+        The seconds here are a SUBSET of `elapsed_seconds`, never a partition of it, and
+        as of #117 they are not even disjoint from `self.tools`: a rail's API time sits
+        inside the `venice_scout`/`venice_spawn`/`venice_review` tool window that
+        contains it. Under `--parallel` several rails' windows also overlap each other,
+        so the sum can exceed wall outright -- labelled below rather than hidden, exactly
+        as `_tool_lines` labels the same state for tools.
         """
         if not self.buckets:
             return []
@@ -1428,8 +1532,14 @@ class CostLedger:
         # explicitly rather than by luck -- "off-loop" happens to be 8 characters, and
         # renaming it would otherwise slide the duration out of the shared grid.
         dur = "n/a" if (not secs and self.bucket_calls()) else format_duration(secs)
-        lines = [f"  {'off-loop':<8}{dur:>10}  "
-                 f"across {self.bucket_calls()} API call(s)  [not in the trace above]"]
+        head = (f"  {'off-loop':<8}{dur:>10}  "
+                f"across {self.bucket_calls()} API call(s)  [not in the trace above]")
+        # #117: same predicate and same wording as `_tool_lines`/`tools_fragment`. One
+        # state must not grow two vocabularies across two blocks of one report -- an
+        # operator reading `/usage` top to bottom would take them for two states.
+        if self.turns and secs > self.elapsed_seconds + 0.001:
+            head += "  [concurrent -- exceeds wall]"
+        lines = [head]
         for name in sorted(self.buckets):
             row = self.buckets[name]
             pt = _as_int(row.get("prompt_tokens"))
@@ -1513,9 +1623,15 @@ def _pricing_for(models, model_id):
     return None
 
 
-def _build_ledger(cap, models, model_id) -> CostLedger:
-    """A CostLedger bound to `model_id`'s catalog pricing (cap may be None)."""
-    ledger = CostLedger(max_spend=cap)
+def _build_ledger(cap, models, model_id, *, max_tokens=None,
+                  mirror=None) -> CostLedger:
+    """A CostLedger bound to `model_id`'s catalog pricing (cap may be None).
+
+    The ONLY caller of `bind_pricing`, deliberately: pricing a ledger is exactly
+    "look this model up in the catalog", and a second site would be a second place
+    to forget the lookup (which is how every rail ended up unpriced before #117).
+    """
+    ledger = CostLedger(max_spend=cap, max_tokens=max_tokens, mirror=mirror)
     pricing = _pricing_for(models, model_id)
     if pricing is not None:
         ledger.bind_pricing(pricing)
@@ -1547,6 +1663,30 @@ def usage_ledger(args, models, model_id) -> CostLedger:
     ledger meters usage without gating (`over()` is None-safe).
     """
     return _build_ledger(getattr(args, "session_max_spend", None), models, model_id)
+
+
+def subagent_ledger(models, model_id, *, max_tokens=None,
+                    mirror=None) -> CostLedger:
+    """The per-invoke ledger for one subagent rail (#117).
+
+    ONE constructor for all four rails (scout/spawn/review/web search), so a fifth
+    gets both halves for free and cannot ship with either missing:
+
+    - PRICED against `model_id`'s own catalog entry. The rails used to build a bare
+      `CostLedger(max_tokens=...)` on the reasoning that token counting needs no
+      catalog -- true while the tokens went nowhere, false the moment they are billed
+      to a parent. `--review-model` and `--web-search-model` are deliberately NOT the
+      parent's model, so the rate has to be looked up per rail, here.
+    - MIRRORED into the parent's off-loop bucket when a parent exists (`mirror`), and
+      standalone when it does not -- `venice review` has no parent ledger and must
+      keep working, so `mirror=None` is a supported state rather than an oversight.
+
+    `max_tokens` is #52's per-worker ceiling and still meters this ledger's OWN
+    main-loop counters, so `--subagent-max-tokens` is unchanged by the mirror.
+    Uncapped in USD (`cap=None`): the parent's `--session-max-spend` is the money gate,
+    and it now sees this spend through the bucket.
+    """
+    return _build_ledger(None, models, model_id, max_tokens=max_tokens, mirror=mirror)
 
 
 def dispatch_map(tools: List[Tool]) -> Dict[str, Tool]:
@@ -1597,7 +1737,7 @@ def _web_citations(venice_params) -> List[dict]:
 
 
 def run_web_search(oai, model: str, query: str, *, mode: str = "on",
-                   models=None) -> dict:
+                   models=None, mirror=None) -> dict:
     """Make ONE Venice web-search completion and return its answer + citations (#77).
 
     Rides `/chat/completions` with `venice_parameters.enable_web_search` (`mode`: "on"
@@ -1628,11 +1768,21 @@ def run_web_search(oai, model: str, query: str, *, mode: str = "on",
     msg = getattr(choices[0], "message", None) if choices else None
     answer = (getattr(msg, "content", None) or "").strip() if msg is not None else ""
     citations = _web_citations(getattr(resp, "venice_parameters", None))
-    led = _build_ledger(None, models, model)
+    # #117: still this call's OWN ledger -- priced against `model`, which is the resolved
+    # web-search model and NOT necessarily the caller's. `mirror` (when the rail was built
+    # with a parent) also banks the call into the parent's `web_search` bucket, which is
+    # what finally puts these tokens on the books: pre-#117 only `cost_estimate_usd`
+    # survived and every token count died here.
+    led = subagent_ledger(models, model, mirror=mirror)
     cost = led.record(getattr(resp, "usage", None), seconds=time.monotonic() - _t0)
     # Best-effort: report None (unknown) -- not $0.00 -- when we can't estimate, i.e. the
     # model price is unknown OR the response carried no usage tokens. A billed feature that
     # reports 0.0 reads as "free", which is worse than an honest "unknown".
+    #
+    # NOT made redundant by the bucket above, and the two must both stay: this field is
+    # MODEL-visible handoff provenance (the agent reads it to decide whether to search
+    # again), the bucket is OPERATOR accounting. Deleting either to "de-duplicate" loses
+    # a different audience.
     known = not led.unpriced and (led.prompt_tokens or led.completion_tokens)
     return {
         "status": "ok",

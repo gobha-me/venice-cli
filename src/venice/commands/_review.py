@@ -608,7 +608,8 @@ def run_cycle(oai, model: str, collected: dict, base_kwargs: dict, *,
               root: str, client=None, rounds: int = REVIEW_DEFAULT_ROUNDS,
               max_tool_calls: int = REVIEW_MAX_TOOL_CALLS,
               max_tokens: Optional[int] = None, focus: Optional[str] = None,
-              include_search: bool = False) -> dict:
+              include_search: bool = False,
+              models=None, parent_ledger=None) -> dict:
     """Run the until-dry review loop over an already-collected diff.
 
     Rounds are re-passes over the SAME diff: each one is told what earlier passes
@@ -619,12 +620,27 @@ def run_cycle(oai, model: str, collected: dict, base_kwargs: dict, *,
 
     ONE ledger spans the whole cycle, so `--subagent-max-tokens` bounds the review
     rather than each round of it; a cycle that crosses the ceiling stops looping
-    instead of buying another round it cannot afford.
+    instead of buying another round it cannot afford. (If rounds ever get their own
+    per-round ledgers, each needs its own mirror -- see below.)
+
+    `models`/`parent_ledger` (#117): the ledger is PRICED against `model` -- the
+    REVIEWER's model, which `--review-model` makes deliberately different from the
+    author's, so pricing it anywhere but here would bill the reviewer's tokens at the
+    author's rate -- and mirrored into the parent's `review` bucket. Both default to
+    None because `venice review` (the standalone CLI) has no parent ledger and must
+    keep working unchanged; there the cycle simply meters itself as before.
+
+    The mirror lives on the ledger rather than at the call sites, which matters here
+    more than on any other rail: this cycle makes an API call OUTSIDE `run_loop` (the
+    verdict re-prompt), and a `run_loop`-level callback would have silently missed it.
     """
     rounds = max(1, min(int(rounds or 1), REVIEW_HARD_ROUNDS))
     calls = max(1, min(int(max_tool_calls or REVIEW_MAX_TOOL_CALLS), REVIEW_HARD_CAP))
     inner = _code.read_only_tools(root, client, include_search=include_search)
-    ledger = _agent.CostLedger(max_tokens=max_tokens)
+    ledger = _agent.subagent_ledger(
+        models, model, max_tokens=max_tokens,
+        mirror=(parent_ledger, "review") if parent_ledger is not None else None,
+    )
 
     findings: List[dict] = []
     outside: List[dict] = []
@@ -814,7 +830,8 @@ def review_tool(oai, model: str, root: str, client, base_kwargs, *,
                 max_invocations: int = REVIEW_MAX_INVOCATIONS,
                 max_tokens: Optional[int] = None,
                 exec_timeout: int = DEFAULT_EXEC_TIMEOUT,
-                decorrelated: bool = True) -> _agent.Tool:
+                decorrelated: bool = True,
+                models=None, parent_ledger=None) -> _agent.Tool:
     """Build the `venice_review` Tool: a cold-context review of the session's own diff.
 
     `paid=False` mirrors `venice_scout`: a bounded nested model call, not a media
@@ -869,6 +886,7 @@ def review_tool(oai, model: str, root: str, client, base_kwargs, *,
                 oai, model, collected, base_kwargs, root=root, client=client,
                 rounds=rounds, max_tool_calls=calls, max_tokens=max_tokens,
                 focus=args.get("focus") or None, include_search=include_search,
+                models=models, parent_ledger=parent_ledger,  # #117
             )
         except Exception as e:  # incl. openai.OpenAIError from the nested loop
             return _err(f"review failed: {e}")

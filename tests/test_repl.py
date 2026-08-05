@@ -28,7 +28,7 @@ from tests.test_chat import (
     _args,
 )
 
-from venice.commands import _compact, _repl  # noqa: E402
+from venice.commands import _agent, _compact, _repl  # noqa: E402
 
 _EMPTY_CFG = {"version": 1, "mcpServers": {}, "defaults": {}}
 
@@ -1486,6 +1486,66 @@ class TestReplMultiline(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(len(calls), 0)
         self.assertIn("editor", err.getvalue().lower())
+
+
+class TestReplLedgerAdoption(unittest.TestCase):
+    """#117: `_repl.run(ledger=...)` ADOPTS the caller's ledger by identity.
+
+    `venice code` must hand this in: its subagent rails were bound to that object at
+    tool-factory time, long before the REPL starts. If `run` built its own instead,
+    every rail would mirror into an orphan -- no error, no crash, just money silently
+    missing from `/usage` and the session file.
+
+    Driving the REAL `_repl.run` is the point. The `code.py` side is covered by an
+    `assertIs` test that mocks `_repl.run` away, which by construction cannot see what
+    happens INSIDE it -- a mutation making this line build a fresh ledger survived the
+    entire suite until this class existed.
+    """
+
+    def _drive(self, ledger):
+        fake, calls = _fake_openai_seq([[FakeChunk(
+            "hi", usage={"prompt_tokens": 40, "completion_tokens": 2,
+                         "total_tokens": 42})]])
+        import openai as openai_mod
+        with contextlib.ExitStack() as st:
+            sess_dir = st.enter_context(tempfile.TemporaryDirectory())
+            st.enter_context(mock.patch.dict(
+                os.environ, {"VENICE_API_KEY": "fake",
+                             "VENICE_SESSIONS_DIR": sess_dir}))
+            st.enter_context(mock.patch("venice.userconfig.load_config",
+                                        lambda *a, **k: _EMPTY_CFG))
+            st.enter_context(mock.patch("builtins.input", side_effect=["/exit"]))
+            st.enter_context(mock.patch.object(sys, "stdin", io.StringIO("")))
+            st.enter_context(mock.patch.object(sys, "stdout", io.StringIO()))
+            st.enter_context(mock.patch.object(sys, "stderr", io.StringIO()))
+            rc = _repl.run(_args(interactive=True), fake, openai_mod, None,
+                           [{"id": "llama-3.3-70b"}], "llama-3.3-70b",
+                           initial="hello", ledger=ledger)
+        return rc, calls
+
+    def test_an_injected_ledger_is_the_one_that_meters_the_turn(self):
+        L = _agent.CostLedger()
+        rc, calls = self._drive(L)
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(L.prompt_tokens, 40)      # the injected object, not a fresh one
+        self.assertEqual(L.api_calls_total, 1)
+
+    def test_rail_spend_banked_before_the_repl_starts_is_still_reported(self):
+        # The real sequence: `code.py` builds the ledger, the rails bind to it, and
+        # only then does the REPL open. Pre-existing bucket state must survive.
+        L = _agent.CostLedger()
+        L.record_bucket("scout", cost=0.01, prompt_tokens=1234)
+        rc, _ = self._drive(L)
+        self.assertEqual(rc, 0)
+        self.assertEqual(L.buckets["scout"]["prompt_tokens"], 1234)
+        self.assertAlmostEqual(L.billed_total(), 0.01)
+
+    def test_no_injected_ledger_still_builds_one(self):
+        # `venice chat` passes nothing and must keep working.
+        rc, calls = self._drive(None)
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 1)
 
 
 if __name__ == "__main__":

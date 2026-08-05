@@ -608,7 +608,7 @@ def _dispatch_slash(line, messages, state, args, models, oai=None, gen_kwargs=No
 def run(args, oai, openai, client, models, model, initial=None, *,
         tools_session=None, gen_kwargs=None, label="venice chat",
         max_tool_calls=8, session=None, ephemeral=False, root=None,
-        system_reseed=False) -> int:
+        system_reseed=False, ledger=None) -> int:
     """Drive the interactive REPL until `/exit`, `/quit`, or EOF (Ctrl-D).
 
     `initial` is an already-resolved first message (e.g. `venice chat -i "hi"`);
@@ -695,7 +695,14 @@ def run(args, oai, openai, client, models, model, initial=None, *,
         state["budget"] = _compact.budget_from_args(args)
         # Usage + spend ledger: always-on in the REPL so `/usage` and `/cost`
         # work in any session (#75); `--session-max-spend` (#66) only adds a cap.
-        state["ledger"] = _agent.usage_ledger(args, models, model)
+        #
+        # #117: ADOPTED when the caller already built one (`venice code` must, because
+        # its subagent rails mirror into it at factory time, before this runs). Adopted
+        # by identity, not copied: `_save_session` persists `state["ledger"].to_dict()`,
+        # so a copy here would write the wrong object's totals to the session file.
+        # `venice chat` passes nothing and keeps building its own.
+        state["ledger"] = (ledger if ledger is not None
+                           else _agent.usage_ledger(args, models, model))
         # Carry usage across resume (#47/#75): seed the fresh, currently-priced
         # ledger with the saved totals so `/usage` and `/cost` are cumulative.
         if session is not None and session.usage:

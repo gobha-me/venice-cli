@@ -494,11 +494,15 @@ def _finish(ledger, t0, human, *, json_out: bool) -> None:
     as "code: aborted" and the acceptance report, not a redraw surface like
     `_Spinner`, so gating it would only hide the number from logs and pipelines.
 
-    Idempotent via `ledger.turns`: a one-shot ledger is built fresh in `_run_oneshot`
-    and never `restore()`d, so a non-zero turn count means "already stamped". That
-    coupling is load-bearing -- if a future `--resume` ever seeds this ledger from a
-    prior session's usage, this guard silently stops stamping and needs replacing
-    with an explicit flag.
+    Idempotent via `ledger.turns`: the one-shot ledger is built fresh (in `_run` as of
+    #117, and handed down) and never `restore()`d on this path, so a non-zero turn count
+    means "already stamped". That coupling is load-bearing -- if a future `--resume` ever
+    seeds this ledger from a prior session's usage, this guard silently stops stamping
+    and needs replacing with an explicit flag. #117's hoist deliberately did NOT add a
+    restore here; only the REPL restores, on its own path.
+
+    Subagent rails do not disturb this: a mirrored child banks into `buckets` via
+    `record_bucket`, which never touches `turns`.
     """
     if ledger is None or ledger.turns:
         return
@@ -714,6 +718,18 @@ def _run(args) -> int:
     # #52 planner slice: the session's shared dispatch record list. scout/spawn append
     # every launched dispatch to it; venice_merge (and the --json envelope) roll it up.
     dispatches = [] if planner else None
+    # #117: the session ledger, HOISTED above the factory block below because every rail
+    # needs it at factory time -- a subagent mirrors its usage into this object's off-loop
+    # buckets, and the tools are built long before `_run_oneshot`/`_repl.run` would have
+    # constructed one. It reads only `args.session_max_spend`, `models` and `model`, all
+    # resolved well above here, so the hoist inverts no dependency.
+    #
+    # There must be exactly ONE of these per run: both entry points below ADOPT this
+    # object rather than building their own, and a second ledger would silently orphan
+    # every rail's spend with no error and no failing assertion. `_finish`'s
+    # already-stamped guard also assumes this ledger reaches `_run_oneshot` un-restored
+    # (see its docstring) -- true here, since only the REPL restores, on its own path.
+    ledger = _agent.usage_ledger(args, models, model)
     # #77: opt-in web-discovery rail. Built once (root-independent) and shared between the
     # parent tool list and the scout's read-only inner set (a "docs scout"); workers never
     # get it (category "web" is in no spawn role). `models` is in scope from the guard above.
@@ -722,6 +738,7 @@ def _run(args) -> int:
         ws_tool = _code.web_search_tool(
             oai, model, models=models,
             search_model=getattr(args, "web_search_model", None),
+            parent_ledger=ledger,  # #117: bills the `web_search` bucket
         )
     # #52: per-subagent cumulative-token ceiling (None = uncapped); applies to BOTH the
     # read-only scout and the write/paid worker -- token burn is universal to both.
@@ -730,7 +747,8 @@ def _run(args) -> int:
         tools.append(_code.scout_tool(oai, model, root, client, gen_kwargs,
                                       include_search=True, web_tool=ws_tool,
                                       max_tokens=subagent_max_tokens,
-                                      dispatches=dispatches))
+                                      dispatches=dispatches,
+                                      models=models, parent_ledger=ledger))  # #117
     if bool(getattr(args, "spawn", None)):  # #52 slice 2: write-capable worker subagent
         # Passes the live `tools` list: the worker draws a role-scoped subset of these
         # (the agent category -- scout/spawn -- is filtered out, so no nested subagents).
@@ -738,7 +756,8 @@ def _run(args) -> int:
         tools.append(_code.spawn_tool(oai, model, gen_kwargs, tools,
                                       max_spend=getattr(args, "spawn_max_spend", None),
                                       max_tokens=subagent_max_tokens,
-                                      dispatches=dispatches))
+                                      dispatches=dispatches,
+                                      models=models, parent_ledger=ledger))  # #117
     if bool(getattr(args, "review", None)):  # #80 part 1a: cold-context reviewer rail
         # The reviewer's model is resolved ONCE here and never advertised in the tool
         # schema (mirroring web_search_tool), so the agent cannot escalate itself onto
@@ -758,6 +777,9 @@ def _run(args) -> int:
             max_tokens=subagent_max_tokens,
             exec_timeout=args.exec_timeout or _code.DEFAULT_EXEC_TIMEOUT,
             decorrelated=decorrelated,
+            # #117: `review_model`, not `model` -- the reviewer is deliberately a
+            # different (often costlier) model, and its bucket must be priced as such.
+            models=models, parent_ledger=ledger,
         ))
     if ws_tool is not None:  # #77: parent (planner included) gets web discovery directly
         tools.append(ws_tool)
@@ -783,15 +805,17 @@ def _run(args) -> int:
             label=PROFILE.label, max_tool_calls=PROFILE.default_max_tool_calls,
             session=session, ephemeral=bool(getattr(args, "ephemeral", None)),
             root=root, system_reseed=PROFILE.system_reseed,
+            ledger=ledger,  # #117: the rails already hold this one
         )
 
     return _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task,
                         models, dispatches=dispatches,
-                        ephemeral=bool(getattr(args, "ephemeral", None)))
+                        ephemeral=bool(getattr(args, "ephemeral", None)),
+                        ledger=ledger)  # #117
 
 
 def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task,
-                 models=None, *, dispatches=None, ephemeral=False) -> int:
+                 models=None, *, dispatches=None, ephemeral=False, ledger=None) -> int:
     messages: List[dict] = [
         {"role": "system", "content": system},
         {"role": "user", "content": task},
@@ -806,7 +830,12 @@ def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task
     # uncapped, this meters without gating (`over()`/`over_tokens()` are both None-safe).
     # Hoisted above the plan block so the plan turn -- a real API call, and a real wait --
     # is inside the accounting rather than outside it.
-    ledger = _agent.usage_ledger(args, models, model)
+    #
+    # #117: `_run` hoisted it further still (the rails need it at factory time) and passes
+    # it in. Building a second one here would leave every rail mirroring into an orphan.
+    # The fallback keeps this function callable on its own, as the tests do.
+    if ledger is None:
+        ledger = _agent.usage_ledger(args, models, model)
     t0 = time.monotonic()   # #81: the whole run is the window; see `_finish`
     human = [0.0]           # seconds spent waiting on *you* at a prompt, excluded
 

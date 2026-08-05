@@ -299,10 +299,20 @@ class TestSessionsCLI(_Base):
             # lists only -- so `tools` was already being dumped inline here and this
             # fixture, carrying neither key, was hiding it. Both are present now.
             "tools": {f"tool_{i}": {"seconds": 1.0, "calls": 3} for i in range(40)},
+            # #117: more than one bucket -- `compaction` plus the subagent rails, each
+            # of which renders its own row. A single-bucket fixture cannot tell a
+            # per-name loop apart from one that prints whatever it finds first.
             "buckets": {"compaction": {"calls": 2, "cost": 0.0031,
                                        "prompt_tokens": 91200,
                                        "completion_tokens": 400,
-                                       "seconds": 3.2, "unpriced": False}},
+                                       "seconds": 3.2, "unpriced": False},
+                        "review": {"calls": 3, "cost": 0.0090,
+                                   "prompt_tokens": 12000,
+                                   "completion_tokens": 1800,
+                                   "seconds": 8.1, "unpriced": False},
+                        "scout": {"calls": 4, "cost": 0.0038,
+                                  "prompt_tokens": 6200, "completion_tokens": 900,
+                                  "seconds": 5.0, "unpriced": False}},
         }
         S.save(s)
         rc, out, err = _capture(cli.main, ["sessions", "show", s.id])
@@ -316,6 +326,8 @@ class TestSessionsCLI(_Base):
         self.assertNotIn("compaction", usage_line)
         self.assertIn("  buckets:", out.split("\n"))
         self.assertIn("    compaction: $0.0031 over 2 call(s)", out.split("\n"))
+        self.assertIn("    review: $0.0090 over 3 call(s)", out.split("\n"))
+        self.assertIn("    scout: $0.0038 over 4 call(s)", out.split("\n"))
         self.assertIn("  tools: 40 entries", out)
         self.assertNotIn("'n': 7", usage_line)
         self.assertIn("  api_calls: 250 row(s)", out)

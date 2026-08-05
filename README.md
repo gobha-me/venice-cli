@@ -819,10 +819,14 @@ Details and safety:
   auto-compaction's summarization calls are now counted toward the total, and are
   skipped when the cap has already tripped and no turn will follow — but a forced
   final answer still compacts if it must (shipping the full history would fail the
-  turn outright), and an explicit `/compact` still runs. It does **not** yet count
-  subagent turns (`--scout`, `--spawn`, `--review`, `--web-search`), which still
-  build their own throwaway ledgers — that half is tracked separately, so on a
-  rail-heavy run the cap bounds less than its name suggests. Config-backable via
+  turn outright), and an explicit `/compact` still runs. As of #117 it counts
+  **every API call the CLI makes** — the main loop, auto-compaction, and all four
+  subagent rails (`--scout`, `--spawn`, `--review`, `--web-search`). Each rail is
+  priced against **its own** model's catalog rate, so a `--review-model` costlier
+  than the coding model is billed as what it actually is, and each lands in its own
+  off-loop bucket so the main loop's cache-hit signal stays uncontaminated (a
+  subagent starts a fresh prefix every time, and averaging that in would fabricate a
+  cache cliff). Config-backable via
   `defaults.chat.session_max_spend` /
   `defaults.code.session_max_spend`. Distinct from `--max-spend` (the per-call
   tool cap). A model with unknown pricing is counted (tokens) but not charged.
@@ -1340,8 +1344,11 @@ API calls:
     #12             18,800 in   58% cached      174 out      3.6s
     #13             19,900 in   58% cached      182 out      3.8s
     #14             19,880 in   91% cached      210 out      3.4s
-  off-loop      2.4s  across 1 API call(s)  [not in the trace above]
+  off-loop     36.1s  across 9 API call(s)  [not in the trace above]
     compaction  1 call(s)     88,110 in      420 out     $0.0031
+    review      3 call(s)     12,000 in    1,800 out     $0.0090
+    scout       4 call(s)      6,200 in      900 out     $0.0038
+    web_search  1 call(s)        800 in      120 out     $0.0008
 ```
 
 Cold-from-#1, a mid-run cliff and a compaction sawtooth each have a distinct shape
@@ -1351,12 +1358,20 @@ seconds, exactly as the session-wide rate refuses to print a fabricated `0.0%`.
 Compaction markers are never elided, and the elided span carries its own totals so
 the rows still add back up to the header.
 
-The `off-loop` block is the calls this CLI made that were **not** conversation turns
-— today just compaction's own summarization call. They are billed and shown, but kept
-out of the trace above on purpose: each one is a fresh prefix that reads ~0% cached,
-so averaging it in would manufacture exactly the cliff the trace exists to detect.
-`[+1 off-loop]` on the header is what stops the smaller `across 14` reading as the
-whole story.
+The `off-loop` block is the calls this CLI made that were **not** conversation turns:
+compaction's own summarization call, plus one row per subagent rail (`scout`, `spawn`,
+`review`, `web_search`). They are billed and shown, but kept out of the trace above on
+purpose: each one is a fresh prefix that reads ~0% cached, so averaging it in would
+manufacture exactly the cliff the trace exists to detect. `[+1 off-loop]` on the header
+is what stops the smaller `across 14` reading as the whole story.
+
+Each rail is priced against **its own** model — `--review-model` is deliberately a
+different model from the one authoring, and billing its tokens at the author's rate
+would be a fabricated number. Rail seconds are a *subset* of the wall clock and are not
+disjoint from the `tools` block: a rail's API time sits inside the `venice_scout` /
+`venice_spawn` / `venice_review` tool window containing it, and under `--parallel`
+several rails overlap each other, so the block says `[concurrent -- exceeds wall]`
+rather than quietly summing past the wall clock.
 
 Note that **one API call is not one turn**: `usage.turns` counts the times the CLI
 made you wait (one whole `code` run, one REPL turn), while a single turn that
@@ -1375,16 +1390,22 @@ Rows are capped at the first 50 plus the most recent 200, so a long session keep
 both its cold-start evidence and its current state; each row carries its `n`, so a
 jump in the sequence is itself the drop marker.
 
-Compaction's own summarization call **is** metered, into a separate `usage.buckets`
-partition rather than into the rows above — it is a fresh prefix, so it reads ~0%
-cached every time and would fabricate a cache cliff if it were averaged in with the
-conversation. The event row carries what that one compaction cost; the bucket carries
-the running total. `usage.api_calls_total` therefore counts **main-loop** calls only,
-and the `calls` header names the difference (`[+2 off-loop]`).
+Compaction's summarization call and every subagent rail **are** metered, each into its
+own `usage.buckets` partition rather than into the rows above — they are fresh prefixes,
+so they read ~0% cached every time and would fabricate a cache cliff if averaged in with
+the conversation. The event row carries what one compaction cost; the bucket carries the
+running total. `usage.api_calls_total` therefore counts **main-loop** calls only, and the
+`calls` header names the difference (`[+2 off-loop]`).
+
+The run footer names the off-loop share too, but stays short: one or two buckets are
+listed (`[incl. $0.0031 compaction]`), and past that it collapses to
+`[incl. $0.0180 off-loop]` and defers to `/usage` for the per-rail breakdown.
 
 ```bash
 # what has compaction cost this session?
 jq '.usage.buckets.compaction' ~/.config/venice/sessions/<id>.json
+# what did the rails cost -- which one is eating the budget?
+jq '.usage.buckets' ~/.config/venice/sessions/<id>.json
 # the whole bill, main loop + off-loop
 jq '.usage.billed_total' ~/.config/venice/sessions/<id>.json
 ```
