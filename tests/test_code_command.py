@@ -17,6 +17,7 @@ from unittest import mock
 from tests.test_chat import (
     FakeToolCompletion, _FnCall, _fake_openai_seq, _urlopen_ok,
 )
+from venice.commands import _agent, _code
 
 
 # Auto-save is on by default (#47): keep this module hermetic (belt-and-suspenders
@@ -474,16 +475,19 @@ class TestCodeCommand(unittest.TestCase):
     def test_interactive_delegates_to_repl_with_tools_session(self):
         captured = {}
 
+        # `**kw`: a rigid stub here breaks on every new keyword-only factory kwarg
+        # `_run` learns to forward, which is a failure of the stub and not of the code.
         def _fake_repl_run(args, oai, openai, client, models, model,
                            initial=None, *, tools_session=None, gen_kwargs=None,
                            label="venice chat", max_tool_calls=8, session=None,
-                           ephemeral=False, root=None, system_reseed=False):
+                           ephemeral=False, root=None, system_reseed=False, **kw):
             captured["tools_session"] = tools_session
             captured["label"] = label
             captured["initial"] = initial
             captured["max_tool_calls"] = max_tool_calls
             captured["root"] = root
             captured["system_reseed"] = system_reseed
+            captured["ledger"] = kw.get("ledger")
             return 0
 
         stdin = mock.MagicMock()
@@ -506,6 +510,9 @@ class TestCodeCommand(unittest.TestCase):
         self.assertEqual(captured["max_tool_calls"], code._DEFAULT_MAX_TOOL_CALLS)
         self.assertTrue(captured["system_reseed"])       # code always reseeds (#47)
         self.assertEqual(captured["root"], self.root)
+        # #117: the REPL is HANDED the hoisted ledger rather than building its own,
+        # because the rails already mirror into that object.
+        self.assertIsNotNone(captured["ledger"])
 
     # --- session resume (#47) ---
     def _mk_zone(self):
@@ -1075,6 +1082,84 @@ class TestCodeUsageSurface(unittest.TestCase):
         self.assertEqual(envelope["api_calls"], persisted["api_calls"])
         self.assertEqual(envelope["api_calls_total"], persisted["api_calls_total"])
         self.assertEqual(envelope["context_events"], persisted["context_events"])
+        self.assertEqual(envelope["buckets"], persisted["buckets"])   # #117
+
+    # --- #117: the hoisted ledger is the one that gets reported -------------
+
+    def test_a_run_without_rails_reports_no_buckets(self):
+        # The canary, and the control for the two tests below: an over-eager bucket
+        # write would show up here, where nothing off-loop happened at all.
+        rc, _ = self._run(
+            _code_args(task="x", root=self.root, auto=True), self._full_seq())
+        self.assertEqual(rc, 0)
+        with open(self._sessions()[0]) as f:
+            self.assertEqual(json.load(f)["usage"]["buckets"], {})
+
+    def test_scout_spend_reaches_the_reported_usage(self):
+        # END TO END for the hoist: the rails are handed a ledger built in `_run`,
+        # long before `_run_oneshot` would have made one. If `_run_oneshot` built its
+        # own instead of adopting, every rail would mirror into an orphan and this
+        # bucket would simply be missing -- no error, no other failing test.
+        def _run_scout(oai, model, task, tools, base_kwargs, *, max_tool_calls,
+                       ledger=None, **kw):
+            ledger.record({"prompt_tokens": 4321, "completion_tokens": 21})
+            return {"status": "ok", "report": "r", "tool_calls": 1, "truncated": False}
+
+        seq = [
+            FakeToolCompletion("plan text", usage=self._usage(1)),
+            FakeToolCompletion(None, tool_calls=[_FnCall(
+                "c1", "venice_scout", json.dumps({"task": "look"}))],
+                usage=self._usage(2)),
+            FakeToolCompletion("done", usage=self._usage(3)),
+            FakeToolCompletion("ACCEPTANCE: PASS", usage=self._usage(4)),
+        ]
+        with mock.patch.object(_agent, "run_scout", _run_scout):
+            rc, _ = self._run(
+                _code_args(task="x", root=self.root, auto=True, scout=True), seq)
+        self.assertEqual(rc, 0)
+        with open(self._sessions()[0]) as f:
+            usage = json.load(f)["usage"]
+        # Membership FIRST: if the bucket is missing (the mirror dropped, or a second
+        # ledger built downstream), a bare subscript raises KeyError and the run reports
+        # an ERROR, which reads like a broken test rather than a caught regression.
+        self.assertIn("scout", usage["buckets"])
+        self.assertEqual(usage["buckets"]["scout"]["calls"], 1)
+        self.assertEqual(usage["buckets"]["scout"]["prompt_tokens"], 4321)
+        # ...and it stayed OUT of the main-loop trace, which is the whole partition.
+        self.assertEqual(usage["api_calls_total"], len(usage["api_calls"]))
+        self.assertNotIn(4321, [r["prompt_tokens"] for r in usage["api_calls"]])
+
+    def test_the_rails_and_the_reporter_share_one_ledger_object(self):
+        # The one-object rule, by IDENTITY rather than by value: two ledgers with
+        # equal contents would satisfy a value assertion while still losing every
+        # subsequent rail write to whichever object is not reported.
+        seen = {}
+        real = _code.scout_tool
+
+        def _capture(*a, **kw):
+            seen["rails"] = kw.get("parent_ledger")
+            return real(*a, **kw)
+
+        def _fake_repl_run(*a, **kw):
+            seen["repl"] = kw.get("ledger")
+            return 0
+
+        with mock.patch.object(_code, "scout_tool", _capture), \
+             mock.patch("venice.commands._repl.run", _fake_repl_run):
+            stdin = mock.MagicMock()
+            stdin.isatty.return_value = True
+            fake, _calls = _fake_openai_seq([])
+            with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+                 mock.patch("venice.client.urllib.request.urlopen", _urlopen_ok()), \
+                 mock.patch("openai.OpenAI", return_value=fake), \
+                 mock.patch.object(sys, "stdin", stdin), \
+                 mock.patch.object(sys, "stdout", io.StringIO()), \
+                 mock.patch.object(sys, "stderr", io.StringIO()):
+                from venice.commands import code
+                code._run(_code_args(task="hi", root=self.root, interactive=True,
+                                     scout=True))
+        self.assertIsNotNone(seen["rails"])
+        self.assertIs(seen["rails"], seen["repl"])
 
     def test_ctrlc_run_reports_time_and_persists_usage(self):
         # The run an operator most wants a cost readout for: they sat through it and

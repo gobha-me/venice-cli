@@ -314,18 +314,94 @@ class TestSubagentTokenCap(_ProjBase):
         # report IS model-visible (it comes back as a tool result), and today it
         # deliberately carries SCALARS only. Pin that: a future `out.update(
         # led.to_dict())` would quietly push per-call rows into the prompt.
+        #
+        # #117 runs it BOTH ways. The parent-ledger configuration is the one where the
+        # temptation actually lives -- "hand the worker's spend back to the parent" reads
+        # like a job for the return value -- so a pin that only ever ran without a parent
+        # would not have been guarding the case that could break it.
         def _run(oai, model, task, tools, base_kwargs, *, max_tool_calls,
                  ledger=None, **kw):
             ledger.record({"prompt_tokens": 10, "completion_tokens": 5})
             return {"status": "ok", "report": "r", "tool_calls": 1, "truncated": False}
 
-        with mock.patch.object(_agent, "run_spawn", _run):
+        for parent in (None, _agent.CostLedger()):
+            with self.subTest(parent=parent is not None):
+                with mock.patch.object(_agent, "run_spawn", _run):
+                    out = _code.spawn_tool(
+                        None, "m", {}, [self._paid()], max_tokens=500,
+                        parent_ledger=parent).invoke({"task": "a", "role": "code"})
+                for leaked in ("api_calls", "api_calls_total", "context_events",
+                               "buckets", "billed_total", "cost", "spend"):
+                    self.assertNotIn(leaked, out)
+                self.assertEqual(out["tokens"], 15)  # the scalar provenance stays
+        # ...and the spend still reached the parent, by the side channel.
+        self.assertEqual(parent.bucket_calls("spawn"), 1)
+
+    # --- #117: rail spend reaches the parent ledger -------------------------
+
+    def test_spawn_turns_land_in_the_parent_spawn_bucket(self):
+        P = _agent.CostLedger()
+        P.bind_pricing({"input": {"usd": 1.0}, "output": {"usd": 2.0}})
+        models = [{"id": "m", "model_spec": {
+            "pricing": {"input": {"usd": 1.0}, "output": {"usd": 2.0}}}}]
+        with mock.patch.object(_agent, "run_spawn", self._run_that_spends(1000, 500)):
+            _code.spawn_tool(None, "m", {}, [self._paid()], models=models,
+                             parent_ledger=P).invoke({"task": "a", "role": "code"})
+        row = P.buckets["spawn"]
+        self.assertEqual((row["calls"], row["prompt_tokens"]), (1, 1000))
+        self.assertAlmostEqual(row["cost"], 0.0020)
+        self.assertEqual(P.total, 0.0)               # never the parent's main loop
+
+    def test_scout_turns_land_in_the_parent_scout_bucket(self):
+        P = _agent.CostLedger()
+        models = [{"id": "m", "model_spec": {
+            "pricing": {"input": {"usd": 1.0}, "output": {"usd": 2.0}}}}]
+        with mock.patch.object(_agent, "run_scout", self._run_that_spends(300, 40)):
+            out = _code.scout_tool(None, "m", self.root, None, {}, max_tokens=250,
+                                   models=models,
+                                   parent_ledger=P).invoke({"task": "where is f?"})
+        self.assertEqual(P.buckets["scout"]["prompt_tokens"], 300)
+        self.assertNotIn("spawn", P.buckets)
+        self.assertEqual(out["tokens"], 340)         # the report is unchanged
+        self.assertEqual(out["token_cap"], 250)
+
+    def test_a_rail_without_a_parent_ledger_still_works(self):
+        # Every `parent_ledger` is defaulted: `venice review` and every existing test
+        # construct these factories with no parent at all.
+        with mock.patch.object(_agent, "run_scout", self._run_that_spends(300, 40)):
+            out = _code.scout_tool(None, "m", self.root, None, {}).invoke(
+                {"task": "q"})
+        self.assertEqual(out["tokens"], 340)
+
+    def test_a_crashed_rail_still_bills_what_it_spent(self):
+        # The provenance rule one level over: a worker that spent tokens and then threw
+        # still owes the parent that money. `run_spawn` raising must not roll it back.
+        P = _agent.CostLedger()
+
+        def _boom(oai, model, task, tools, base_kwargs, *, max_tool_calls,
+                  ledger=None, **kw):
+            ledger.record({"prompt_tokens": 900, "completion_tokens": 100})
+            raise RuntimeError("nested loop died")
+
+        with mock.patch.object(_agent, "run_spawn", _boom):
             out = _code.spawn_tool(None, "m", {}, [self._paid()],
-                                   max_tokens=500).invoke({"task": "a", "role": "code"})
-        for leaked in ("api_calls", "api_calls_total", "context_events",
-                       "buckets", "billed_total"):
-            self.assertNotIn(leaked, out)
-        self.assertEqual(out["tokens"], 15)  # the scalar provenance stays
+                                   parent_ledger=P).invoke({"task": "a", "role": "code"})
+        self.assertEqual(out["status"], "error")
+        self.assertEqual(P.buckets["spawn"]["prompt_tokens"], 900)
+
+    def test_the_media_spend_meter_and_the_bucket_are_separate_money(self):
+        # Three money axes, deliberately not summed: `spent_usd` is paid MEDIA the
+        # worker bought; the bucket is the worker's own COMPLETIONS. Folding either
+        # into the other would double-count one and misname both.
+        P = _agent.CostLedger()
+        models = [{"id": "m", "model_spec": {
+            "pricing": {"input": {"usd": 1.0}, "output": {"usd": 2.0}}}}]
+        with mock.patch.object(_agent, "run_spawn", self._run_that_spends(1000, 500)):
+            out = _code.spawn_tool(None, "m", {}, [self._paid()], max_spend=5.0,
+                                   models=models,
+                                   parent_ledger=P).invoke({"task": "a", "role": "code"})
+        self.assertEqual(out["spent_usd"], 0.0)          # no media bought
+        self.assertAlmostEqual(P.buckets["spawn"]["cost"], 0.0020)   # but tokens spent
 
     def test_scout_is_metered_too(self):
         # Scope proof: the cap applies to the READ-ONLY scout as well, not just spawn.

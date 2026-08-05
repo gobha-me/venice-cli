@@ -717,6 +717,94 @@ class TestRunCycle(_RepoBase):
         self.assertEqual(out["verdict"], "clean")   # the retry did its job...
         self.assertEqual(out["tokens"], 718)        # ...and paid for it: 11 + 707
 
+    # --- #117: the cycle bills the parent's `review` bucket -----------------
+
+    def _priced(self, usd):
+        return [{"id": "reviewer", "model_spec": {"pricing": {
+            "input": {"usd": usd}, "output": {"usd": usd * 2}}}}]
+
+    def test_the_cycle_lands_in_the_parent_review_bucket(self):
+        P = _agent.CostLedger()
+        with mock.patch.object(_agent, "run_review", self._spender(1000, 500)):
+            _review.run_cycle(mock.MagicMock(), "reviewer", self.collected, {},
+                              root=self.root, rounds=1, models=self._priced(1.0),
+                              parent_ledger=P)
+        row = P.buckets["review"]
+        self.assertEqual((row["calls"], row["prompt_tokens"]), (1, 1000))
+        self.assertAlmostEqual(row["cost"], 0.0020)
+        self.assertEqual(P.total, 0.0)              # never the parent's main loop
+
+    def test_a_cycle_without_a_parent_ledger_is_unchanged(self):
+        # `venice review` (the standalone CLI) passes neither argument.
+        P_free, seen = self._cycle([_report(["src/pool.cc:1 [major] bad"])], rounds=1)
+        self.assertEqual(P_free["verdict"], "findings")
+
+    def test_the_reviewer_is_priced_at_its_own_model_rate(self):
+        # THE reason pricing binds on the child. `--review-model` is deliberately a
+        # DIFFERENT model from the author's -- decorrelation is the point of the rail --
+        # so costing the reviewer's usage at the parent's rate would bill a fabricated
+        # number. Parent at 1x, reviewer at 10x: the bucket must show the reviewer's.
+        P = _agent.CostLedger()
+        P.bind_pricing({"input": {"usd": 1.0}, "output": {"usd": 2.0}})
+        with mock.patch.object(_agent, "run_review", self._spender(1000, 500)):
+            _review.run_cycle(mock.MagicMock(), "reviewer", self.collected, {},
+                              root=self.root, rounds=1, models=self._priced(10.0),
+                              parent_ledger=P)
+        self.assertAlmostEqual(P.buckets["review"]["cost"], 0.0200)   # 10x, not 0.0020
+
+    def test_the_verdict_retry_is_billed_to_the_parent_too(self):
+        # The retry is an API call made OUTSIDE `run_loop`. A usage callback threaded
+        # into `run_loop` -- the shape #117 itself proposed -- would silently miss it.
+        # Mirroring at `record()` catches it because that is where usage is READ.
+        oai = mock.MagicMock()
+        oai.chat.completions.create.return_value = FakeToolCompletion(
+            content="REVIEW: CLEAN",
+            usage={"prompt_tokens": 700, "completion_tokens": 7},
+        )
+
+        def _stub(*a, **kw):
+            kw["ledger"].record({"prompt_tokens": 10, "completion_tokens": 1})
+            return {"status": "ok", "tool_calls": 0, "truncated": False,
+                    "report": "SCOPE: x\nFINDINGS: none\n(forgot the line)"}
+
+        P = _agent.CostLedger()
+        with mock.patch.object(_agent, "run_review", _stub):
+            out = _review.run_cycle(oai, "reviewer", self.collected, {},
+                                    root=self.root, rounds=1,
+                                    models=self._priced(1.0), parent_ledger=P)
+        self.assertEqual(out["verdict"], "clean")
+        row = P.buckets["review"]
+        self.assertEqual(row["calls"], 2)                  # the round AND the retry
+        self.assertEqual(row["prompt_tokens"], 710)        # 10 + 700
+
+    def test_every_round_of_one_cycle_bills_the_same_bucket(self):
+        # ONE ledger spans the cycle, so N rounds are N calls in ONE bucket row.
+        reports = [_report(["src/pool.cc:1 [major] a"]),
+                   _report(["src/pool.cc:2 [major] b"])]
+        seen = []
+
+        def _stub(oai, model, task, tools, base_kwargs, **kw):
+            kw["ledger"].record({"prompt_tokens": 100, "completion_tokens": 10})
+            seen.append(task)
+            return {"status": "ok", "report": reports[len(seen) - 1],
+                    "tool_calls": 1, "truncated": False}
+
+        P = _agent.CostLedger()
+        with mock.patch.object(_agent, "run_review", _stub):
+            _review.run_cycle(mock.MagicMock(), "reviewer", self.collected, {},
+                              root=self.root, rounds=2, models=self._priced(1.0),
+                              parent_ledger=P)
+        self.assertEqual(sorted(P.buckets), ["review"])
+        self.assertEqual(P.buckets["review"]["calls"], 2)
+
+    @staticmethod
+    def _spender(pt, ct):
+        def _stub(oai, model, task, tools, base_kwargs, **kw):
+            kw["ledger"].record({"prompt_tokens": pt, "completion_tokens": ct})
+            return {"status": "ok", "tool_calls": 0, "truncated": False,
+                    "report": _report([], "CLEAN")}
+        return _stub
+
     def test_later_unreadable_round_does_not_erase_an_earlier_verdict(self):
         # Regression pin for a bug the drive suite caught: with the default 2 rounds,
         # a second pass that forgot the sentinel overwrote round 1's verdict with
@@ -1030,6 +1118,34 @@ class TestReviewTool(_RepoBase):
         with mock.patch.object(_agent, "run_review", _stub):
             self._tool().invoke({"max_tool_calls": 9999})
         self.assertEqual(got["calls"], _review.REVIEW_HARD_CAP)
+
+    def test_the_tool_forwards_the_parent_ledger_to_the_cycle(self):
+        # #117: the rail is TWO layers -- `review_tool` builds nothing, `run_cycle` owns
+        # the ledger. Testing `run_cycle` directly (as the cycle tests do) leaves the
+        # forwarding hop unguarded: a mutation dropping `parent_ledger=` from the
+        # `run_cycle` call here survived the whole suite until this test existed.
+        def _stub(oai, model, task, tools, base_kwargs, **kw):
+            kw["ledger"].record({"prompt_tokens": 1000, "completion_tokens": 500})
+            return {"status": "ok", "tool_calls": 0, "truncated": False,
+                    "report": _report([], "CLEAN")}
+
+        P = _agent.CostLedger()
+        models = [{"id": "m", "model_spec": {"pricing": {
+            "input": {"usd": 1.0}, "output": {"usd": 2.0}}}}]
+        with mock.patch.object(_agent, "run_review", _stub):
+            out = self._tool(models=models, parent_ledger=P).invoke({})
+        self.assertEqual(out["status"], "ok")
+        self.assertIn("review", P.buckets)          # a clean FAIL, not a KeyError
+        self.assertEqual(P.buckets["review"]["prompt_tokens"], 1000)
+        self.assertAlmostEqual(P.buckets["review"]["cost"], 0.0020)
+
+    def test_the_tool_still_works_with_no_parent_ledger(self):
+        def _stub(oai, model, task, tools, base_kwargs, **kw):
+            return {"status": "ok", "tool_calls": 0, "truncated": False,
+                    "report": _report([], "CLEAN")}
+
+        with mock.patch.object(_agent, "run_review", _stub):
+            self.assertEqual(self._tool().invoke({})["status"], "ok")
 
     def test_docs_only_diff_short_circuits_without_a_model_call(self):
         _git(self.root, "checkout", "-q", "--", "src/pool.cc")

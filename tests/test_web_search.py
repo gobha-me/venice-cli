@@ -111,6 +111,82 @@ class TestRunWebSearch(unittest.TestCase):
         out = _agent.run_web_search(fake, "coder-x", "q", models=priced)
         self.assertAlmostEqual(out["cost_estimate_usd"], 2.0)  # 1M input @ $2/1M
 
+    # --- #117: the search bills the parent's `web_search` bucket ------------
+
+    def test_the_search_lands_in_the_parent_web_search_bucket(self):
+        # Pre-#117 this rail was the mirror image of the other three: a real priced USD
+        # figure returned, and every token count thrown away. Now both survive.
+        usage = {"prompt_tokens": 1_000_000, "completion_tokens": 0}
+        priced = _catalog(pricing={"input": {"usd": 2.0}, "output": {"usd": 6.0}})
+        fake, _ = _fake_openai_seq([_resp(usage=usage)])
+        P = _agent.CostLedger()
+        _agent.run_web_search(fake, "coder-x", "q", models=priced,
+                              mirror=(P, "web_search"))
+        row = P.buckets["web_search"]
+        self.assertEqual((row["calls"], row["prompt_tokens"]), (1, 1_000_000))
+        self.assertAlmostEqual(row["cost"], 2.0)
+        self.assertEqual(P.total, 0.0)
+
+    def test_the_cost_estimate_survives_beside_the_bucket(self):
+        # The two are NOT redundant and neither may be deleted as a duplicate of the
+        # other: `cost_estimate_usd` is MODEL-visible handoff provenance (the agent
+        # reads it to decide whether to search again), the bucket is OPERATOR data.
+        usage = {"prompt_tokens": 1_000_000, "completion_tokens": 0}
+        priced = _catalog(pricing={"input": {"usd": 2.0}, "output": {"usd": 6.0}})
+        fake, _ = _fake_openai_seq([_resp(usage=usage)])
+        P = _agent.CostLedger()
+        out = _agent.run_web_search(fake, "coder-x", "q", models=priced,
+                                    mirror=(P, "web_search"))
+        self.assertAlmostEqual(out["cost_estimate_usd"], 2.0)
+        self.assertAlmostEqual(P.bucket_cost("web_search"), 2.0)
+
+    def test_an_unmirrored_search_leaves_the_parent_empty(self):
+        # The control: without it, the assertions above could pass for any reason.
+        usage = {"prompt_tokens": 1_000_000, "completion_tokens": 0}
+        priced = _catalog(pricing={"input": {"usd": 2.0}, "output": {"usd": 6.0}})
+        fake, _ = _fake_openai_seq([_resp(usage=usage)])
+        P = _agent.CostLedger()
+        _agent.run_web_search(fake, "coder-x", "q", models=priced)
+        self.assertEqual(P.buckets, {})
+
+    def test_a_usage_less_search_marks_the_bucket_unreported(self):
+        priced = _catalog(pricing={"input": {"usd": 2.0}, "output": {"usd": 6.0}})
+        fake, _ = _fake_openai_seq([_resp(usage=None)])
+        P = _agent.CostLedger()
+        out = _agent.run_web_search(fake, "coder-x", "q", models=priced,
+                                    mirror=(P, "web_search"))
+        self.assertIsNone(out["cost_estimate_usd"])          # honest unknown
+        self.assertIs(P.buckets["web_search"]["unreported"], True)
+
+    def test_a_search_inside_a_scout_is_billed_once(self):
+        # `code.py` builds ONE `ws_tool` and hands the SAME object to both the parent
+        # tool list and the scout's inner set. The mirror is bound once at factory time,
+        # so the search bills `web_search` exactly once whoever called it, while the
+        # scout's own turns bill `scout`. A design that rolled child ledgers up into
+        # their caller would have double-counted precisely this shared object.
+        priced = _catalog(pricing={"input": {"usd": 2.0}, "output": {"usd": 6.0}})
+        usage = {"prompt_tokens": 1_000_000, "completion_tokens": 0}
+        fake, _ = _fake_openai_seq([_resp(usage=usage)])
+        P = _agent.CostLedger()
+        ws = _code.web_search_tool(fake, "coder-x", models=priced, parent_ledger=P)
+
+        # The scout runs, makes one web search through the shared tool, and spends
+        # its own turns.
+        def _run_scout(oai, model, task, tools, base_kwargs, *, max_tool_calls,
+                       ledger=None, **kw):
+            [t for t in tools if t.name == _agent.WEB_SEARCH_TOOL_NAME][0].invoke(
+                {"query": "q"})
+            ledger.record({"prompt_tokens": 300, "completion_tokens": 40})
+            return {"status": "ok", "report": "r", "tool_calls": 1, "truncated": False}
+
+        root = tempfile.mkdtemp()
+        with mock.patch.object(_agent, "run_scout", _run_scout):
+            _code.scout_tool(fake, "coder-x", root, None, {}, web_tool=ws,
+                             models=priced, parent_ledger=P).invoke({"task": "t"})
+        self.assertEqual(P.bucket_calls("web_search"), 1)     # exactly once
+        self.assertEqual(P.buckets["scout"]["prompt_tokens"], 300)   # and disjoint
+        self.assertAlmostEqual(P.billed_total(), P.bucket_cost())
+
 
 # --------------------------------------------------------------------------- #
 # _agent.resolve_web_search_model

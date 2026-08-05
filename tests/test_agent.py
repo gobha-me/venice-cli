@@ -1334,8 +1334,13 @@ class TestOffLoopBuckets(unittest.TestCase):
     def test_summary_is_unchanged_without_a_bucket(self):
         # The subagent-safety pin. `run_loop`'s two stop-reason messages render this on
         # subagent ledgers, which can never acquire a bucket (they are never passed a
-        # `budget`, so `maybe_compact` short-circuits). The rails slice of #101 deletes
-        # that invariant -- when it does, this expectation is what should fail first.
+        # `budget`, so `maybe_compact` short-circuits).
+        #
+        # #117 was predicted to delete that invariant and did NOT -- stated here because
+        # the issue said the opposite and a later reader will assume it landed. A
+        # mirrored subagent ledger writes its PARENT's buckets and never its own, so
+        # these two messages still render with no clause. See
+        # `test_a_mirrored_child_never_grows_a_bucket_of_its_own`, which pins the reason.
         L = self._led()
         L.record({"prompt_tokens": 1000, "completion_tokens": 500})
         self.assertEqual(
@@ -1595,6 +1600,343 @@ class TestOffLoopBuckets(unittest.TestCase):
         R.restore({"total": 0.5, "prompt_tokens": 10})
         self.assertEqual(R.buckets, {})
         self.assertAlmostEqual(R.billed_total(), 0.5)
+
+    # -- #117: more than one bucket ------------------------------------------
+
+    def test_summary_lists_two_bucket_names(self):
+        L = self._bucketed()
+        L.record({"prompt_tokens": 1000, "completion_tokens": 0}, bucket="scout")
+        self.assertEqual(
+            L.summary(),
+            "cost: $0.0074 (tokens prompt=1000 completion=500)"
+            " [incl. $0.0054 compaction/scout]")
+
+    def test_summary_collapses_more_than_two_bucket_names(self):
+        # The bound. Unbounded, `--planner --review --web-search` renders
+        # `compaction/review/scout/spawn/web_search` onto a footer that is also two
+        # stop-reason messages -- and grows again with every future bucket.
+        L = self._bucketed()
+        for name in ("scout", "spawn", "review", "web_search"):
+            L.record({"prompt_tokens": 1000, "completion_tokens": 0}, bucket=name)
+        self.assertEqual(
+            L.summary(),
+            "cost: $0.0104 (tokens prompt=1000 completion=500)"
+            " [incl. $0.0084 off-loop]")
+
+    def test_a_zero_cost_bucket_does_not_count_toward_the_name_bound(self):
+        # The bound counts the names that will actually PRINT. Three buckets of which
+        # one is free is a two-name render, not a collapse -- otherwise an unpriced
+        # rail silently degrades the other two into "off-loop".
+        L = self._bucketed()
+        L.record({"prompt_tokens": 1000, "completion_tokens": 0}, bucket="scout")
+        L.record(None, bucket="spawn")           # no usage -> no cost
+        self.assertIn("[incl. $0.0054 compaction/scout]", L.summary())
+
+    def test_the_bucket_block_renders_a_row_per_rail(self):
+        # Pin the whole block: the column width is data-driven (`max(len(k))`), so a
+        # longer bucket name shifts every row and should shift in a diff, not in prod.
+        L = self._led()
+        L.record({"prompt_tokens": 1000, "completion_tokens": 500}, seconds=2.0)
+        L.record_turn(2.0)
+        L.record({"prompt_tokens": 4000, "completion_tokens": 200}, seconds=1.5,
+                 bucket="compaction")
+        L.record({"prompt_tokens": 800, "completion_tokens": 120}, seconds=0.4,
+                 bucket="web_search")
+        out = L.usage_report()
+        self.assertIn(
+            "  off-loop      1.9s  across 2 API call(s)  [not in the trace above]", out)
+        self.assertIn(
+            "    compaction  1 call(s)      4,000 in      200 out     $0.0044", out)
+        self.assertIn(
+            "    web_search  1 call(s)        800 in      120 out     $0.0010", out)
+
+    def test_the_bucket_block_labels_overlapping_rail_windows(self):
+        # Under `--parallel` several rails' API windows overlap, so the summed seconds
+        # can exceed the wall clock. Say so, in `_tool_lines`' exact words -- one state
+        # must not grow two vocabularies inside one report.
+        L = self._led()
+        L.record_turn(2.0)                       # 2s of wall
+        L.record({"prompt_tokens": 100, "completion_tokens": 10}, seconds=5.0,
+                 bucket="scout")
+        L.record({"prompt_tokens": 100, "completion_tokens": 10}, seconds=5.0,
+                 bucket="spawn")
+        self.assertIn("[concurrent -- exceeds wall]", L.usage_report())
+
+    def test_the_bucket_block_stays_unlabelled_within_the_wall(self):
+        L = self._led()
+        L.record_turn(60.0)
+        L.record({"prompt_tokens": 100, "completion_tokens": 10}, seconds=5.0,
+                 bucket="scout")
+        self.assertNotIn("[concurrent", L.usage_report())
+
+    def test_restore_round_trips_several_buckets_additively(self):
+        # `restore` is field-by-field per name precisely because a naive `cur[k] += v`
+        # evaluates `False + True` to 1 and turns a sticky flag into a count. Exercise
+        # it with more than the one name that existed when it was written.
+        L = self._bucketed()
+        for name in ("scout", "review"):
+            L.record({"prompt_tokens": 1000, "completion_tokens": 0}, bucket=name)
+        R = self._led()
+        R.restore(L.to_dict())
+        R.restore(L.to_dict())                   # additive, twice over
+        self.assertEqual(sorted(R.buckets), ["compaction", "review", "scout"])
+        self.assertEqual(R.buckets["scout"]["calls"], 2)
+        self.assertEqual(R.buckets["scout"]["prompt_tokens"], 2000)
+        self.assertIs(R.buckets["scout"]["unpriced"], False)
+        self.assertAlmostEqual(R.bucket_cost(), L.bucket_cost() * 2)
+
+
+class TestMirroredSubagentLedgers(unittest.TestCase):
+    """#117: a subagent ledger banks each API call into its PARENT's bucket.
+
+    The mirror sits at `record()` -- the one place any usage is read -- rather than at
+    the call sites, so the two rails that call the API outside `run_loop`
+    (`_review._retry_for_verdict`, `run_web_search`) are covered without either site
+    knowing a parent exists. These tests pin that, and pin that the isolation #101 built
+    for compaction survives a SECOND writer arriving from a pool worker.
+    """
+
+    P = {"input": {"usd": 1.0}, "output": {"usd": 2.0}}
+    #: A deliberately DIFFERENT rate, standing in for `--review-model`.
+    P10 = {"input": {"usd": 10.0}, "output": {"usd": 20.0}}
+
+    U = {"prompt_tokens": 1000, "completion_tokens": 500}
+
+    def _parent(self, cap=None):
+        L = _agent.CostLedger(max_spend=cap)
+        L.bind_pricing(self.P)
+        return L
+
+    def _child(self, parent, name="scout", pricing=None):
+        C = _agent.CostLedger(mirror=(parent, name))
+        C.bind_pricing(pricing or self.P)
+        return C
+
+    # -- the seam ------------------------------------------------------------
+
+    def test_a_mirrored_child_lands_in_the_parent_bucket(self):
+        P = self._parent()
+        self._child(P).record(self.U, seconds=1.5)
+        row = P.buckets["scout"]
+        self.assertEqual((row["calls"], row["prompt_tokens"],
+                          row["completion_tokens"], row["seconds"]),
+                         (1, 1000, 500, 1.5))
+        self.assertAlmostEqual(row["cost"], 0.0020)
+
+    def test_an_unmirrored_child_leaves_the_parent_empty(self):
+        # The control. Without this, every assertion above could be passing because
+        # something else populates the bucket -- and a bucket that is always written
+        # is not evidence that the MIRROR wrote it.
+        P = self._parent()
+        C = _agent.CostLedger()
+        C.bind_pricing(self.P)
+        C.record(self.U, seconds=1.5)
+        self.assertEqual(P.buckets, {})
+        self.assertEqual(P.billed_total(), 0.0)
+
+    def test_a_mirrored_child_never_grows_a_bucket_of_its_own(self):
+        # Why `test_summary_is_unchanged_without_a_bucket` still passes: the child
+        # writes the PARENT's partition. `run_loop`'s stop-reason messages render
+        # `summary()` on this object and must not sprout an `[incl. ...]` clause.
+        P = self._parent()
+        C = self._child(P)
+        C.record(self.U, seconds=1.5)
+        self.assertEqual(C.buckets, {})
+        self.assertEqual(C.summary(),
+                         "cost: $0.0020 (tokens prompt=1000 completion=500)")
+
+    def test_the_child_keeps_its_own_main_loop_accounting(self):
+        # `--subagent-max-tokens` reads these, so mirroring must be purely additive.
+        P = self._parent()
+        C = self._child(P)
+        C.record(self.U)
+        self.assertEqual((C.prompt_tokens, C.completion_tokens), (1000, 500))
+        self.assertEqual(C.api_calls_total, 1)
+        self.assertEqual(len(C.api_calls()), 1)
+
+    def test_a_mirrored_record_leaves_the_parent_main_counters_untouched(self):
+        # THE isolation property. A mirror that recorded into the parent's MAIN loop
+        # would fold a fresh ~0%-cached prefix into the conversation's cache rate --
+        # fabricating exactly the cliff #99's trace exists to detect.
+        P = self._parent()
+        self._child(P).record(self.U, seconds=1.5)
+        self.assertEqual((P.prompt_tokens, P.completion_tokens, P.total), (0, 0, 0.0))
+        self.assertEqual((P.cache_read_unreported, P.cache_write_unreported),
+                         (False, False))
+        self.assertIsNone(P.cache_hit_percent())
+
+    def test_a_mirrored_record_appends_no_parent_trace_row(self):
+        # `calls_dropped()` is `api_calls_total - head - tail`; bumping the counter
+        # without a row would make `/usage` report phantom dropped rows.
+        P = self._parent()
+        self._child(P).record(self.U)
+        self.assertEqual((P.api_calls(), P.api_calls_total, P.calls_dropped()),
+                         ([], 0, 0))
+        self.assertEqual(P.bucket_calls("scout"), 1)
+
+    # -- pricing (the load-bearing correction to #117's own design) -----------
+
+    def test_the_child_is_priced_at_its_own_rate_not_the_parents(self):
+        # `--review-model` is deliberately a different model. Re-costing the child's
+        # usage on the parent would bill the reviewer's tokens at the author's rate --
+        # a fabricated number wearing a measurement's name.
+        P = self._parent()
+        self._child(P, "review", pricing=self.P10).record(self.U)
+        self.assertAlmostEqual(P.buckets["review"]["cost"], 0.0200)   # 10x, not 0.0020
+        self.assertAlmostEqual(P.billed_total(), 0.0200)
+
+    def test_an_unpriced_child_taints_only_the_bucket(self):
+        P = self._parent()
+        C = _agent.CostLedger(mirror=(P, "scout"))    # no pricing bound
+        C.record(self.U)
+        self.assertIs(P.buckets["scout"]["unpriced"], True)
+        self.assertIs(P.unpriced, False)             # stays main-loop-only
+        self.assertTrue(P.any_unpriced())
+
+    def test_a_usage_less_child_call_marks_the_bucket_unreported(self):
+        # #98's rule one partition over: absent is UNKNOWN, never a measured zero.
+        P = self._parent()
+        self._child(P).record(None, seconds=0.5)
+        row = P.buckets["scout"]
+        self.assertIs(row["unreported"], True)
+        self.assertEqual((row["calls"], row["prompt_tokens"]), (1, 0))
+        self.assertEqual(_agent.CostLedger.bucket_money(row), "n/a")
+        self.assertTrue(P.any_unreported())
+
+    # -- bounds --------------------------------------------------------------
+
+    def test_the_mirror_does_not_reach_a_grandparent(self):
+        # `record_bucket` is a leaf on purpose. Propagating would double-count spend
+        # the parent's bucket has already banked.
+        G = self._parent()
+        P = _agent.CostLedger(mirror=(G, "spawn"))
+        P.bind_pricing(self.P)
+        self._child(P, "scout").record(self.U)
+        self.assertEqual(P.buckets["scout"]["calls"], 1)
+        self.assertEqual(G.buckets, {})
+
+    def test_a_self_mirror_is_rejected(self):
+        # Honest scope: a self-mirror is not reachable from `__init__`'s own call (you
+        # cannot name the object being constructed), so re-init is the only way to
+        # express it. The guard is cheap and states the invariant -- a ledger that
+        # mirrored into itself would bank every call BOTH into its main counters and
+        # into its own bucket, double-counting inside one object.
+        P = self._parent()
+        with self.assertRaises(ValueError):
+            P.__init__(mirror=(P, "scout"))
+
+    def test_the_raw_usage_dump_fires_once_per_api_call(self):
+        # One API call must produce ONE `usage-raw:` line. Routing the mirror through
+        # `record()` instead of `record_bucket()` emits two -- interleaved with other
+        # workers' lines under `--parallel`, which is what the single-print contract
+        # exists to prevent.
+        P = self._parent()
+        C = self._child(P)
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {"VENICE_USAGE_RAW": "1"}), \
+             mock.patch.object(sys, "stderr", err):
+            C.record(self.U)
+        self.assertEqual(err.getvalue().count("usage-raw:"), 1)
+
+    # -- the #117 ask --------------------------------------------------------
+
+    def test_the_session_cap_counts_rail_spend(self):
+        # THE point of the slice: `--session-max-spend` bounds a rail-heavy run.
+        P = self._parent(cap=0.001)
+        self.assertFalse(P.over())
+        self._child(P).record(self.U)
+        self.assertEqual(P.total, 0.0)               # nothing in the main loop at all
+        self.assertTrue(P.over())
+
+    def test_bucket_tokens_stay_out_of_the_parent_token_gate(self):
+        # `over_tokens()` is #52's ceiling on a WORKER's own conversation, and the
+        # parent's is not the worker's. Deliberately unchanged by this slice.
+        P = _agent.CostLedger(max_tokens=100)
+        P.bind_pricing(self.P)
+        self._child(P).record(self.U)
+        self.assertFalse(P.over_tokens())
+
+    def test_the_child_token_cap_is_unaffected_by_mirroring(self):
+        P = self._parent()
+        C = _agent.CostLedger(max_tokens=100, mirror=(P, "scout"))
+        C.bind_pricing(self.P)
+        C.record(self.U)
+        self.assertTrue(C.over_tokens())             # the worker's own ceiling still bites
+
+    # -- concurrency ---------------------------------------------------------
+
+    def test_record_bucket_mutates_under_the_lock(self):
+        # Structural, exactly like `test_record_tool_mutates_under_the_lock`: CPython's
+        # GIL does not actually lose these increments, so a hammer-and-count test would
+        # pass with the lock DELETED and be a vacuous guard. Pin instead that the
+        # mutation happens while the lock is held.
+        L = _agent.CostLedger()
+        held = []
+        real = L._buckets_lock
+
+        class Watched:
+            def __enter__(self):
+                real.acquire()
+                held.append("in")
+                return self
+
+            def __exit__(self, *exc):
+                held.append("out")
+                real.release()
+                return False
+
+        L._buckets_lock = Watched()
+        L.record_bucket("scout", cost=0.1)
+        L.record_bucket("scout", cost=0.1)
+        self.assertEqual(held, ["in", "out", "in", "out"])
+
+    def test_mirrored_children_are_correct_under_real_threads(self):
+        # Not a race detector -- a smoke test for how `--parallel` actually calls this:
+        # up to `_MAX_PARALLEL` scouts mirroring into one parent row at once.
+        P = self._parent()
+        old = sys.getswitchinterval()
+        sys.setswitchinterval(1e-6)
+        self.addCleanup(sys.setswitchinterval, old)
+
+        def hammer():
+            C = self._child(P)
+            for _ in range(200):
+                C.record(self.U)
+
+        threads = [threading.Thread(target=hammer) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(P.buckets["scout"]["calls"], 1600)
+        self.assertEqual(P.buckets["scout"]["prompt_tokens"], 1600 * 1000)
+
+    # -- the constructor -----------------------------------------------------
+
+    def test_subagent_ledger_binds_the_childs_own_pricing(self):
+        models = [{"id": "reviewer", "model_spec": {"pricing": self.P10}},
+                  {"id": "author", "model_spec": {"pricing": self.P}}]
+        P = self._parent()
+        C = _agent.subagent_ledger(models, "reviewer", max_tokens=50,
+                                   mirror=(P, "review"))
+        self.assertEqual(C.max_tokens, 50)
+        self.assertIsNone(C.max_spend)               # the parent owns the money gate
+        C.record(self.U)
+        self.assertAlmostEqual(P.buckets["review"]["cost"], 0.0200)
+
+    def test_subagent_ledger_without_a_parent_is_standalone(self):
+        # `venice review` (the standalone CLI) has no parent ledger and must keep
+        # working -- `mirror=None` is a supported state, not an oversight.
+        C = _agent.subagent_ledger([], "m")
+        C.record(self.U)
+        self.assertEqual(C.prompt_tokens, 1000)
+        self.assertEqual(C.buckets, {})
+
+    def test_an_unknown_model_still_meters_tokens(self):
+        C = _agent.subagent_ledger([], "not-in-catalog")
+        C.record(self.U)
+        self.assertTrue(C.unpriced)
+        self.assertEqual(C.prompt_tokens + C.completion_tokens, 1500)
 
 
 class TestCallTrace(unittest.TestCase):

@@ -1040,7 +1040,8 @@ def scout_tool(oai, model, root: str, client, base_kwargs, *,
                default_max_tool_calls: int = _SCOUT_MAX_TOOL_CALLS,
                hard_cap: int = _SCOUT_HARD_CAP,
                max_tokens: Optional[int] = None,
-               dispatches: Optional[list] = None) -> _agent.Tool:
+               dispatches: Optional[list] = None,
+               models=None, parent_ledger=None) -> _agent.Tool:
     """Build the `venice_scout` Tool: delegate a read-only investigation to a
     disposable subagent (context firewall, #52).
 
@@ -1063,11 +1064,18 @@ def scout_tool(oai, model, root: str, client, base_kwargs, *,
     appended for the `venice_merge` rollup. `None` (the default) records nothing.
 
     Per-subagent token cap: `max_tokens` (`--subagent-max-tokens`, None = uncapped) bounds
-    the scout's cumulative prompt+completion tokens. A fresh per-invoke `CostLedger` (built
-    for every call, so `tokens` is always reported) meters the nested loop; `run_loop`'s
-    token gate forces a final answer once the ceiling is crossed. The ledger is unpriced
-    (token counting needs no catalog) and per-invoke, so it stays thread-safe under
-    `--parallel`. The report carries `tokens`/`token_cap` for handoff provenance.
+    the scout's cumulative prompt+completion tokens. A fresh per-invoke ledger (built for
+    every call, so `tokens` is always reported) meters the nested loop; `run_loop`'s token
+    gate forces a final answer once the ceiling is crossed. Per-invoke, so it stays
+    thread-safe under `--parallel`. The report carries `tokens`/`token_cap` for handoff
+    provenance.
+
+    `models`/`parent_ledger` (#117): the ledger is now PRICED (`_agent.subagent_ledger`)
+    and mirrored into the parent's `scout` bucket, so a scout's turns reach the footer,
+    `/usage` and `--session-max-spend` instead of dying with the call. It was unpriced
+    before on the reasoning that token counting needs no catalog -- true only while the
+    tokens went nowhere. The mirror is a SIDE CHANNEL: nothing about it may ride `out`
+    below, which is the tool result the MODEL reads (see #99's containment pin).
     """
     root = os.path.realpath(root)
 
@@ -1084,7 +1092,11 @@ def scout_tool(oai, model, root: str, client, base_kwargs, *,
         inner = read_only_tools(root, client, include_search=include_search)
         if web_tool is not None:
             inner.append(web_tool)  # #77 "docs scout": read-only + web discovery
-        led = _agent.CostLedger(max_tokens=max_tokens)  # per-invoke -> --parallel-safe
+        # per-invoke -> --parallel-safe; priced + mirrored to the parent's bucket (#117)
+        led = _agent.subagent_ledger(
+            models, model, max_tokens=max_tokens,
+            mirror=(parent_ledger, "scout") if parent_ledger is not None else None,
+        )
         try:
             out = _agent.run_scout(
                 oai, model, task, inner, base_kwargs,
@@ -1118,7 +1130,7 @@ def scout_tool(oai, model, root: str, client, base_kwargs, *,
 
 
 def web_search_tool(oai, model: str, *, models=None, search_model=None,
-                    mode: str = "on") -> _agent.Tool:
+                    mode: str = "on", parent_ledger=None) -> _agent.Tool:
     """Build the `venice_web_search` rail Tool (#77): DISCOVER docs on the web.
 
     Makes one Venice web-search completion (via `_agent.run_web_search`) against a
@@ -1138,8 +1150,16 @@ def web_search_tool(oai, model: str, *, models=None, search_model=None,
 
     Model choice is operator-controlled (`search_model` / the coding `model`), resolved
     once here and never model-facing, so the model can't escalate to a costlier model.
+
+    `parent_ledger` (#117) banks each search into the parent's `web_search` bucket. Note
+    this ONE Tool object is handed both to the parent's tool list and to the scout's inner
+    set (`code.py` builds it once), so the mirror is bound here, once: a search bills the
+    same bucket whoever called it, and a search made INSIDE a scout is billed exactly once
+    (to `web_search`) while the scout's own turns bill `scout`. Rolling child ledgers up
+    into their caller instead would have double-counted precisely this shared object.
     """
     resolved = _agent.resolve_web_search_model(models, search_model, model)
+    mirror = (parent_ledger, "web_search") if parent_ledger is not None else None
 
     def invoke(arguments, *, confirm: bool = False):
         query = (_clean(arguments).get("query") or "").strip()
@@ -1152,7 +1172,8 @@ def web_search_tool(oai, model: str, *, models=None, search_model=None,
                 "supportsWebSearch"
             )
         try:
-            return _agent.run_web_search(oai, resolved, query, mode=mode, models=models)
+            return _agent.run_web_search(oai, resolved, query, mode=mode,
+                                         models=models, mirror=mirror)
         except Exception as e:  # incl. openai.OpenAIError from the completion
             return _err(f"web_search failed: {e}")
 
@@ -1203,7 +1224,8 @@ def spawn_tool(oai, model, base_kwargs, parent_tools, *,
                hard_cap: int = _SPAWN_HARD_CAP,
                max_spend: Optional[float] = None,
                max_tokens: Optional[int] = None,
-               dispatches: Optional[list] = None) -> _agent.Tool:
+               dispatches: Optional[list] = None,
+               models=None, parent_ledger=None) -> _agent.Tool:
     """Build the `venice_spawn` Tool: delegate a bounded task to a disposable, write/
     paid-capable WORKER subagent (#52 slice 2).
 
@@ -1242,9 +1264,16 @@ def spawn_tool(oai, model, base_kwargs, parent_tools, *,
     Per-subagent token cap: `max_tokens` (`--subagent-max-tokens`, None = uncapped) bounds
     the worker's cumulative prompt+completion tokens over its turns -- orthogonal to the USD
     media cap (that meters paid-tool spend; this meters the model turns). Enforced via a
-    fresh per-invoke `CostLedger` and `run_loop`'s token gate; the report carries
+    fresh per-invoke ledger and `run_loop`'s token gate; the report carries
     `tokens`/`token_cap`. `tokens` can slightly exceed the cap (the crossing turn completes,
     like `spent_usd` vs the media cap).
+
+    `models`/`parent_ledger` (#117): that ledger is now PRICED and mirrored into the
+    parent's `spawn` bucket, so a worker's model turns reach the footer, `/usage` and
+    `--session-max-spend`. Note the THIRD money axis this adds, all deliberately separate:
+    `max_spend`/`spent_usd` above meters paid MEDIA the worker bought; the bucket meters
+    the worker's own COMPLETIONS. They are different purchases and must not be summed.
+    The mirror is a side channel and must never ride `out` (#99's containment pin).
     """
     def invoke(arguments, *, confirm: bool = False):
         args = _clean(arguments)
@@ -1295,9 +1324,12 @@ def spawn_tool(oai, model, base_kwargs, parent_tools, *,
         # Per-subagent token cap: a fresh per-invoke ledger meters the worker's own LLM
         # turns (prompt+completion). Distinct from the USD media meter above (that gates
         # paid *tool calls*; this gates the *next model turn*). Built always so `tokens` is
-        # reported even uncapped; per-invoke so it's --parallel-safe; unpriced (token
-        # counting needs no catalog).
-        led = _agent.CostLedger(max_tokens=max_tokens)
+        # reported even uncapped; per-invoke so it's --parallel-safe; priced + mirrored to
+        # the parent's `spawn` bucket (#117).
+        led = _agent.subagent_ledger(
+            models, model, max_tokens=max_tokens,
+            mirror=(parent_ledger, "spawn") if parent_ledger is not None else None,
+        )
         try:
             out = _agent.run_spawn(
                 oai, model, task, granted, base_kwargs,
