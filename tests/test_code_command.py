@@ -49,6 +49,7 @@ def _code_args(**ov):
         auto_compact=None, compact_threshold=None, compact_keep_turns=None,
         session_max_spend=None, cont=None, ephemeral=None,
         review=None, review_model=None, review_rounds=None,   # #80 part 1a
+        browser=None, browser_allow=None, browser_deny=None,
     )
     base.update(ov)
     return argparse.Namespace(**base)
@@ -93,6 +94,22 @@ class TestCodeCommand(unittest.TestCase):
              mock.patch.object(sys, "stderr", stderr or io.StringIO()):
             rc = code._run(args)
         return rc, calls
+
+    def test_browser_flag_fails_before_sdk_auth_or_network(self):
+        from venice.commands import code
+        err = io.StringIO()
+        with mock.patch.object(code._openai, "import_openai") as import_openai, \
+                mock.patch.object(code, "build_client_from_auth") as build_client, \
+                mock.patch("venice.client.urllib.request.urlopen") as urlopen, \
+                mock.patch.object(sys, "stderr", err):
+            rc = code._run(_code_args(
+                task="fetch a page", root=self.root, browser=True, auto=True))
+        self.assertEqual(rc, 2)
+        self.assertIn("temporarily disabled for security", err.getvalue())
+        self.assertIn("GHSA-mqjr-2vh8-6fvg", err.getvalue())
+        import_openai.assert_not_called()
+        build_client.assert_not_called()
+        urlopen.assert_not_called()
 
     # --- plan-only ---
     def test_plan_only_prints_and_exits_without_executing(self):

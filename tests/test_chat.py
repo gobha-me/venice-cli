@@ -31,6 +31,8 @@ def _args(**ov):
         max_spend=None, yes=None, output=None,
         # --- shell exec tool (#33) ---
         shell=None, shell_allow=None, shell_deny=None, shell_unrestricted=None,
+        # --- browser compatibility flags (#71; security-disabled) ---
+        browser=None, browser_allow=None, browser_deny=None,
         # --- external MCP client (#21) ---
         mcp=None, no_mcp=False,
         # --- interactive / REPL (#22) ---
@@ -229,6 +231,21 @@ class TestChat(unittest.TestCase):
              mock.patch.object(sys, "stderr", stderr or io.StringIO()):
             rc = chat._run(args)
         return rc, fake, captured
+
+    def test_browser_flag_fails_before_sdk_auth_or_network(self):
+        from venice.commands import chat
+        err = io.StringIO()
+        with mock.patch.object(chat._openai, "import_openai") as import_openai, \
+                mock.patch.object(chat, "build_client_from_auth") as build_client, \
+                mock.patch("venice.client.urllib.request.urlopen") as urlopen, \
+                mock.patch.object(sys, "stderr", err):
+            rc = chat._run(_args(message="fetch a page", browser=True, stream=False))
+        self.assertEqual(rc, 2)
+        self.assertIn("temporarily disabled for security", err.getvalue())
+        self.assertIn("GHSA-mqjr-2vh8-6fvg", err.getvalue())
+        import_openai.assert_not_called()
+        build_client.assert_not_called()
+        urlopen.assert_not_called()
 
     def test_reply_printed_non_stream(self):
         out = io.StringIO()

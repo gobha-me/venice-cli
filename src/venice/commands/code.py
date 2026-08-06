@@ -41,8 +41,8 @@ from typing import List, Optional
 
 from .. import auth, config, userconfig
 from ..client import build_client_from_auth
-from . import (_agent, _code, _compact, _mailbox, _models, _openai, _repl, _review,
-               _session, _steer)
+from . import (_agent, _browser, _code, _compact, _mailbox, _models, _openai,
+               _repl, _review, _session, _steer)
 
 _DEFAULT_MAX_TOOL_CALLS = 25
 
@@ -261,22 +261,20 @@ def register(subparsers) -> None:
     )
     grp.add_argument(
         "--browser", action="store_true", dest="browser", default=None,
-        help="Expose web_fetch + browser_capture tools so the agent can fetch a URL "
-        "and headless-render a page (screenshot / post-JS DOM) to verify its own work. "
-        "http/https only; the cloud metadata endpoint is always blocked; scope hosts "
-        "with --browser-allow/--browser-deny or the config `browser` section (#71).",
+        help="Reserved browser rail flag. Temporarily unavailable for security; "
+        "fails closed before any API or network access.",
     )
     grp.add_argument(
         "--browser-allow", action="append", dest="browser_allow", default=None,
         metavar="HOST",
-        help="Allow only these hosts for the browser tools (repeatable; globs ok, "
-        "matched on the URL host). Adds to the config browser.allow list.",
+        help="Retained browser.allow config compatibility option; inert while the "
+        "browser rail is security-disabled.",
     )
     grp.add_argument(
         "--browser-deny", action="append", dest="browser_deny", default=None,
         metavar="PATTERN",
-        help="Refuse URLs whose host or full URL matches these globs (repeatable, "
-        "always enforced, wins over --browser-allow). Adds to config browser.deny.",
+        help="Retained browser.deny config compatibility option; inert while the "
+        "browser rail is security-disabled.",
     )
     grp.add_argument(
         "--memory", action="store_true", dest="memory", default=None,
@@ -368,8 +366,7 @@ def register(subparsers) -> None:
     grp.add_argument(
         "--web-search", action="store_true", default=None, dest="web_search",
         help="Expose venice_web_search: DISCOVER documentation on the web (a Venice "
-        "web-search completion returning an answer + cited URLs). Pairs with --browser "
-        "to then fetch a cited page under the browser.* URL policy. The planner and (with "
+        "web-search completion returning an answer + cited URLs). The planner and (with "
         "--scout) a read-only 'docs scout' can use it; spawn WORKERS cannot (injection "
         "blast radius). Billed; bounded by the tool-call budget. Config: "
         "defaults.code.web_search (#77).",
@@ -634,6 +631,9 @@ def _run(args) -> int:
         return 2
     _session.apply_to_args(args, session, "code")
     userconfig.apply_defaults(args, "code")
+    if getattr(args, "browser", None):
+        print(f"code: {_browser.UNAVAILABLE_MESSAGE}", file=sys.stderr)
+        return 2
 
     # Faithful root restore: an explicit --root/$VENICE_CODE_ROOT still wins, else a
     # resumed session re-sandboxes to where it left off (tools + system prompt rebind
@@ -683,15 +683,15 @@ def _run(args) -> int:
     pol = userconfig.shell_policy(doc)
     shell_allow = list(pol["allow"]) + list(getattr(args, "shell_allow", None) or [])
     shell_deny = list(pol["deny"]) + list(getattr(args, "shell_deny", None) or [])
-    bpol = userconfig.browser_policy(doc)  # #71 URL allow/deny policy
+    bpol = userconfig.browser_policy(doc)  # #71 retained compatibility config
     browser_allow = list(bpol["allow"]) + list(getattr(args, "browser_allow", None) or [])
     browser_deny = list(bpol["deny"]) + list(getattr(args, "browser_deny", None) or [])
     rpol = userconfig.roots_policy(doc)  # #76 extra writable / read-only roots
     allow_root = list(rpol["allow"]) + list(getattr(args, "allow_root", None) or [])
     deny_root = list(rpol["deny"]) + list(getattr(args, "deny_root", None) or [])
     # #52 planner slice: --planner implies the three rails it orchestrates (there are
-    # no --no-scout/--no-spawn/--no-memory flags, so nothing can conflict -- the same
-    # one-flag bundling as --browser/--assets). Must precede code_tools (reads memory).
+    # no --no-scout/--no-spawn/--no-memory flags, so nothing can conflict -- like
+    # --assets). Must precede code_tools (reads memory).
     planner = bool(getattr(args, "planner", None))
     if planner:
         args.scout = args.spawn = args.memory = True

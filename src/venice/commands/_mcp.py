@@ -1205,32 +1205,8 @@ def web_fetch_tool(
     url, *, mode: str = "text", max_bytes: Optional[int] = None,
     timeout: Optional[int] = None, allow=(), deny=(),
 ) -> dict:
-    """Fetch an http(s) URL with stdlib urllib and return its text or raw HTML (issue #71).
-
-    Read-only, no browser, zero extra deps -- good for non-SPA "read this page". For
-    JS-rendered pages use `browser_capture`. Not spend-gated. URL safety: only http/https,
-    the cloud metadata endpoint is always blocked, redirects are re-checked against the
-    policy, and the operator's browser allow/deny globs apply. `allow`/`deny` are supplied
-    by the tool wiring (bound from config), never by the model.
-    """
-    if not url or not str(url).strip():
-        return _err("web_fetch: url is required")
-    res = _browser.web_fetch(str(url), mode=(mode or "text"), max_bytes=max_bytes,
-                             timeout=timeout, allow=allow, deny=deny)
-    if not res.get("ok"):
-        return _err(f"web_fetch: {res.get('error', 'failed')}")
-    out = {
-        "status": "ok",
-        "url": str(url),
-        "final_url": res.get("final_url"),
-        "content_type": res.get("content_type"),
-        "truncated": res.get("truncated", False),
-    }
-    if "text" in res:
-        out["text"] = res["text"]
-    if "html" in res:
-        out["html"] = res["html"]
-    return out
+    """Fail closed while the browser rail has no enforced egress boundary."""
+    return _err(f"web_fetch: {_browser.UNAVAILABLE_MESSAGE}")
 
 
 def browser_capture_tool(
@@ -1238,48 +1214,8 @@ def browser_capture_tool(
     assert_contains: Optional[str] = None, output_dir: Optional[str] = None,
     allow=(), deny=(),
 ) -> dict:
-    """Headless-render an http(s) URL: post-JS DOM and/or a screenshot PNG (issue #71).
-
-    Chromium-family browsers (chromium/chrome/brave) give a post-JS DOM (mode `dom`/`text`)
-    and/or a screenshot; Firefox is a screenshot-only fallback. Writes any screenshot to the
-    output dir and returns its PATH (never an inline blob, like `venice_image`); returns the
-    DOM inline (capped). Pass `assert_contains` to deterministically check the rendered DOM
-    contains a substring -- the robust "did the JS land" check (beats eyeballing a shot).
-    Degrades gracefully ("no headless browser available") when no browser is installed. Not
-    spend-gated. URL safety mirrors `web_fetch`; `allow`/`deny` come from the wiring, not the
-    model.
-    """
-    if not url or not str(url).strip():
-        return _err("browser_capture: url is required")
-    m = mode or "dom"
-    out_path = None
-    if m in ("screenshot", "both"):
-        out_dir = resolve_output_dir(output_dir)
-        try:
-            out_dir.mkdir(parents=True, exist_ok=True)
-        except OSError as e:
-            return _err(f"browser_capture: cannot create output dir {out_dir}: {e}")
-        out_path = str(out_dir / _browser.capture_filename(url))
-    res = _browser.capture(str(url), out_path=out_path, mode=m, wait_ms=wait_ms,
-                           timeout=timeout, assert_contains=assert_contains,
-                           allow=allow, deny=deny)
-    if not res.get("ok"):
-        return _err(f"browser_capture: {res.get('error', 'failed')}")
-    out = {"status": "ok", "url": str(url), "mode": m,
-           "browser": res.get("browser"), "family": res.get("family")}
-    if res.get("screenshot_path"):
-        out["screenshot_path"] = res["screenshot_path"]
-    if "dom" in res:
-        out["dom"] = res["dom"]
-        out["truncated"] = res.get("truncated", False)
-    if "contains" in res:
-        out["assert_contains"] = res.get("assert_contains")
-        out["contains"] = res["contains"]
-    elif assert_contains is not None:
-        out["assert_contains"] = str(assert_contains)
-        out["contains"] = None
-        out["note"] = "assert_contains needs a DOM (mode dom/text/both on a Chromium browser)"
-    return out
+    """Fail closed while the browser rail has no enforced egress boundary."""
+    return _err(f"browser_capture: {_browser.UNAVAILABLE_MESSAGE}")
 
 
 def models_tool(client, *, type: str) -> dict:
