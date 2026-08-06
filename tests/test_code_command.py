@@ -138,6 +138,10 @@ class TestCodeCommand(unittest.TestCase):
         self.assertEqual(calls[0]["tool_choice"], "none")   # plan
         self.assertEqual(calls[1]["tool_choice"], "auto")   # execute loop
         self.assertEqual(calls[3]["tool_choice"], "none")   # acceptance check
+        # #128: every phase of one top-level conversation shares backend affinity.
+        keys = [c["extra_body"]["prompt_cache_key"] for c in calls]
+        self.assertTrue(keys[0].startswith("venice-"))
+        self.assertEqual(len(set(keys)), 1)
         # auto -> confirm=True -> the write actually happened
         with open(os.path.join(self.root, "hello.py")) as f:
             self.assertEqual(f.read(), "def hi():\n    return 1\n")
@@ -505,6 +509,7 @@ class TestCodeCommand(unittest.TestCase):
             captured["root"] = root
             captured["system_reseed"] = system_reseed
             captured["ledger"] = kw.get("ledger")
+            captured["gen_kwargs"] = gen_kwargs
             return 0
 
         stdin = mock.MagicMock()
@@ -530,6 +535,9 @@ class TestCodeCommand(unittest.TestCase):
         # #117: the REPL is HANDED the hoisted ledger rather than building its own,
         # because the rails already mirror into that object.
         self.assertIsNotNone(captured["ledger"])
+        self.assertTrue(
+            captured["gen_kwargs"]["extra_body"]["prompt_cache_key"].startswith(
+                "venice-"))
 
     # --- session resume (#47) ---
     def _mk_zone(self):
@@ -611,6 +619,51 @@ class TestCodeCommand(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(captured["root"], saved_root)   # faithful restore
         self.assertEqual(captured["session_id"], sess.id)
+
+    def test_prompt_cache_key_survives_save_reset_and_resume(self):
+        zone, _session = self._mk_zone()
+        rc, first_calls = self._run_interactive(
+            _code_args(task="first", root=self.root, interactive=True, auto=True),
+            [FakeToolCompletion("done")], ["/exit"], zone,
+        )
+        self.assertEqual(rc, 0)
+        first_key = first_calls[0]["extra_body"]["prompt_cache_key"]
+
+        with mock.patch.dict(os.environ, {"VENICE_SESSIONS_DIR": zone}):
+            saved = _session.load(_session.most_recent("code").id, "code")
+        self.assertEqual(
+            saved.gen_kwargs["extra_body"]["prompt_cache_key"], first_key)
+
+        rc, resumed_calls = self._run_interactive(
+            _code_args(resume=saved.id, root=self.root, auto=True),
+            [FakeToolCompletion("done again")],
+            ["/reset", "second", "/exit"], zone,
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            resumed_calls[0]["extra_body"]["prompt_cache_key"], first_key)
+
+    def test_old_session_without_a_cache_key_is_upgraded_on_resume(self):
+        zone, _session = self._mk_zone()
+        old = _session.new_session(
+            "code", label="venice code", model="llama-3.3-70b", root=self.root,
+            gen_kwargs={"temperature": 0.4},
+            messages=[{"role": "system", "content": "old"}],
+        )
+        with mock.patch.dict(os.environ, {"VENICE_SESSIONS_DIR": zone}):
+            _session.save(old)
+
+        rc, calls = self._run_interactive(
+            _code_args(resume=old.id, root=self.root, auto=True),
+            [FakeToolCompletion("continued")], ["continue", "/exit"], zone,
+        )
+        self.assertEqual(rc, 0)
+        key = calls[0]["extra_body"]["prompt_cache_key"]
+        self.assertTrue(key.startswith("venice-"))
+        with mock.patch.dict(os.environ, {"VENICE_SESSIONS_DIR": zone}):
+            upgraded = _session.load(old.id, "code")
+        self.assertEqual(
+            upgraded.gen_kwargs["extra_body"]["prompt_cache_key"], key)
 
 
 class TestOneShotSteering(unittest.TestCase):

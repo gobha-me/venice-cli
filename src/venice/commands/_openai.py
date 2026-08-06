@@ -13,7 +13,55 @@ catalog, so the missing-SDK path never touches the network.
 """
 from __future__ import annotations
 
+import os
 import sys
+from typing import Optional
+
+
+_PROMPT_CACHE_KEY = "prompt_cache_key"
+
+
+def prompt_cache_key(kwargs: Optional[dict]) -> Optional[str]:
+    """The OpenAI-compatible cache-affinity key carried by ``extra_body``.
+
+    The project supports ``openai>=1.40``, predating the SDK's typed
+    ``prompt_cache_key`` argument. Keeping the wire field in ``extra_body`` makes it
+    available on every supported SDK version; the SDK merges it into the request's
+    top-level JSON object.
+    """
+    extra = (kwargs or {}).get("extra_body")
+    value = extra.get(_PROMPT_CACHE_KEY) if isinstance(extra, dict) else None
+    return value if isinstance(value, str) and value else None
+
+
+def with_prompt_cache_key(kwargs: Optional[dict], key: Optional[str] = None) -> dict:
+    """Copy generation kwargs and set one opaque prompt-cache routing key.
+
+    A missing ``key`` mints a new conversation identity. Nested ``extra_body`` is
+    copied before mutation so a disposable subagent can replace its parent's key
+    without changing the parent session or its Venice extension parameters.
+    """
+    out = dict(kwargs or {})
+    extra = out.get("extra_body")
+    extra = dict(extra) if isinstance(extra, dict) else {}
+    extra[_PROMPT_CACHE_KEY] = key or f"venice-{os.urandom(16).hex()}"
+    out["extra_body"] = extra
+    return out
+
+
+def without_prompt_cache_key(kwargs: Optional[dict]) -> dict:
+    """Copy generation kwargs without a parent conversation's affinity key."""
+    out = dict(kwargs or {})
+    extra = out.get("extra_body")
+    if not isinstance(extra, dict) or _PROMPT_CACHE_KEY not in extra:
+        return out
+    extra = dict(extra)
+    extra.pop(_PROMPT_CACHE_KEY, None)
+    if extra:
+        out["extra_body"] = extra
+    else:
+        out.pop("extra_body", None)
+    return out
 
 
 def import_openai(label: str):

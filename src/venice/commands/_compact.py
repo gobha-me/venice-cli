@@ -50,6 +50,8 @@ import time
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
+from . import _openai
+
 # Rough chars-per-token for English/code text. Deliberately conservative
 # (overestimate tokens) so the fallback triggers compaction a little early
 # rather than a little late; real counts from `usage` override it anyway.
@@ -315,7 +317,10 @@ def compact_messages(
     prefix, tail = split
     sys_msgs = messages[: len(messages) - len(prefix) - len(tail)]
 
-    kwargs = dict(base_kwargs or {})
+    # #128: compaction is a deliberately fresh summarization conversation. Reusing
+    # the parent session's routing identity would mix unrelated prefixes on one cache
+    # affinity key; preserve all other generation/Venice parameters while stripping it.
+    kwargs = _openai.without_prompt_cache_key(base_kwargs)
     kwargs.pop("stream", None)
     kwargs.pop("stream_options", None)
     kwargs.pop("tools", None)

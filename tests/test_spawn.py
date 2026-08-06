@@ -234,6 +234,28 @@ class TestRunScout(_ScoutBase):
         self.assertIn("SCOUT", first_msgs[0]["content"])
         self.assertEqual(first_msgs[1], {"role": "user", "content": "investigate"})
 
+    def test_each_disposable_conversation_replaces_the_parent_cache_key(self):
+        parent = {"extra_body": {
+            "prompt_cache_key": "parent-key",
+            "venice_parameters": {"include_venice_system_prompt": False},
+        }}
+        fake, calls = _fake_openai_seq([
+            FakeToolCompletion(_REPORT), FakeToolCompletion(_REPORT),
+        ])
+        tools = _code.read_only_tools(self.root)
+        _agent.run_scout(fake, "m", "one", tools, parent, max_tool_calls=4)
+        _agent.run_scout(fake, "m", "two", tools, parent, max_tool_calls=4)
+
+        keys = [c["extra_body"]["prompt_cache_key"] for c in calls]
+        self.assertNotIn("parent-key", keys)
+        self.assertNotEqual(keys[0], keys[1])
+        for call in calls:
+            self.assertEqual(
+                call["extra_body"]["venice_parameters"],
+                {"include_venice_system_prompt": False},
+            )
+        self.assertEqual(parent["extra_body"]["prompt_cache_key"], "parent-key")
+
     def test_focus_hint_threaded_into_system(self):
         seq = [FakeToolCompletion(_REPORT)]
         fake, calls = _fake_openai_seq(seq)

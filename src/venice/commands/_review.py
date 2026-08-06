@@ -56,7 +56,7 @@ import threading
 import time
 from typing import Dict, List, Optional, Tuple
 
-from . import _agent, _code, _exec
+from . import _agent, _code, _exec, _openai
 from ._exec import (  # shared exec rails (#33): one gate for every git shell-out
     DEFAULT_EXEC_TIMEOUT,
     MAX_OUTPUT_CHARS,
@@ -584,6 +584,9 @@ def _retry_for_verdict(oai, model: str, report: str, base_kwargs: dict,
     it is supposed to be bounded by.
     """
     _t0 = time.monotonic()
+    # #128: this retry is intentionally a fresh one-shot, not a continuation of the
+    # author or reviewer conversation, so it must not borrow either affinity identity.
+    retry_kwargs = _openai.without_prompt_cache_key(base_kwargs)
     resp = oai.chat.completions.create(
         model=model,
         messages=[
@@ -591,7 +594,7 @@ def _retry_for_verdict(oai, model: str, report: str, base_kwargs: dict,
             {"role": "assistant", "content": report or ""},
             {"role": "user", "content": RETRY_MSG},
         ],
-        **base_kwargs,
+        **retry_kwargs,
     )
     if ledger is not None:
         ledger.record(getattr(resp, "usage", None), seconds=time.monotonic() - _t0)

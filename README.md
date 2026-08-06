@@ -622,6 +622,12 @@ parameters, `max-tool-calls`, the `venice code` sandbox root, and the running
 token/cost usage — so resuming restores the whole context, not just the messages.
 The API key is never written to a session.
 
+`venice code` also assigns each session an opaque `prompt_cache_key`, sent as an
+OpenAI-compatible routing hint so successive plan, tool-loop, and verification calls
+stay on cache-affine backend infrastructure when the provider supports it. The key is
+not a credential. It survives `--resume` and `/reset`; disposable subagents receive
+their own keys, while compaction's deliberately fresh summary request receives none.
+
 One-shot `venice code "task"` runs are sessions too (they persist unless
 `--ephemeral`), so an unattended `--auto` run is resumable, inspectable, and —
 new in this release — **steerable while it runs** (see below).

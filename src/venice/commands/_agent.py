@@ -46,6 +46,7 @@ from . import _mcp
 from . import _memory
 from . import _models
 from . import _compact
+from . import _openai
 from .models import MODEL_TYPES
 
 
@@ -3400,9 +3401,13 @@ def _run_disposable(
         {"role": "system", "content": sys_prompt},
         {"role": "user", "content": task},
     ]
+    # #128: this is a fresh conversation, not a continuation of the parent. Replace
+    # (rather than inherit) its routing key; every call inside this disposable loop
+    # then shares affinity, while two workers cannot collide on one backend identity.
+    child_kwargs = _openai.with_prompt_cache_key(base_kwargs)
     with _capture_stdout() as buf:
         run_loop(
-            oai, model, messages, base_kwargs, tools,
+            oai, model, messages, child_kwargs, tools,
             max_tool_calls=max_tool_calls, yes=True, json_out=False,
             budget=budget, ledger=ledger,
         )
