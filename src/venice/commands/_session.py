@@ -12,7 +12,7 @@ committed turn via an atomic 0600 write (mirrors ``auth._save_secrets``). The
 store lives under ``~/.config/venice/sessions/`` by convention; ``$VENICE_SESSIONS_DIR``
 overrides it (resolved per call so this module has no import-time side effects).
 
-Hygiene (CLAUDE.md): the envelope holds only messages + settings + usage -- never
+Hygiene (AGENTS.md): the envelope holds only messages + settings + usage -- never
 the API key (which lives on the client, not in ``gen_kwargs``). Bare session ids
 are validated like personas (no traversal) and re-checked with
 :func:`_index.resolves_inside` so ``--resume ../credentials`` can't escape the zone.

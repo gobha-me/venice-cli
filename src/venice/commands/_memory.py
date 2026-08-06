@@ -28,7 +28,7 @@ file. The lock is **in-process only**: two separate ``venice`` processes writing
 store remain last-writer-wins (like ``secrets.json`` / ``sessions`` / the index) -- guard
 that with per-entry files or an OS lock if it ever becomes real; callers need not change.
 
-Hygiene (CLAUDE.md): an entry NAME is validated like a persona/secret name (no
+Hygiene (AGENTS.md): an entry NAME is validated like a persona/secret name (no
 traversal) and refused if secret-shaped (``is_secret_path``) so the store can't be
 used to label/stash credentials; the name is only ever a dict key, so there is no
 filesystem-path surface. The store lives under ``.venice/`` -- already pruned by

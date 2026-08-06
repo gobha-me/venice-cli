@@ -215,7 +215,7 @@ class Driver:
         pexpect's ``logfile`` records sends as well as reads, so a plain
         ``send()`` at a hidden prompt would put the value straight into the
         AssertionError text of a failing test -- i.e. into CI logs and session
-        transcripts, which CLAUDE.md names as the actual threat model, and which
+        transcripts, which AGENTS.md names as the actual threat model, and which
         CONTRIBUTING.md's "never log, print, or embed the API key ... including
         in error messages" forbids. Use this for anything typed at a getpass
         prompt (`venice login`, `venice secret set`).

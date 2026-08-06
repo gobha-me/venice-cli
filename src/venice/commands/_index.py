@@ -61,7 +61,7 @@ _DIR_DENYLIST = frozenset({
     "env", ".idea", ".vscode", "dist", "build", ".egg-info",
 })
 
-# Exact filenames never indexed (credential/secret-shaped -- CLAUDE.md invariant).
+# Exact filenames never indexed (credential/secret-shaped -- AGENTS.md invariant).
 _SECRET_NAMES = frozenset({"credentials", ".env", ".netrc", ".pgpass"})
 # Glob patterns (matched on basename) never indexed.
 _SECRET_GLOBS = (

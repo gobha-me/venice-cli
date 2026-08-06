@@ -18,7 +18,7 @@ channel):
 * Consumed in ``(mtime, name)`` order and deleted on read; a queued message
   survives an agent restart -- ``--resume`` drains it on the loop's first turn.
 
-Trust model (CLAUDE.md): a steer is *additive user input* at the same trust level
+Trust model (AGENTS.md): a steer is *additive user input* at the same trust level
 as the original task author. The mailbox is a local, owner-only directory, NOT a
 remote-control channel; nothing here reads or writes the API key.
 """

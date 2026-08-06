@@ -17,7 +17,7 @@ Slash-commands (minimal set): ``/system`` ``/model`` ``/reset`` ``/save``
 ``/exit`` (plus ``/help`` and the ``/quit`` alias). Transcripts round-trip as a
 JSON list of messages via ``--resume FILE`` and ``/save``.
 
-Secret hygiene (CLAUDE.md): the REPL prints only model output and message
+Secret hygiene (AGENTS.md): the REPL prints only model output and message
 content; it never echoes the API key. A saved transcript holds only the
 ``messages`` array (roles + content), never auth material.
 """

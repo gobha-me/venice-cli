@@ -5,7 +5,7 @@ Named secrets (the embed-backend key, later MCP/cluster tokens) live in
 `credentials` (`venice login`) and from plaintext `config.json`. This command is the
 CRUD surface; the store itself lives in `venice.auth`.
 
-Hygiene (CLAUDE.md): a value is only ever read via a hidden getpass prompt and is
+Hygiene (AGENTS.md): a value is only ever read via a hidden getpass prompt and is
 never printed back. `ls` shows names + character counts, never values -- there is
 deliberately no command that prints a secret.
 """

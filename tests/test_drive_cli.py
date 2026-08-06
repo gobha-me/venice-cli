@@ -351,7 +351,7 @@ class TestDriveLogin(_DriveCase):
     server = False
 
     def test_login_writes_sandboxed_creds_and_never_echoes_the_key(self):
-        # Obviously fake, and sandboxed to a tmp HOME (CLAUDE.md): the real
+        # Obviously fake, and sandboxed to a tmp HOME (AGENTS.md): the real
         # credentials file is never touched or read.
         typed = "test-fake-key-0123456789"
         with self.cli("login", api_key=None) as d:
