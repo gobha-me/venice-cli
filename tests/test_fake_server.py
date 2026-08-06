@@ -86,7 +86,7 @@ class TestFakeServerViaClient(_NoProxyCase):
         self.client.get_json("/models", params={"type": "text"})
         entry = self.api.requests[0]
         self.assertTrue(entry["has_auth"])
-        # The key must not be retrievable from the request log (CLAUDE.md).
+        # The key must not be retrievable from the request log (AGENTS.md).
         self.assertNotIn("test-fake-key", json.dumps(entry))
 
     def test_unknown_route_is_404_not_5xx(self):

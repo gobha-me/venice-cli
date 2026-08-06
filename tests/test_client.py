@@ -1,7 +1,9 @@
 """Unit tests for VeniceClient. Mocks urllib.request.urlopen."""
 import io
 import json
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 from urllib.error import HTTPError
 
@@ -27,7 +29,7 @@ class FakeResp:
 class TestVeniceClient(unittest.TestCase):
 
     def test_post_json_sets_auth_header_and_encodes_body(self):
-        c = VeniceClient(api_key="sekret")
+        c = VeniceClient(api_key="test-fake-key")
         captured = {}
 
         def fake_urlopen(req, timeout=None):
@@ -44,12 +46,117 @@ class TestVeniceClient(unittest.TestCase):
         self.assertEqual(captured["method"], "POST")
         self.assertTrue(captured["url"].endswith("/audio/quote"))
         h = {k.lower(): v for k, v in captured["headers"].items()}
-        self.assertEqual(h["authorization"], "Bearer sekret")
+        self.assertEqual(h["authorization"], "Bearer test-fake-key")
         self.assertEqual(h["content-type"], "application/json")
         self.assertEqual(
             json.loads(captured["body"]),
             {"model": "x", "duration_seconds": 5},
         )
+
+    def test_authorization_is_an_unredirected_header(self):
+        c = VeniceClient(api_key="test-fake-key")
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["headers"] = dict(req.headers)
+            captured["unredirected_headers"] = dict(req.unredirected_hdrs)
+            return FakeResp(200, b'{"ok": true}')
+
+        with mock.patch("venice.client.urllib.request.urlopen", fake_urlopen):
+            c.get_json("/models")
+
+        headers = {k.lower(): v for k, v in captured["headers"].items()}
+        unredirected = {
+            k.lower(): v for k, v in captured["unredirected_headers"].items()
+        }
+        self.assertNotIn("authorization", headers)
+        self.assertEqual(
+            unredirected["authorization"], "Bearer test-fake-key"
+        )
+
+    def test_cross_origin_redirect_does_not_forward_authorization(self):
+        source_auth = []
+        target_auth = []
+
+        class TargetHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                target_auth.append("Authorization" in self.headers)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"ok": true}')
+
+            def log_message(self, format, *args):
+                pass
+
+        with ThreadingHTTPServer(("127.0.0.1", 0), TargetHandler) as target:
+            target_thread = threading.Thread(target=target.serve_forever)
+            target_thread.start()
+            target_url = f"http://127.0.0.1:{target.server_port}/target"
+
+            class SourceHandler(BaseHTTPRequestHandler):
+                def do_GET(self):
+                    source_auth.append("Authorization" in self.headers)
+                    self.send_response(302)
+                    self.send_header("Location", target_url)
+                    self.end_headers()
+
+                def log_message(self, format, *args):
+                    pass
+
+            try:
+                with ThreadingHTTPServer(("127.0.0.1", 0), SourceHandler) as source:
+                    source_thread = threading.Thread(target=source.serve_forever)
+                    source_thread.start()
+                    try:
+                        c = VeniceClient(
+                            api_key="test-fake-key",
+                            base_url=f"http://127.0.0.1:{source.server_port}",
+                        )
+                        self.assertEqual(c.get_json("/redirect"), {"ok": True})
+                    finally:
+                        source.shutdown()
+                        source_thread.join()
+            finally:
+                target.shutdown()
+                target_thread.join()
+
+        self.assertEqual(source_auth, [True])
+        self.assertEqual(target_auth, [False])
+
+    def test_same_origin_redirect_does_not_forward_authorization(self):
+        auth_presence = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                auth_presence.append("Authorization" in self.headers)
+                if self.path == "/redirect":
+                    self.send_response(302)
+                    self.send_header("Location", "/target")
+                    self.end_headers()
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"ok": true}')
+
+            def log_message(self, format, *args):
+                pass
+
+        with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+            thread = threading.Thread(target=server.serve_forever)
+            thread.start()
+            try:
+                c = VeniceClient(
+                    api_key="test-fake-key",
+                    base_url=f"http://127.0.0.1:{server.server_port}",
+                )
+                self.assertEqual(c.get_json("/redirect"), {"ok": True})
+            finally:
+                server.shutdown()
+                thread.join()
+
+        self.assertEqual(auth_presence, [True, False])
 
     def test_post_for_bytes_or_json_returns_bytes_on_audio_ctype(self):
         c = VeniceClient(api_key="k")

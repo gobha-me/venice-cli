@@ -6,7 +6,7 @@ repo) and global (``~/.config/venice/memory/``, ``$VENICE_MEMORY_DIR`` overrides
 tasks are project-only. This command is the read/manage surface; the store itself lives
 in ``venice.commands._memory``.
 
-Hygiene (CLAUDE.md): entry names are refused if secret-shaped at write time, so nothing
+Hygiene (AGENTS.md): entry names are refused if secret-shaped at write time, so nothing
 here can surface a credential; the store files are 0600.
 """
 import sys

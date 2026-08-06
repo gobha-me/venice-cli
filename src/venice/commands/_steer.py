@@ -22,7 +22,7 @@ The whole feature rides on the same seam #78 added, so ``run_loop`` itself is un
   raises ``KeyboardInterrupt`` -- today's abort. The attached driver catches it (one-shot
   exits 130 + saves the partial transcript; the REPL rolls the turn back).
 
-Trust model (CLAUDE.md): a steer is additive operator input at the same trust level as
+Trust model (AGENTS.md): a steer is additive operator input at the same trust level as
 the original task -- nothing here reads or writes the API key, and the handler only
 touches an in-process flag + stderr.
 """

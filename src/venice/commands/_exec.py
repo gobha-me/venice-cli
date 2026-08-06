@@ -37,7 +37,7 @@ from typing import Optional
 MAX_OUTPUT_CHARS = 20_000                      # cap per stdout/stderr stream
 DEFAULT_EXEC_TIMEOUT = 120                     # seconds
 
-# Secrets never inherited into an exec'd child (CLAUDE.md credential hygiene).
+# Secrets never inherited into an exec'd child (AGENTS.md credential hygiene).
 _SECRET_ENV = ("VENICE_API_KEY", "VENICE_EMBED_API_KEY")
 
 # Substrings that turn `/bin/sh -c` into more than a single simple command. When an

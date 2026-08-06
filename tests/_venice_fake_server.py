@@ -10,7 +10,7 @@ Hermeticity is unchanged from the rest of the suite (see CONTRIBUTING.md): it
 binds loopback on an ephemeral port, never reaches the network, and never sees a
 real key -- the drive tests pass ``VENICE_API_KEY=test-fake-key``. The
 ``Authorization`` header is recorded as a **boolean only**; its value is never
-stored, logged, or printed (CLAUDE.md).
+stored, logged, or printed (AGENTS.md).
 
 Unlike ``_mcp_fake_server.py`` this runs in-process rather than as a subprocess:
 that one *has* to be spawned because its module-scope ``import mcp`` fails on
@@ -217,7 +217,7 @@ def _make_handler(api: FakeVenice):
                 "path": path,
                 "query": urllib.parse.parse_qs(parsed.query),
                 "body": body,
-                # Presence only. The value is never recorded (CLAUDE.md).
+                # Presence only. The value is never recorded (AGENTS.md).
                 "has_auth": bool(self.headers.get("Authorization")),
             })
             return path, urllib.parse.parse_qs(parsed.query), body

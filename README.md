@@ -1020,7 +1020,7 @@ venice memory tasks              # the project checklist (--status filters)
 - **Locations:** project notes/tasks at `<root>/.venice/memory/` (git-ignored by default,
   like the semantic index); global notes at `~/.config/venice/memory/`
   (`$VENICE_MEMORY_DIR` overrides). All store files are `0600`.
-- **Hygiene (CLAUDE.md):** a note **name** is refused if it's secret-shaped
+- **Hygiene (AGENTS.md):** a note **name** is refused if it's secret-shaped
   (`credentials`, `id_rsa*`, `*.key`, `.env`, `*secrets*`, …), so the store can't be used
   to label or stash a credential.
 - **Not exposed over `venice mcp-serve`** (chat/code only), like the browser rails.

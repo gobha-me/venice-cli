@@ -6,7 +6,7 @@ This command is the read/manage surface; the store itself lives in
 ``venice.commands._session``. Resume a listed session with
 ``venice chat --resume <id>`` (or ``--continue`` for the most recent).
 
-Hygiene (CLAUDE.md): envelopes hold only messages + settings + usage, never the API
+Hygiene (AGENTS.md): envelopes hold only messages + settings + usage, never the API
 key. ``show`` prints metadata and message roles/counts -- it does not dump raw content
 by default and there is no command that could surface a stored credential.
 """
