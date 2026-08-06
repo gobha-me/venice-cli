@@ -70,7 +70,6 @@ class VeniceClient:
             url += "?" + urllib.parse.urlencode(params, doseq=True)
 
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
             "Accept": "application/json, audio/*, image/*, video/*",
             "User-Agent": self.user_agent,
         }
@@ -80,6 +79,12 @@ class VeniceClient:
             headers["Content-Type"] = "application/json"
 
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        # Bind the credential to this request.  urllib copies regular headers
+        # when it constructs a redirected request, but deliberately leaves
+        # unredirected headers behind.
+        req.add_unredirected_header(
+            "Authorization", f"Bearer {self.api_key}"
+        )
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 body = resp.read()
