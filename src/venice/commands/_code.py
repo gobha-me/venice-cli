@@ -812,8 +812,8 @@ def code_tools(
     Empty lists leave `run` unrestricted (only the confirm gate), preserving the prior
     behavior of autonomous `venice code` runs.
 
-    `browser` (#71) appends the `web_fetch`/`browser_capture` rails, scoped by the
-    `browser_allow`/`browser_deny` URL policy (see `_agent.browser_tools`).
+    `browser` (#71) is retained for call compatibility but appends no tools while
+    GHSA-mqjr-2vh8-6fvg is contained (see `_agent.browser_tools`).
 
     `memory` (#49) appends the persistent memory + task rails (`_agent.memory_tools`):
     free, local notes (two tiers) + a project task list the agent maintains across
@@ -956,8 +956,8 @@ def code_tools(
         ))
 
     if browser:
-        # web_fetch/browser_capture rails (#71): no Venice API, so no client needed.
-        # Screenshots land in $VENICE_MCP_OUTPUT_DIR or under the project root.
+        # Compatibility seam only: browser_tools returns [] while the rail is disabled
+        # for GHSA-mqjr-2vh8-6fvg.
         tools.extend(_agent.browser_tools(
             allow=browser_allow, deny=browser_deny,
             output_dir=os.environ.get("VENICE_MCP_OUTPUT_DIR") or root,
@@ -1135,9 +1135,8 @@ def web_search_tool(oai, model: str, *, models=None, search_model=None,
 
     Makes one Venice web-search completion (via `_agent.run_web_search`) against a
     `supportsWebSearch` model and returns the answer plus the cited URLs. The agent
-    follows a citation with `web_fetch` (the `--browser` rail, #71), which keeps every
-    fetched URL under the operator's `browser.*` policy -- search discovers, the browser
-    policy governs what gets read.
+    returns citations for the operator to inspect. The former direct `web_fetch` follow-up
+    rail is disabled while GHSA-mqjr-2vh8-6fvg is contained.
 
     `paid=False` mirrors `venice_chat` (a bounded, billed sub-completion, not a media
     purchase): it MUST be free so a read-only SCOUT can carry it (`_agent.run_scout`
@@ -1181,9 +1180,8 @@ def web_search_tool(oai, model: str, *, models=None, search_model=None,
         _agent.WEB_SEARCH_TOOL_NAME,
         "Search the web for documentation or answers and get back a short summary plus "
         "the source URLs it cited. Use it to DISCOVER pages you do not already have a URL "
-        "for (API docs, library usage, an error message). To read a cited page in full, "
-        "follow up with web_fetch (needs --browser). Read-only; cannot edit files or run "
-        "commands.",
+        "for (API docs, library usage, an error message). Read-only; cannot edit files "
+        "or run commands.",
         _agent._WEB_SEARCH_SCHEMA, invoke, paid=False,
         category="web", tags=("read", "network"),
     )

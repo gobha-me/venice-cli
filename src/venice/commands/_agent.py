@@ -1695,8 +1695,8 @@ def dispatch_map(tools: List[Tool]) -> Dict[str, Tool]:
 
 # --------------------------------------------------------------------------- #
 # Web search (#77): one server-side Venice completion with `enable_web_search`, so
-# the coding agent / scout can DISCOVER documentation -- not just fetch a URL it
-# already knows (the `--browser` rail, #71). Rides the normal completion path (same
+# the coding agent / scout can DISCOVER documentation and return citations. Rides the
+# normal completion path (same
 # key, same billing), so the per-agent tool-call budget bounds it. The `venice_web_search`
 # rail Tool wrapper + `supportsWebSearch` model resolution live in `_code`; this module
 # owns only the profile-agnostic completion helper.
@@ -2435,67 +2435,13 @@ def _tool_section(name: str) -> str:
     return name[len("venice_"):] if name.startswith("venice_") else name
 
 
-def _browser_args(arguments) -> dict:
-    """Model-supplied browser-tool args with policy/loop-controlled keys stripped: the
-    model must not set `allow`/`deny` (widen its URL policy) or the loop-controlled keys."""
-    return {k: v for k, v in _clean(arguments).items() if k not in ("allow", "deny")}
-
-
 def browser_tools(*, allow=(), deny=(), output_dir=None, config=None) -> List[Tool]:
-    """The `web_fetch` + `browser_capture` rails (issue #71).
+    """Return no browser tools while the browser rail is security-disabled.
 
-    The URL allow/deny policy is bound HERE (from the operator's config/flags), so the
-    model can't widen it via tool arguments -- same discipline as the `shell` rail. Safe
-    knobs still honor `defaults.browser.*` (#58), layered under the model's arguments.
-    Both tools are free (no spend gate) and never require confirmation; the URL policy is
-    the guard.
+    Keep this compatibility seam so callers cannot accidentally re-expose the direct
+    tool implementations while GHSA-mqjr-2vh8-6fvg is contained.
     """
-    fetch_defaults = userconfig.config_defaults_for("browser", _mcp.web_fetch_tool, config)
-    cap_defaults = userconfig.config_defaults_for("browser", _mcp.browser_capture_tool, config)
-
-    def _web_fetch_invoke(arguments, *, confirm: bool = False):
-        return _mcp.web_fetch_tool(
-            allow=allow, deny=deny, **{**fetch_defaults, **_browser_args(arguments)})
-
-    def _browser_capture_invoke(arguments, *, confirm: bool = False):
-        return _mcp.browser_capture_tool(
-            allow=allow, deny=deny, output_dir=output_dir,
-            **{**cap_defaults, **_browser_args(arguments)})
-
-    return [
-        Tool(
-            name="web_fetch",
-            description=(
-                "Fetch an http(s) URL with stdlib urllib and return its text (mode=text, "
-                "default) or raw HTML (mode=html). Zero-dep; good for non-SPA pages. For "
-                "JS-rendered pages use browser_capture. Read-only; not spend-gated. "
-                "file://, the cloud metadata endpoint, and any host the operator denies "
-                "are refused."
-            ),
-            parameters=_WEB_FETCH_SCHEMA,
-            invoke=_web_fetch_invoke,
-            paid=False,
-            category="web",
-            tags=("read", "network"),
-        ),
-        Tool(
-            name="browser_capture",
-            description=(
-                "Headless-render an http(s) URL and return the post-JS DOM (mode=dom/text) "
-                "and/or a screenshot PNG path (mode=screenshot/both) -- use it to verify a "
-                "page's JS-injected content actually appeared. Pass assert_contains to "
-                "check the DOM contains a substring (deterministic). DOM modes need a "
-                "Chromium-family browser (Firefox is screenshot-only); reports 'no "
-                "headless browser available' when none is installed. Read-only; not "
-                "spend-gated."
-            ),
-            parameters=_BROWSER_CAPTURE_SCHEMA,
-            invoke=_browser_capture_invoke,
-            paid=False,
-            category="web",
-            tags=("read", "network"),
-        ),
-    ]
+    return []
 
 
 def memory_tools() -> List[Tool]:
@@ -2646,8 +2592,8 @@ def builtin_tools(
     rail, not a venice API tool, so it isn't part of the selectable `_BUILTINS`
     set) and is never exposed via `mcp-serve`, which builds its own wrappers.
 
-    `browser` (issue #71) likewise appends the `web_fetch`/`browser_capture` rails,
-    scoped by the `browser_allow`/`browser_deny` URL policy (see `browser_tools`).
+    `browser` (issue #71) is retained as a compatibility argument but appends no tools
+    while GHSA-mqjr-2vh8-6fvg is contained (see `browser_tools`).
 
     `memory` (issue #49) appends the persistent memory + task rails (`memory_tools`):
     free, local notes (two tiers) + a project task list. Also a rail (added after the

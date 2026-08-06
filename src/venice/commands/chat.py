@@ -21,7 +21,10 @@ from typing import Optional
 
 from .. import auth, userconfig
 from ..client import build_client_from_auth
-from . import _agent, _compact, _mcp, _mcp_client, _models, _openai, _persona, _repl, _session
+from . import (
+    _agent, _browser, _compact, _mcp, _mcp_client, _models, _openai, _persona,
+    _repl, _session,
+)
 
 # Named so `defaults.chat.web_search` can be validated against the same set the
 # CLI enforces, rather than only argparse seeing it. (#57)
@@ -219,22 +222,20 @@ def register(subparsers) -> None:
     )
     ag.add_argument(
         "--browser", action="store_true", dest="browser", default=None,
-        help="Add web_fetch + browser_capture tools so the agent can fetch a URL and "
-        "headless-render a page (screenshot / post-JS DOM). Implies --tools. http/https "
-        "only; the cloud metadata endpoint is always blocked; scope hosts with "
-        "--browser-allow/--browser-deny or the config `browser` section (#71).",
+        help="Reserved browser rail flag. Temporarily unavailable for security; "
+        "fails closed before any API or network access.",
     )
     ag.add_argument(
         "--browser-allow", action="append", dest="browser_allow", default=None,
         metavar="HOST",
-        help="Allow only these hosts for the browser tools (repeatable; globs ok, "
-        "matched on the URL host). Adds to the config browser.allow list.",
+        help="Retained browser.allow config compatibility option; inert while the "
+        "browser rail is security-disabled.",
     )
     ag.add_argument(
         "--browser-deny", action="append", dest="browser_deny", default=None,
         metavar="PATTERN",
-        help="Refuse URLs whose host or full URL matches these globs (repeatable, "
-        "always enforced, wins over --browser-allow). Adds to config browser.deny.",
+        help="Retained browser.deny config compatibility option; inert while the "
+        "browser rail is security-disabled.",
     )
     ag.add_argument(
         "--memory", action="store_true", dest="memory", default=None,
@@ -436,11 +437,13 @@ def _run(args) -> int:
         return 2
     _session.apply_to_args(args, session, "chat")
     userconfig.apply_defaults(args, "chat")
-    # --shell (#33), --browser (#71) and --memory (#49) are tools, so they imply the
-    # agent loop -- flip --tools on so both the one-shot trigger below and the REPL's
-    # tools gate pick them up.
-    if (getattr(args, "shell", None) or getattr(args, "browser", None)
-            or getattr(args, "memory", None)) and not getattr(args, "tools", None):
+    if getattr(args, "browser", None):
+        print(f"chat: {_browser.UNAVAILABLE_MESSAGE}", file=sys.stderr)
+        return 2
+    # --shell (#33) and --memory (#49) are tools, so they imply the agent loop. A
+    # requested --browser has already failed above.
+    if (getattr(args, "shell", None) or getattr(args, "memory", None)) \
+            and not getattr(args, "tools", None):
         args.tools = True
     # A startup persona (--persona or defaults.chat.persona) seeds the same lever
     # both one-shot and REPL modes read -- args.system -- so it flows through

@@ -474,21 +474,10 @@ class TestCodeFactory(unittest.TestCase):
         self.assertNotIn("web_fetch", names)
         self.assertNotIn("browser_capture", names)
 
-    def test_browser_tools_present_when_enabled_without_client(self):
-        # #71: the rails need no Venice client (no API call), so they attach even when
-        # code runs without a key.
-        by = {t.name: t for t in _code.code_tools("/tmp", browser=True)}
-        self.assertIn("web_fetch", by)
-        self.assertIn("browser_capture", by)
-        self.assertFalse(by["web_fetch"].paid)
-        self.assertFalse(by["browser_capture"].paid)
-
-    def test_browser_deny_policy_bound_from_wiring(self):
-        by = {t.name: t for t in _code.code_tools("/tmp", browser=True,
-                                                  browser_deny=["evil.com"])}
-        r = by["web_fetch"].invoke({"url": "http://evil.com/x"})
-        self.assertEqual(r["status"], "error")
-        self.assertIn("deny", r["message"])
+    def test_browser_tools_absent_even_when_enabled(self):
+        names = {t.name for t in _code.code_tools("/tmp", browser=True)}
+        self.assertNotIn("web_fetch", names)
+        self.assertNotIn("browser_capture", names)
 
 
 class TestRoots(unittest.TestCase):
