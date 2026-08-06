@@ -182,6 +182,41 @@ class TestSupportsCapability(unittest.TestCase):
 
 # --- _openai ---
 
+
+class TestPromptCacheAffinity(unittest.TestCase):
+    def test_mints_an_opaque_key_without_mutating_the_input(self):
+        original = {"temperature": 0.2}
+        out = _openai.with_prompt_cache_key(original)
+        key = _openai.prompt_cache_key(out)
+        self.assertIsInstance(key, str)
+        self.assertTrue(key.startswith("venice-"))
+        self.assertNotIn("extra_body", original)
+
+    def test_explicit_key_preserves_venice_parameters(self):
+        original = {"extra_body": {"venice_parameters": {"enable_web_search": True}}}
+        out = _openai.with_prompt_cache_key(original, "session-key")
+        self.assertEqual(_openai.prompt_cache_key(out), "session-key")
+        self.assertEqual(out["extra_body"]["venice_parameters"],
+                         {"enable_web_search": True})
+        self.assertNotIn("prompt_cache_key", original["extra_body"])
+
+    def test_strip_keeps_other_extra_body_fields_and_does_not_mutate(self):
+        original = {"extra_body": {
+            "prompt_cache_key": "parent",
+            "venice_parameters": {"character_slug": "x"},
+        }}
+        out = _openai.without_prompt_cache_key(original)
+        self.assertIsNone(_openai.prompt_cache_key(out))
+        self.assertEqual(out["extra_body"],
+                         {"venice_parameters": {"character_slug": "x"}})
+        self.assertEqual(_openai.prompt_cache_key(original), "parent")
+
+    def test_strip_removes_empty_extra_body(self):
+        out = _openai.without_prompt_cache_key(
+            {"temperature": 0.1, "extra_body": {"prompt_cache_key": "x"}})
+        self.assertEqual(out, {"temperature": 0.1})
+
+
 class _StubConnErr(Exception):
     pass
 

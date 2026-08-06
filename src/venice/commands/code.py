@@ -715,6 +715,16 @@ def _run(args) -> int:
     # venice_scout). `_gen_kwargs` reads only args.temperature/max_tokens -- no
     # dependency on `tools`, so the reorder is safe.
     gen_kwargs = PROFILE.build_gen_kwargs(args)
+    # #128: Venice can route requests carrying one stable prompt_cache_key to the
+    # same cache-bearing backend. Restore the saved key when one exists; old sessions
+    # receive a key on first resume, and fresh/ephemeral runs mint one before the plan
+    # turn so plan -> execute -> verify all share affinity. It rides in extra_body for
+    # compatibility with the project's openai>=1.40 floor and is persisted automatically
+    # with the session's generation kwargs.
+    saved_cache_key = (
+        _openai.prompt_cache_key(session.gen_kwargs) if session is not None else None
+    )
+    gen_kwargs = _openai.with_prompt_cache_key(gen_kwargs, saved_cache_key)
     # #52 planner slice: the session's shared dispatch record list. scout/spawn append
     # every launched dispatch to it; venice_merge (and the --json envelope) roll it up.
     dispatches = [] if planner else None

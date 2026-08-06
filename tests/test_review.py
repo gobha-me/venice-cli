@@ -696,6 +696,32 @@ class TestRunCycle(_RepoBase):
                                     rounds=1)
         self.assertEqual(out["verdict"], "clean")
 
+    def test_verdict_retry_does_not_reuse_parent_cache_affinity(self):
+        oai = mock.MagicMock()
+        oai.chat.completions.create.return_value = FakeToolCompletion(
+            content="REVIEW: CLEAN")
+
+        def _stub(*a, **kw):
+            return {"status": "ok", "tool_calls": 0, "truncated": False,
+                    "report": "SCOPE: x\nFINDINGS: none\n(no sentinel)"}
+
+        base = {"extra_body": {
+            "prompt_cache_key": "parent-key",
+            "venice_parameters": {"include_venice_system_prompt": False},
+        }}
+        with mock.patch.object(_agent, "run_review", _stub):
+            out = _review.run_cycle(
+                oai, "m", self.collected, base, root=self.root, rounds=1)
+        self.assertEqual(out["verdict"], "clean")
+        sent = oai.chat.completions.create.call_args.kwargs
+        self.assertNotIn("prompt_cache_key", sent["extra_body"])
+        self.assertEqual(
+            sent["extra_body"]["venice_parameters"],
+            {"include_venice_system_prompt": False},
+        )
+        self.assertEqual(
+            base["extra_body"]["prompt_cache_key"], "parent-key")
+
     def test_verdict_retry_tokens_are_counted(self):
         # The retry runs outside `_run_disposable`, so nothing else records it. An
         # uncounted call is also an UNCAPPED one -- `--max-tokens` was silently not

@@ -259,6 +259,23 @@ class TestCompactMessages(unittest.TestCase):
         self.assertEqual(calls[0]["temperature"], 0.2)
         self.assertEqual(calls[0]["max_tokens"], _compact.SUMMARY_MAX_TOKENS)
 
+    def test_fresh_summary_does_not_reuse_parent_cache_affinity(self):
+        msgs = _history(6)
+        fake, calls = _fake_oai()
+        original = {"extra_body": {
+            "prompt_cache_key": "parent-key",
+            "venice_parameters": {"include_venice_system_prompt": False},
+        }}
+        _compact.compact_messages(
+            fake, "m", msgs, keep_turns=2, base_kwargs=original)
+        self.assertNotIn("prompt_cache_key", calls[0]["extra_body"])
+        self.assertEqual(
+            calls[0]["extra_body"]["venice_parameters"],
+            {"include_venice_system_prompt": False},
+        )
+        self.assertEqual(
+            original["extra_body"]["prompt_cache_key"], "parent-key")
+
 
 class TestBuildSummaryPrompt(unittest.TestCase):
     def test_tool_messages_rendered_as_text(self):
