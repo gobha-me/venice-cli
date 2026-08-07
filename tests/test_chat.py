@@ -95,18 +95,23 @@ class FakeCompletion:
 
 
 class _Delta:
-    def __init__(self, content):
+    def __init__(self, content, **fields):
         self.content = content
+        for name, value in fields.items():
+            setattr(self, name, value)
 
 
 class _StreamChoice:
-    def __init__(self, content):
-        self.delta = _Delta(content)
+    def __init__(self, content, **fields):
+        self.delta = _Delta(content, **fields)
 
 
 class FakeChunk:
-    def __init__(self, content=None, usage=None, venice_parameters=None):
-        self.choices = [_StreamChoice(content)] if content is not None else []
+    def __init__(self, content=None, usage=None, venice_parameters=None, **delta_fields):
+        self.choices = (
+            [_StreamChoice(content, **delta_fields)]
+            if content is not None or delta_fields else []
+        )
         self.usage = usage
         self.venice_parameters = venice_parameters
 
@@ -166,9 +171,11 @@ class _FnCall:
 
 
 class _ToolMsg:
-    def __init__(self, content=None, tool_calls=None):
+    def __init__(self, content=None, tool_calls=None, **fields):
         self.content = content
         self.tool_calls = tool_calls
+        for name, value in fields.items():
+            setattr(self, name, value)
 
 
 class _ToolChoice:
@@ -180,8 +187,8 @@ class FakeToolCompletion:
     """A completion whose message may carry tool_calls (None => a final answer)."""
 
     def __init__(self, content=None, tool_calls=None, venice_parameters=None,
-                 usage=None):
-        self.choices = [_ToolChoice(_ToolMsg(content, tool_calls))]
+                 usage=None, **message_fields):
+        self.choices = [_ToolChoice(_ToolMsg(content, tool_calls, **message_fields))]
         self.venice_parameters = venice_parameters
         self.usage = usage
 

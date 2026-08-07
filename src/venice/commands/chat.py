@@ -706,9 +706,21 @@ def _consume_stream_full(stream):
     The REPL's auto-compact budget (#48) observes the server-reported prompt
     token count; printing behavior is identical to `_consume_stream`.
     """
+    message, usage = _consume_stream_message_full(stream)
+    return message["content"], usage
+
+
+def _consume_stream_message_full(stream):
+    """Consume a stream and retain its replayable assistant-message extensions.
+
+    The ordinary one-shot surface still returns/prints only visible content.  The
+    multi-turn REPL uses this richer result so Kimi-style reasoning deltas survive in
+    history and the next request can replay the complete assistant turn.
+    """
     citations = None
     usage = None
     parts: list = []
+    reasoning_parts = {field: [] for field in _agent._REASONING_FIELDS}
     for chunk in stream:
         vp = getattr(chunk, "venice_parameters", None)
         if vp is not None and citations is None:
@@ -716,16 +728,33 @@ def _consume_stream_full(stream):
         if getattr(chunk, "usage", None):
             usage = chunk.usage
         if chunk.choices:
-            piece = getattr(chunk.choices[0].delta, "content", None)
+            delta = chunk.choices[0].delta
+            piece = getattr(delta, "content", None)
             if piece:
                 sys.stdout.write(piece)
                 sys.stdout.flush()
                 parts.append(piece)
+            for field in _agent._REASONING_FIELDS:
+                value = getattr(delta, field, None)
+                if value is not None:
+                    reasoning_parts[field].append(_agent._request_value(value))
     if parts:
         sys.stdout.write("\n")
     _print_citations(citations)
     _print_usage(usage)
-    return "".join(parts), usage
+    message = {"role": "assistant", "content": "".join(parts)}
+    for field in _agent._REASONING_FIELDS:
+        values = reasoning_parts[field]
+        if not values:
+            continue
+        if all(isinstance(value, str) for value in values):
+            message[field] = "".join(values)
+        elif all(isinstance(value, list) for value in values):
+            message[field] = [item for value in values for item in value]
+        else:
+            message[field] = values[0] if len(values) == 1 else values
+        break
+    return message, usage
 
 
 def _run_stream(oai, kwargs: dict) -> int:

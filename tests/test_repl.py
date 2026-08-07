@@ -371,6 +371,32 @@ class TestRepl(unittest.TestCase):
             env2 = json.loads((Path(d) / (sid + ".json")).read_text())
             self.assertEqual(len(env2["messages"]), 4)
 
+    def test_streamed_reasoning_replays_and_is_saved(self):
+        with tempfile.TemporaryDirectory() as d:
+            results = [
+                [
+                    FakeChunk(reasoning_content="think "),
+                    FakeChunk("answer", reasoning_content="carefully"),
+                ],
+                [FakeChunk("follow-up")],
+            ]
+            rc, _fake, calls = _run_repl(
+                _args(interactive=True),
+                results,
+                ["first", "second", "/exit"],
+                sessions_dir=d,
+            )
+            self.assertEqual(rc, 0)
+            replayed = calls[1]["messages"][1]
+            self.assertEqual(replayed["content"], "answer")
+            self.assertEqual(replayed["reasoning_content"], "think carefully")
+
+            saved = json.loads(list(Path(d).glob("*.json"))[0].read_text())
+            self.assertEqual(
+                saved["messages"][1]["reasoning_content"],
+                "think carefully",
+            )
+
     def test_ephemeral_writes_no_file(self):
         with tempfile.TemporaryDirectory() as d:
             rc, fake, calls = _run_repl(

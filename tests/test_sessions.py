@@ -62,6 +62,22 @@ class TestStore(_Base):
         self.assertEqual(r.usage["cache_read_tokens"], 4)
         self.assertEqual([m["content"] for m in r.messages], ["hi"])
 
+    def test_reasoning_extension_round_trips_without_schema_loss(self):
+        sess = self._mk(messages=[
+            {"role": "user", "content": "question"},
+            {
+                "role": "assistant",
+                "content": "answer",
+                "reasoning_content": "provider state \u2603",
+            },
+        ])
+        S.save(sess)
+        got = S.load(sess.id, "chat")
+        self.assertEqual(
+            got.messages[1]["reasoning_content"],
+            "provider state \u2603",
+        )
+
     def test_envelope_has_version_and_no_key(self):
         sess = self._mk()
         path = S.save(sess)

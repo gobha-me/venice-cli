@@ -2708,11 +2708,51 @@ def supports_function_calling(models, model_id) -> Optional[bool]:
 # --------------------------------------------------------------------------- #
 # The loop
 # --------------------------------------------------------------------------- #
+_REASONING_FIELDS = ("reasoning_content", "reasoning_details", "reasoning")
+
+
+def _message_field(msg, name):
+    """Read one response-message field from an SDK model or a plain mapping."""
+    if isinstance(msg, dict):
+        return msg.get(name)
+    return getattr(msg, name, None) if msg is not None else None
+
+
+def _request_value(value):
+    """Turn nested SDK response values into request-safe Python values.
+
+    ``reasoning_content`` is normally a string, but the compatible
+    ``reasoning_details`` extension may contain SDK model objects.  Serialize only
+    the selected value recursively instead of dumping the complete response message;
+    the latter also carries response-only metadata rejected by request schemas.
+    """
+    if hasattr(value, "model_dump"):
+        return value.model_dump(exclude_none=True)
+    if isinstance(value, list):
+        return [_request_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [_request_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _request_value(item) for key, item in value.items()}
+    return value
+
+
 def _assistant_dict(msg) -> dict:
-    """Reconstruct an assistant turn for the message history (explicit, not
-    model_dump()) so the follow-up tool messages carry the exact tool_call_ids."""
-    d = {"role": "assistant", "content": (getattr(msg, "content", None) or "")}
-    tcs = getattr(msg, "tool_calls", None) if msg is not None else None
+    """Reconstruct the replayable subset of an assistant response.
+
+    Keep content and exact tool-call ids plus one deliberately allowlisted reasoning
+    extension.  Compatible providers use three aliases; when a response unexpectedly
+    carries more than one, preserve the first in ``_REASONING_FIELDS`` order rather
+    than sending conflicting thinking payloads back on the next request.  Do not use a
+    whole-message ``model_dump()``: response-only metadata can be rejected on replay.
+    """
+    d = {"role": "assistant", "content": (_message_field(msg, "content") or "")}
+    for field in _REASONING_FIELDS:
+        value = _message_field(msg, field)
+        if value is not None:
+            d[field] = _request_value(value)
+            break
+    tcs = _message_field(msg, "tool_calls")
     if tcs:
         d["tool_calls"] = [
             {
