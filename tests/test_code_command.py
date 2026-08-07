@@ -146,6 +146,41 @@ class TestCodeCommand(unittest.TestCase):
         with open(os.path.join(self.root, "hello.py")) as f:
             self.assertEqual(f.read(), "def hi():\n    return 1\n")
 
+    def test_plan_reasoning_replays_and_survives_the_session_round_trip(self):
+        seq = [
+            FakeToolCompletion(
+                "plan: inspect then fix",
+                reasoning_content="plan reasoning \u2603",
+            ),
+            FakeToolCompletion("done"),
+            FakeToolCompletion("ACCEPTANCE: PASS"),
+        ]
+        rc, calls = self._run(
+            _code_args(task="fix it", root=self.root, auto=True), seq,
+        )
+        self.assertEqual(rc, 0)
+
+        plan_in_execute = [
+            message for message in calls[1]["messages"]
+            if message.get("role") == "assistant"
+        ][0]
+        self.assertEqual(plan_in_execute["content"], "plan: inspect then fix")
+        self.assertEqual(plan_in_execute["reasoning_content"], "plan reasoning \u2603")
+
+        session_files = [
+            os.path.join(self._sess_dir, name)
+            for name in os.listdir(self._sess_dir)
+            if name.endswith(".json")
+        ]
+        self.assertEqual(len(session_files), 1)
+        with open(session_files[0]) as fh:
+            saved = json.load(fh)
+        saved_plan = [
+            message for message in saved["messages"]
+            if message.get("content") == "plan: inspect then fix"
+        ][0]
+        self.assertEqual(saved_plan["reasoning_content"], "plan reasoning \u2603")
+
     # --- #76: cross-repo write protection wired through code._run ---
     def _sibling(self):
         other = os.path.realpath(tempfile.mkdtemp())
@@ -387,6 +422,27 @@ class TestCodeCommand(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(len(calls), 4)                 # extra re-prompt turn
         self.assertEqual(calls[3]["tool_choice"], "none")
+
+    def test_acceptance_retry_replays_the_complete_assistant_message(self):
+        seq = [
+            FakeToolCompletion("plan"),
+            FakeToolCompletion("did the work"),
+            FakeToolCompletion(
+                "All acceptance criteria are met.",
+                reasoning_details=[{"type": "summary", "text": "checked"}],
+            ),
+            FakeToolCompletion("ACCEPTANCE: PASS"),
+        ]
+        rc, calls = self._run(
+            _code_args(task="x", root=self.root, auto=True), seq,
+        )
+        self.assertEqual(rc, 0)
+        replayed = calls[3]["messages"][-2]
+        self.assertEqual(replayed["content"], "All acceptance criteria are met.")
+        self.assertEqual(
+            replayed["reasoning_details"],
+            [{"type": "summary", "text": "checked"}],
+        )
 
     # --- #37: still no verdict after the re-prompt -> exit 10 + warning ---
     def test_acceptance_unknown_persists_exits_10(self):

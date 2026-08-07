@@ -309,13 +309,13 @@ def _compose_in_editor(initial: str = "") -> Optional[str]:
 # One turn
 # --------------------------------------------------------------------------- #
 def _stream_turn(oai, chat, model: str, messages: List[dict], gen_kwargs: dict):
-    """One streamed turn; returns (reply_text, usage) for history + budget (#48)."""
+    """One streamed turn; returns (assistant_message, usage) for replay + budget."""
     kwargs = dict(gen_kwargs)
     kwargs["model"] = model
     kwargs["messages"] = messages
     kwargs["stream"] = True
     kwargs["stream_options"] = {"include_usage": True}
-    return chat._consume_stream_full(oai.chat.completions.create(**kwargs))
+    return chat._consume_stream_message_full(oai.chat.completions.create(**kwargs))
 
 
 def _do_turn(oai, openai, chat, text, messages, gen_kwargs, state, args) -> None:
@@ -413,7 +413,9 @@ def _turn(oai, openai, chat, text, messages, gen_kwargs, state, args) -> bool:
                 )
         else:
             _t0 = time.monotonic()
-            reply, usage = _stream_turn(oai, chat, state["model"], messages, gen_kwargs)
+            reply_message, usage = _stream_turn(
+                oai, chat, state["model"], messages, gen_kwargs,
+            )
             if budget is not None:
                 budget.observe(usage)
             if ledger is not None:
@@ -422,7 +424,7 @@ def _turn(oai, openai, chat, text, messages, gen_kwargs, state, args) -> bool:
                 # difference is real -- do not compare a streamed row against a buffered
                 # one and conclude the provider got slower.
                 ledger.record(usage, seconds=time.monotonic() - _t0)
-            messages.append({"role": "assistant", "content": reply})
+            messages.append(reply_message)
     except KeyboardInterrupt:
         # Ctrl-C aborts just this turn -- roll it back and keep the session. With #79's
         # attached steering this is the *second* Ctrl+C (or Ctrl+C at the steer prompt);

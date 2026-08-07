@@ -13,6 +13,7 @@ import tempfile
 import threading
 import time
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 from venice.commands import _agent
@@ -44,6 +45,99 @@ def _tool(name, impl, *, paid=False):
 
 def _free_tool():
     return _tool("t", lambda a, *, confirm=False: {"status": "ok"})
+
+
+class TestAssistantReplay(unittest.TestCase):
+    """#129: compatible reasoning fields survive every buffered history seam."""
+
+    def test_synthetic_sdk_message_replays_reasoning_and_exact_tool_call(self):
+        from openai.types.chat import ChatCompletion
+
+        response = ChatCompletion.model_validate({
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "kimi-k3",
+            "choices": [{
+                "index": 0,
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": "I will inspect it.",
+                    "reasoning_content": "reasoning bytes: \u2603",
+                    "tool_calls": [{
+                        "id": "call-123",
+                        "type": "function",
+                        "function": {"name": "t", "arguments": '{"x":1}'},
+                    }],
+                },
+            }],
+        })
+
+        self.assertEqual(_agent._assistant_dict(response.choices[0].message), {
+            "role": "assistant",
+            "content": "I will inspect it.",
+            "reasoning_content": "reasoning bytes: \u2603",
+            "tool_calls": [{
+                "id": "call-123",
+                "type": "function",
+                "function": {"name": "t", "arguments": '{"x":1}'},
+            }],
+        })
+
+    def test_alias_precedence_is_explicit_and_response_metadata_is_dropped(self):
+        msg = SimpleNamespace(
+            content="visible",
+            tool_calls=None,
+            reasoning_content="preferred",
+            reasoning_details=[{"type": "summary", "text": "other"}],
+            reasoning="last",
+            refusal="response-only",
+        )
+        self.assertEqual(_agent._assistant_dict(msg), {
+            "role": "assistant",
+            "content": "visible",
+            "reasoning_content": "preferred",
+        })
+
+    def test_non_reasoning_message_shape_is_unchanged(self):
+        msg = SimpleNamespace(content=None, tool_calls=None)
+        self.assertEqual(_agent._assistant_dict(msg), {
+            "role": "assistant", "content": "",
+        })
+
+    def test_next_tool_request_includes_reasoning_byte_for_byte(self):
+        first = FakeToolCompletion(
+            tool_calls=[_FnCall("c1", "t", "{}")],
+            reasoning_content="keep this exactly \u2603",
+        )
+        fake, calls = _fake_oai([first, FakeToolCompletion("done")])
+        messages = [{"role": "user", "content": "go"}]
+        with mock.patch.object(sys, "stdout", io.StringIO()), \
+             mock.patch.object(sys, "stderr", io.StringIO()):
+            _agent.run_loop(
+                fake, "kimi-k3", messages, {}, [_free_tool()],
+                max_tool_calls=0, yes=True, json_out=False,
+            )
+        self.assertEqual(
+            calls[1]["messages"][1]["reasoning_content"],
+            "keep this exactly \u2603",
+        )
+
+    def test_forced_final_response_keeps_reasoning_in_history(self):
+        seq = [
+            FakeToolCompletion(tool_calls=[_FnCall("c1", "t", "{}")]),
+            FakeToolCompletion("wrapped", reasoning_content="final thought"),
+        ]
+        fake, _calls = _fake_oai(seq)
+        messages = [{"role": "user", "content": "go"}]
+        with mock.patch.object(sys, "stdout", io.StringIO()), \
+             mock.patch.object(sys, "stderr", io.StringIO()):
+            _agent.run_loop(
+                fake, "kimi-k3", messages, {}, [_free_tool()],
+                max_tool_calls=1, yes=True, json_out=False,
+            )
+        self.assertEqual(messages[-1]["reasoning_content"], "final thought")
 
 
 def _tty(value=True):

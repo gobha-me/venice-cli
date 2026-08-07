@@ -532,7 +532,7 @@ def _human_pause(acc):
         acc[0] += time.monotonic() - t
 
 
-def _no_tool_turn(oai, model, messages, gen_kwargs, oai_tools, *, ledger=None) -> str:
+def _no_tool_turn(oai, model, messages, gen_kwargs, oai_tools, *, ledger=None) -> dict:
     """One completion with tools advertised but ``tool_choice="none"`` (no side
     effects) -- used for the plan turn and the acceptance-check turn.
 
@@ -550,9 +550,8 @@ def _no_tool_turn(oai, model, messages, gen_kwargs, oai_tools, *, ledger=None) -
         # transcript (see above), so they are the largest rows in the trace -- a trace
         # whose biggest calls read `n/a` would be worse than no trace at all.
         ledger.record(getattr(resp, "usage", None), seconds=time.monotonic() - _t0)
-    if getattr(resp, "choices", None):
-        return resp.choices[0].message.content or ""
-    return ""
+    msg = resp.choices[0].message if getattr(resp, "choices", None) else None
+    return _agent._assistant_dict(msg)
 
 
 # Promoted to `_agent` (#52): the scout subagent firewalls its stdout the same way,
@@ -866,12 +865,13 @@ def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task
             try:
                 # Inside the re-plan loop: each `edit` revision buys another plan turn,
                 # so recording per call (not once) is what makes the total honest.
-                plan_text = _no_tool_turn(oai, model, plan_messages, gen_kwargs,
-                                          oai_tools, ledger=ledger)
+                plan_message = _no_tool_turn(oai, model, plan_messages, gen_kwargs,
+                                             oai_tools, ledger=ledger)
+                plan_text = plan_message.get("content") or ""
             except openai.OpenAIError as e:
                 _finish(ledger, t0, human, json_out=args.json)
                 return _openai.status_to_exit(openai, e, "code")
-            messages.append({"role": "assistant", "content": plan_text})
+            messages.append(plan_message)
 
             if args.plan_only:
                 _finish(ledger, t0, human, json_out=args.json)
@@ -1000,14 +1000,17 @@ def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task
     if not args.no_verify and not args.no_plan:
         messages.append({"role": "user", "content": _VERIFY_MSG})
         try:
-            report = _no_tool_turn(oai, model, messages, gen_kwargs, oai_tools,
-                                   ledger=ledger)
+            report_message = _no_tool_turn(oai, model, messages, gen_kwargs, oai_tools,
+                                           ledger=ledger)
+            report = report_message.get("content") or ""
             parsed = _parse_verdict(report)
             if parsed is None:      # re-prompt ONCE for the exact verdict line
-                messages.append({"role": "assistant", "content": report})
+                messages.append(report_message)
                 messages.append({"role": "user", "content": _VERIFY_RETRY_MSG})
-                retry = _no_tool_turn(oai, model, messages, gen_kwargs, oai_tools,
-                                      ledger=ledger)
+                retry_message = _no_tool_turn(
+                    oai, model, messages, gen_kwargs, oai_tools, ledger=ledger,
+                )
+                retry = retry_message.get("content") or ""
                 report = f"{report}\n{retry}" if report else retry
                 parsed = _parse_verdict(retry)
         except openai.OpenAIError as e:
