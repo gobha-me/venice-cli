@@ -17,7 +17,7 @@ from unittest import mock
 from tests.test_chat import (
     FakeToolCompletion, _FnCall, _fake_openai_seq, _urlopen_ok,
 )
-from venice.commands import _agent, _code
+from venice.commands import _agent, _code, code as code_command
 
 
 # Auto-save is on by default (#47): keep this module hermetic (belt-and-suspenders
@@ -114,13 +114,14 @@ class TestCodeCommand(unittest.TestCase):
     # --- plan-only ---
     def test_plan_only_prints_and_exits_without_executing(self):
         out = io.StringIO()
-        seq = [FakeToolCompletion("1. do it\nAcceptance criteria:\n- works")]
+        plan = "1. do it\nAcceptance criteria:\n- works"
+        seq = [FakeToolCompletion(plan)]
         rc, calls = self._run(
             _code_args(task="do x", root=self.root, plan_only=True), seq, stdout=out)
         self.assertEqual(rc, 0)
         self.assertEqual(len(calls), 1)                 # only the plan turn
         self.assertEqual(calls[0]["tool_choice"], "none")
-        self.assertIn("do it", out.getvalue())
+        self.assertEqual(out.getvalue(), plan + "\n")
 
     # --- autonomous happy path with a real file write ---
     def test_auto_executes_and_writes_file(self):
@@ -138,6 +139,13 @@ class TestCodeCommand(unittest.TestCase):
         self.assertEqual(calls[0]["tool_choice"], "none")   # plan
         self.assertEqual(calls[1]["tool_choice"], "auto")   # execute loop
         self.assertEqual(calls[3]["tool_choice"], "none")   # acceptance check
+        plan_request = calls[0]["messages"]
+        execute_request = calls[1]["messages"]
+        self.assertEqual(execute_request[:len(plan_request)], plan_request)
+        self.assertEqual(
+            plan_request[-1],
+            {"role": "user", "content": code_command._PLAN_INSTRUCTION},
+        )
         # #128: every phase of one top-level conversation shares backend affinity.
         keys = [c["extra_body"]["prompt_cache_key"] for c in calls]
         self.assertTrue(keys[0].startswith("venice-"))
@@ -175,11 +183,53 @@ class TestCodeCommand(unittest.TestCase):
         self.assertEqual(len(session_files), 1)
         with open(session_files[0]) as fh:
             saved = json.load(fh)
-        saved_plan = [
-            message for message in saved["messages"]
+        saved_messages = saved["messages"]
+        plan_index = next(
+            i for i, message in enumerate(saved_messages)
             if message.get("content") == "plan: inspect then fix"
-        ][0]
+        )
+        self.assertEqual(
+            saved_messages[plan_index - 1],
+            {"role": "user", "content": code_command._PLAN_INSTRUCTION},
+        )
+        saved_plan = saved_messages[plan_index]
         self.assertEqual(saved_plan["reasoning_content"], "plan reasoning \u2603")
+
+    def test_replanning_requests_remain_exact_prefixes(self):
+        seq = [
+            FakeToolCompletion("plan: first pass"),
+            FakeToolCompletion(
+                "plan: revised pass",
+                reasoning_content="revised reasoning",
+            ),
+            FakeToolCompletion("done"),
+            FakeToolCompletion("ACCEPTANCE: PASS"),
+        ]
+        with mock.patch.object(code_command, "_decide_mode", return_value="prompt"), \
+                mock.patch("builtins.input", side_effect=[
+                    "edit", "cover the edge case", "auto",
+                ]):
+            rc, calls = self._run(
+                _code_args(task="fix it", root=self.root), seq,
+            )
+        self.assertEqual(rc, 0)
+
+        first_plan = calls[0]["messages"]
+        revised_plan = calls[1]["messages"]
+        execution = calls[2]["messages"]
+        self.assertEqual(revised_plan[:len(first_plan)], first_plan)
+        self.assertEqual(execution[:len(revised_plan)], revised_plan)
+        self.assertEqual(
+            first_plan[-1],
+            {"role": "user", "content": code_command._PLAN_INSTRUCTION},
+        )
+        self.assertEqual(
+            revised_plan[-1],
+            {"role": "user", "content": code_command._PLAN_INSTRUCTION},
+        )
+        revised_reply = execution[len(revised_plan)]
+        self.assertEqual(revised_reply["content"], "plan: revised pass")
+        self.assertEqual(revised_reply["reasoning_content"], "revised reasoning")
 
     # --- #76: cross-repo write protection wired through code._run ---
     def _sibling(self):
