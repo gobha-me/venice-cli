@@ -861,11 +861,15 @@ def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task
             )
             return 2
         while True:
-            plan_messages = messages + [{"role": "user", "content": _PLAN_INSTRUCTION}]
+            # Keep the request that produced the plan in the durable transcript.  A
+            # temporary list here makes the assistant plan appear without the user
+            # instruction it answered and breaks exact-prefix reuse on every later
+            # request (including re-plans).
+            messages.append({"role": "user", "content": _PLAN_INSTRUCTION})
             try:
                 # Inside the re-plan loop: each `edit` revision buys another plan turn,
                 # so recording per call (not once) is what makes the total honest.
-                plan_message = _no_tool_turn(oai, model, plan_messages, gen_kwargs,
+                plan_message = _no_tool_turn(oai, model, messages, gen_kwargs,
                                              oai_tools, ledger=ledger)
                 plan_text = plan_message.get("content") or ""
             except openai.OpenAIError as e:
