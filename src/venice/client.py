@@ -13,7 +13,7 @@ import urllib.parse
 import urllib.request
 from typing import Any, Callable, Optional, Tuple, Union
 
-from . import config
+from . import __version__, config
 
 
 class VeniceAPIError(Exception):
@@ -48,7 +48,7 @@ class VeniceClient:
         api_key: str,
         base_url: Optional[str] = None,
         timeout: float = 60.0,
-        user_agent: str = "venice-cli/0.1",
+        user_agent: str = f"venice-cli/{__version__}",
     ):
         if not api_key:
             raise ValueError("api_key is required")

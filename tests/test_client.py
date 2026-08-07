@@ -7,6 +7,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 from urllib.error import HTTPError
 
+from venice import __version__
 from venice.client import VeniceAPIError, VeniceClient
 
 
@@ -48,10 +49,42 @@ class TestVeniceClient(unittest.TestCase):
         h = {k.lower(): v for k, v in captured["headers"].items()}
         self.assertEqual(h["authorization"], "Bearer test-fake-key")
         self.assertEqual(h["content-type"], "application/json")
+        self.assertEqual(h["user-agent"], f"venice-cli/{__version__}")
         self.assertEqual(
             json.loads(captured["body"]),
             {"model": "x", "duration_seconds": 5},
         )
+
+    def test_get_url_bytes_sets_versioned_user_agent_without_authorization(self):
+        c = VeniceClient(api_key="test-fake-key")
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["headers"] = dict(req.header_items())
+            return FakeResp(200, b"image", "image/png")
+
+        with mock.patch("venice.client.urllib.request.urlopen", fake_urlopen):
+            ctype, body = c.get_url_bytes("https://example.test/image.png")
+
+        headers = {k.lower(): v for k, v in captured["headers"].items()}
+        self.assertEqual(headers["user-agent"], f"venice-cli/{__version__}")
+        self.assertNotIn("authorization", headers)
+        self.assertEqual(ctype, "image/png")
+        self.assertEqual(body, b"image")
+
+    def test_custom_user_agent_overrides_versioned_default(self):
+        c = VeniceClient(api_key="test-fake-key", user_agent="embedder/2.0")
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["headers"] = dict(req.header_items())
+            return FakeResp(200, b'{"ok": true}')
+
+        with mock.patch("venice.client.urllib.request.urlopen", fake_urlopen):
+            c.get_json("/models")
+
+        headers = {k.lower(): v for k, v in captured["headers"].items()}
+        self.assertEqual(headers["user-agent"], "embedder/2.0")
 
     def test_authorization_is_an_unredirected_header(self):
         c = VeniceClient(api_key="test-fake-key")
