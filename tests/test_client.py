@@ -1,9 +1,11 @@
 """Unit tests for VeniceClient. Mocks urllib.request.urlopen."""
 import io
 import json
+import tempfile
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from unittest import mock
 from urllib.error import HTTPError
 
@@ -15,10 +17,17 @@ class FakeResp:
     def __init__(self, status=200, body=b"", ctype="application/json"):
         self.status = status
         self._body = body
+        self._offset = 0
         self.headers = {"Content-Type": ctype}
 
-    def read(self):
-        return self._body
+    def read(self, n=-1):
+        if n is None or n < 0:
+            result = self._body[self._offset:]
+            self._offset = len(self._body)
+            return result
+        result = self._body[self._offset:self._offset + n]
+        self._offset += len(result)
+        return result
 
     def __enter__(self):
         return self
@@ -55,22 +64,124 @@ class TestVeniceClient(unittest.TestCase):
             {"model": "x", "duration_seconds": 5},
         )
 
-    def test_get_url_bytes_sets_versioned_user_agent_without_authorization(self):
+    def test_download_streams_to_temp_without_authorization(self):
         c = VeniceClient(api_key="test-fake-key")
         captured = {}
 
-        def fake_urlopen(req, timeout=None):
-            captured["headers"] = dict(req.header_items())
-            return FakeResp(200, b"image", "image/png")
+        class Opener:
+            def open(self, req, timeout=None):
+                captured["headers"] = dict(req.header_items())
+                captured["timeout"] = timeout
+                return FakeResp(200, b"video", "video/mp4")
 
-        with mock.patch("venice.client.urllib.request.urlopen", fake_urlopen):
-            ctype, body = c.get_url_bytes("https://example.test/image.png")
+        with tempfile.TemporaryDirectory() as td, mock.patch(
+            "venice.client._egress.build_https_opener", return_value=Opener()
+        ):
+            ctype, path, size = c.download_url_to_temp(
+                "https://example.test/video.mp4?signature=secret", Path(td)
+            )
+            self.assertEqual(path.read_bytes(), b"video")
+            self.assertEqual(size, 5)
 
         headers = {k.lower(): v for k, v in captured["headers"].items()}
         self.assertEqual(headers["user-agent"], f"venice-cli/{__version__}")
         self.assertNotIn("authorization", headers)
-        self.assertEqual(ctype, "image/png")
-        self.assertEqual(body, b"image")
+        self.assertEqual(ctype, "video/mp4")
+        self.assertEqual(captured["timeout"], 60)
+
+    def test_download_rejects_non_video_content_without_creating_a_file(self):
+        c = VeniceClient(api_key="test-fake-key")
+
+        class Opener:
+            def open(self, req, timeout=None):
+                return FakeResp(200, b"not video", "text/plain")
+
+        with tempfile.TemporaryDirectory() as td, mock.patch(
+            "venice.client._egress.build_https_opener", return_value=Opener()
+        ):
+            with self.assertRaises(VeniceAPIError):
+                c.download_url_to_temp("https://example.test/video", Path(td))
+            self.assertEqual(list(Path(td).iterdir()), [])
+
+    def test_download_rejects_file_scheme_before_constructing_an_opener(self):
+        c = VeniceClient(api_key="test-fake-key")
+        with tempfile.TemporaryDirectory() as td, mock.patch(
+            "venice.client._egress.build_https_opener"
+        ) as build:
+            with self.assertRaises(VeniceAPIError):
+                c.download_url_to_temp("file:///tmp/harmless", Path(td))
+        build.assert_not_called()
+
+    def test_download_rejects_declared_oversize_and_empty_bodies(self):
+        c = VeniceClient(api_key="test-fake-key")
+        oversized = FakeResp(200, b"x", "video/mp4")
+        oversized.headers["Content-Length"] = "999"
+
+        class OversizedOpener:
+            def open(self, req, timeout=None):
+                return oversized
+
+        class EmptyOpener:
+            def open(self, req, timeout=None):
+                return FakeResp(200, b"", "video/mp4")
+
+        with tempfile.TemporaryDirectory() as td:
+            for opener in (OversizedOpener(), EmptyOpener()):
+                with self.subTest(opener=type(opener).__name__), mock.patch(
+                    "venice.client._egress.build_https_opener", return_value=opener
+                ), self.assertRaises(VeniceAPIError):
+                    c.download_url_to_temp(
+                        "https://example.test/video?signature=secret",
+                        Path(td),
+                        max_bytes=4,
+                    )
+                self.assertEqual(list(Path(td).iterdir()), [])
+
+    def test_download_enforces_streamed_byte_limit_and_cleans_partial_file(self):
+        c = VeniceClient(api_key="test-fake-key")
+
+        class Opener:
+            def open(self, req, timeout=None):
+                return FakeResp(200, b"12345", "video/mp4")
+
+        with tempfile.TemporaryDirectory() as td, mock.patch(
+            "venice.client._egress.build_https_opener", return_value=Opener()
+        ):
+            with self.assertRaises(VeniceAPIError):
+                c.download_url_to_temp(
+                    "https://example.test/video?signature=secret", Path(td), max_bytes=4
+                )
+            self.assertEqual(list(Path(td).iterdir()), [])
+
+    def test_download_enforces_total_deadline_and_cleans_partial_file(self):
+        c = VeniceClient(api_key="test-fake-key")
+
+        class Opener:
+            def open(self, req, timeout=None):
+                return FakeResp(200, b"video", "video/mp4")
+
+        with tempfile.TemporaryDirectory() as td, mock.patch(
+            "venice.client._egress.build_https_opener", return_value=Opener()
+        ), mock.patch("venice.client.time.monotonic", side_effect=[0.0, 2.0]):
+            with self.assertRaises(VeniceAPIError) as cm:
+                c.download_url_to_temp(
+                    "https://example.test/video?signature=secret",
+                    Path(td),
+                    max_seconds=1,
+                )
+            self.assertIn("timed out", str(cm.exception))
+            self.assertEqual(list(Path(td).iterdir()), [])
+
+    def test_download_error_redacts_userinfo_query_and_fragment(self):
+        c = VeniceClient(api_key="test-fake-key")
+        url = "https://user:pass@example.test/video?signature=secret#fragment"
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaises(VeniceAPIError) as cm:
+                c.download_url_to_temp(url, Path(td))
+        rendered = str(cm.exception)
+        for secret in ("user:pass", "signature", "secret", "fragment"):
+            self.assertNotIn(secret, rendered)
+        self.assertEqual(cm.exception.url, "https://example.test/video")
 
     def test_custom_user_agent_overrides_versioned_default(self):
         c = VeniceClient(api_key="test-fake-key", user_agent="embedder/2.0")

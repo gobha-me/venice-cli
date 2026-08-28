@@ -24,7 +24,10 @@ from types import SimpleNamespace
 from typing import List, Optional
 
 from ..client import VeniceAPIError
-from . import _audio, _browser, _index, _memory, _models, _openai, _queue, _shared
+from . import (
+    _audio, _browser, _index, _memory, _models, _openai, _queue, _shared,
+    _video_jobs,
+)
 from . import bg_remove as _bg
 from . import chat as _chat
 from . import image as _image
@@ -149,10 +152,8 @@ def _err(message: str) -> dict:
 _JOB_ROUTE = {"sfx": "audio", "music": "audio", "video": "video"}
 
 
-def _job_handle(
-    queue_id: str, *, type: str, model: str, quote_value, download_url: Optional[str] = None
-) -> dict:
-    """The stateless handle a `background=True` media call returns.
+def _job_handle(queue_id: str, *, type: str, model: str, quote_value) -> dict:
+    """The opaque handle a `background=True` media call returns.
 
     The agent holds these fields and passes them back to `venice_job_status` /
     `venice_job_result`. The charge already landed at queue time, so fetching the
@@ -169,9 +170,6 @@ def _job_handle(
             "venice_job_result using this queue_id, type, and model"
         ),
     }
-    if download_url:
-        handle["download_url"] = download_url
-        handle["message"] += " (pass download_url too for this video)"
     return handle
 
 
@@ -817,8 +815,8 @@ def video_tool(
 
     With `background=True` the call queues the job (charging up front) and returns
     a `{"status": "queued", ...}` handle immediately instead of blocking on the
-    poll; fetch the mp4 later via `venice_job_result` (pass back the handle's
-    `download_url` too, which VPS-backed models need).
+    poll; fetch the mp4 later via `venice_job_result`. VPS retrieval metadata is
+    retained privately and is not returned to the model.
     """
     if not prompt or not prompt.strip():
         return _err("video: prompt is required")
@@ -874,16 +872,27 @@ def video_tool(
     download_url = queued.get("download_url") or None
 
     if background:
-        return _job_handle(
-            queue_id, type="video", model=model,
-            quote_value=quote_value, download_url=download_url,
-        )
+        if download_url:
+            try:
+                _video_jobs.remember(queue_id, model, download_url)
+            except _video_jobs.VideoJobStoreError as e:
+                return _err(
+                    f"video: queued as {queue_id}, but could not save private "
+                    f"retrieval metadata: {e}"
+                )
+        return _job_handle(queue_id, type="video", model=model, quote_value=quote_value)
 
+    output_root = resolve_output_dir(output_dir)
     try:
-        ctype, data = _video.retrieve_bytes(
+        output_root.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        return _err(f"video: could not create output directory {output_root}: {e}")
+    try:
+        ctype, payload, byte_count = _video.retrieve_bytes(
             client, model, queue_id,
             poll_interval=_video.config.VIDEO_POLL_INTERVAL_SEC,
             max_wait=max_wait, download_url=download_url,
+            download_dir=output_root,
         )
     except VeniceAPIError as e:
         return _err(f"video retrieve failed: {e}")
@@ -894,11 +903,21 @@ def video_tool(
 
     ext, _unknown = _queue.ext_for(ctype, _video.VIDEO_EXT_BY_CTYPE, default=".mp4")
     out_path = _queue.resolve_output_path(
-        resolve_output_dir(output_dir), queue_id, ext, prefix="venice-video"
+        output_root, queue_id, ext, prefix="venice-video"
     )
-    werr = _write(out_path, data)
-    if werr:
-        return _err(f"video: could not write {out_path}: {werr}")
+    if isinstance(payload, Path):
+        try:
+            os.replace(payload, out_path)
+        except OSError as e:
+            try:
+                payload.unlink()
+            except OSError:
+                pass
+            return _err(f"video: could not write {out_path}: {e}")
+    else:
+        werr = _write(out_path, payload)
+        if werr:
+            return _err(f"video: could not write {out_path}: {werr}")
 
     try:  # best-effort cleanup; the file is already saved
         client.post_json("/video/complete", {"model": model, "queue_id": queue_id})
@@ -907,7 +926,7 @@ def video_tool(
     return {
         "status": "ok",
         "path": str(out_path.resolve()),
-        "bytes": len(data),
+        "bytes": byte_count,
         "model": model,
         "queue_id": queue_id,
         "cost_estimate_usd": quote_value,
@@ -919,9 +938,7 @@ def _job_route(type: str) -> Optional[str]:
     return _JOB_ROUTE.get((type or "").lower())
 
 
-def job_status_tool(
-    client, *, queue_id: str, type: str, model: str, download_url: Optional[str] = None
-) -> dict:
+def job_status_tool(client, *, queue_id: str, type: str, model: str) -> dict:
     """Peek at a backgrounded media job (from a `background=True` sfx/music/video call).
 
     Free, read-only, non-blocking: one probe of the media type's retrieve route.
@@ -970,7 +987,6 @@ def job_result_tool(
     queue_id: str,
     type: str,
     model: str,
-    download_url: Optional[str] = None,
     # #57 Class C2: deliberately NOT tri-stated, unlike the generate-path
     # max_wait. Here 0.0 is a MEANING ("one non-blocking probe"), not a default
     # standing in for a preference, and this tool is not config-reachable --
@@ -1006,12 +1022,23 @@ def job_result_tool(
             )
             ext, _unknown = _audio.ext_for(ctype)
             name_prefix = f"venice-{(type or '').lower()}"
+            byte_count = len(data)
         else:  # video
             wait = max(0.0, min(max_wait, _video.config.VIDEO_POLL_MAX_WAIT_SEC))
-            ctype, data = _video.retrieve_bytes(
+            try:
+                download_url = _video_jobs.lookup(queue_id, model)
+            except _video_jobs.VideoJobStoreError as e:
+                return _err(f"job_result: cannot read private retrieval metadata: {e}")
+            output_root = resolve_output_dir(None)
+            try:
+                output_root.mkdir(parents=True, exist_ok=True)
+            except OSError as e:
+                return _err(f"job_result: could not create output directory: {e}")
+            ctype, data, byte_count = _video.retrieve_bytes(
                 client, model, queue_id,
                 poll_interval=_video.config.VIDEO_POLL_INTERVAL_SEC,
                 max_wait=wait, download_url=download_url,
+                download_dir=output_root,
             )
             ext, _unknown = _queue.ext_for(ctype, _video.VIDEO_EXT_BY_CTYPE, default=".mp4")
             name_prefix = "venice-video"
@@ -1024,7 +1051,7 @@ def job_result_tool(
     except _video.NoVideoStream:
         return _err(
             f"job_result: video job {queue_id} completed but returned no stream; "
-            "re-call with the download_url from the background job handle"
+            "no private download metadata is available"
         )
     except VeniceAPIError as e:
         return _err(f"job_result: retrieve failed: {e}")
@@ -1032,18 +1059,33 @@ def job_result_tool(
     out_path = _queue.resolve_output_path(
         resolve_output_dir(None), queue_id, ext, prefix=name_prefix
     )
-    werr = _write(out_path, data)
-    if werr:
-        return _err(f"job_result: could not write {out_path}: {werr}")
+    if isinstance(data, Path):
+        try:
+            os.replace(data, out_path)
+        except OSError as e:
+            try:
+                data.unlink()
+            except OSError:
+                pass
+            return _err(f"job_result: could not write {out_path}: {e}")
+    else:
+        werr = _write(out_path, data)
+        if werr:
+            return _err(f"job_result: could not write {out_path}: {werr}")
 
     try:  # best-effort cleanup; the file is already saved
         client.post_json(f"/{base}/complete", {"model": model, "queue_id": queue_id})
     except VeniceAPIError:
         pass
+    if base == "video":
+        try:
+            _video_jobs.forget(queue_id, model)
+        except _video_jobs.VideoJobStoreError:
+            pass
     return {
         "status": "ok",
         "path": str(out_path.resolve()),
-        "bytes": len(data),
+        "bytes": byte_count,
         "model": model,
         "queue_id": queue_id,
     }

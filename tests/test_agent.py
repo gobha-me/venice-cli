@@ -2636,7 +2636,7 @@ class TestAsyncJobSchemas(unittest.TestCase):
         for schema in (_agent._JOB_STATUS_SCHEMA, _agent._JOB_RESULT_SCHEMA):
             self.assertEqual(schema.get("required"), ["queue_id", "type", "model"])
             props = schema["properties"]
-            for banned in ("confirm", "max_spend", "output_dir"):
+            for banned in ("confirm", "max_spend", "output_dir", "download_url"):
                 self.assertNotIn(banned, props)
         # only job_result exposes max_wait (block-poll seconds)
         self.assertIn("max_wait", _agent._JOB_RESULT_SCHEMA["properties"])
@@ -2647,6 +2647,12 @@ class TestAsyncJobSchemas(unittest.TestCase):
             object(), only={"venice_job_status", "venice_job_result"})}
         self.assertFalse(by["venice_job_status"].paid)
         self.assertFalse(by["venice_job_result"].paid)
+
+    def test_fabricated_download_url_is_stripped_before_dispatch(self):
+        self.assertNotIn(
+            "download_url",
+            _agent._clean({"queue_id": "q", "download_url": "file:///tmp/x"}),
+        )
 
 
 class TestMediaPathAuthorityWiring(unittest.TestCase):

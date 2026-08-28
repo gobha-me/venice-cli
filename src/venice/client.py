@@ -6,14 +6,26 @@ Maps non-2xx to VeniceAPIError with status, URL, and a body excerpt.
 from __future__ import annotations
 
 import json
+import math
 import os
+import tempfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 from typing import Any, Callable, Optional, Tuple, Union
 
-from . import __version__, config
+from . import __version__, _egress, config
+
+
+VIDEO_DOWNLOAD_MAX_BYTES = 512 * 1024 * 1024
+VIDEO_DOWNLOAD_MAX_SECONDS = 15 * 60
+VIDEO_DOWNLOAD_IO_TIMEOUT_SECONDS = 60
+VIDEO_DOWNLOAD_CHUNK_BYTES = 1024 * 1024
+VIDEO_DOWNLOAD_CONTENT_TYPES = frozenset(
+    {"video/mp4", "video/webm", "video/quicktime"}
+)
 
 
 class VeniceAPIError(Exception):
@@ -21,17 +33,17 @@ class VeniceAPIError(Exception):
 
     Attributes:
         status: HTTP status code (0 if connection failed pre-response).
-        url:    final request URL.
+        url:    request URL with userinfo, query, and fragment redacted.
         body:   excerpt of the response body (first ~2 KB), for debugging.
         code:   Venice API error code (e.g. INSUFFICIENT_BALANCE), if parseable.
     """
 
     def __init__(self, status: int, url: str, body: str, code: Optional[str] = None):
         self.status = status
-        self.url = url
+        self.url = _egress.safe_url(url) if "://" in str(url) else str(url)
         self.body = body
         self.code = code
-        msg = f"HTTP {status} from {url}"
+        msg = f"HTTP {status} from {self.url}"
         if code:
             msg += f" [{code}]"
         if body:
@@ -185,28 +197,118 @@ class VeniceClient:
                 )
             time.sleep(interval)
 
-    def get_url_bytes(self, url: str) -> Tuple[str, bytes]:
-        """Fetch an arbitrary URL's bytes with a plain GET (no auth header).
+    def download_url_to_temp(
+        self,
+        url: str,
+        directory: Path,
+        *,
+        max_bytes: int = VIDEO_DOWNLOAD_MAX_BYTES,
+        max_seconds: float = VIDEO_DOWNLOAD_MAX_SECONDS,
+    ) -> Tuple[str, Path, int]:
+        """Safely stream one presigned video URL to a private temporary file.
 
-        For presigned download URLs (e.g. a video's download_url), which carry
-        their own auth in the query string and must not receive our Bearer token.
-        Returns (content_type, bytes); maps HTTP/URL errors to VeniceAPIError.
+        The egress opener owns resolution, address policy, pinning, TLS, and redirect
+        checks.  This layer owns media type, byte, and wall-time bounds.  It never
+        sends the Venice Bearer token and never renders the URL query string.
         """
-        req = urllib.request.Request(
-            url, headers={"User-Agent": self.user_agent}, method="GET"
-        )
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                return resp.headers.get("Content-Type", ""), resp.read()
+            _egress.validate_https_url(url)
+        except _egress.EgressPolicyError as e:
+            raise VeniceAPIError(0, url, str(e)) from None
+        try:
+            byte_limit = int(max_bytes)
+            time_limit = float(max_seconds)
+            configured_timeout = float(self.timeout)
+        except (TypeError, ValueError):
+            raise VeniceAPIError(0, url, "invalid download resource limit") from None
+        if (
+            byte_limit <= 0
+            or time_limit <= 0
+            or not math.isfinite(time_limit)
+            or configured_timeout <= 0
+            or not math.isfinite(configured_timeout)
+        ):
+            raise VeniceAPIError(0, url, "invalid download resource limit")
+        io_timeout = min(configured_timeout, VIDEO_DOWNLOAD_IO_TIMEOUT_SECONDS)
+
+        req = urllib.request.Request(
+            url,
+            headers={"Accept": "video/*", "User-Agent": self.user_agent},
+            method="GET",
+        )
+        opener = _egress.build_https_opener()
+        tmp_path: Optional[Path] = None
+        try:
+            with opener.open(req, timeout=io_timeout) as resp:
+                ctype = resp.headers.get("Content-Type", "") or ""
+                ctype_base = ctype.split(";", 1)[0].strip().lower()
+                if ctype_base not in VIDEO_DOWNLOAD_CONTENT_TYPES:
+                    raise VeniceAPIError(
+                        0, url, f"unsupported video content type: {ctype_base or '(missing)'}"
+                    )
+                raw_length = resp.headers.get("Content-Length")
+                if raw_length:
+                    try:
+                        declared = int(raw_length)
+                    except (TypeError, ValueError):
+                        raise VeniceAPIError(0, url, "invalid download Content-Length") from None
+                    if declared < 0 or declared > byte_limit:
+                        raise VeniceAPIError(
+                            0, url, f"video download exceeds {byte_limit} byte limit"
+                        )
+
+                directory = Path(directory)
+                try:
+                    fd, tmp_name = tempfile.mkstemp(
+                        prefix=".venice-video-", suffix=".tmp", dir=str(directory)
+                    )
+                except OSError as e:
+                    raise VeniceAPIError(
+                        0, url, f"cannot create temporary download file: {e}"
+                    ) from None
+                tmp_path = Path(tmp_name)
+                total = 0
+                started = time.monotonic()
+                try:
+                    with os.fdopen(fd, "wb") as out:
+                        while True:
+                            if time.monotonic() - started > time_limit:
+                                raise VeniceAPIError(0, url, "video download timed out")
+                            chunk = resp.read(
+                                min(VIDEO_DOWNLOAD_CHUNK_BYTES, byte_limit - total + 1)
+                            )
+                            if not chunk:
+                                break
+                            total += len(chunk)
+                            if total > byte_limit:
+                                raise VeniceAPIError(
+                                    0, url, f"video download exceeds {byte_limit} byte limit"
+                                )
+                            out.write(chunk)
+                        if total == 0:
+                            raise VeniceAPIError(0, url, "video download was empty")
+                        out.flush()
+                        os.fsync(out.fileno())
+                except Exception:
+                    try:
+                        tmp_path.unlink()
+                    except OSError:
+                        pass
+                    tmp_path = None
+                    raise
+                return ctype, tmp_path, total
         except urllib.error.HTTPError as e:
-            err_body = b""
-            try:
-                err_body = e.read()
-            except Exception:
-                pass
-            self._raise_api_error(e.code, url, err_body, "")
+            raise VeniceAPIError(e.code, url, "video download request failed") from None
         except urllib.error.URLError as e:
-            raise VeniceAPIError(0, url, f"connection error: {e.reason}") from None
+            if isinstance(e.reason, _egress.EgressPolicyError):
+                detail = str(e.reason)
+            else:
+                detail = "video download connection failed"
+            raise VeniceAPIError(0, url, detail) from None
+        except _egress.EgressPolicyError as e:
+            raise VeniceAPIError(0, url, str(e)) from None
+        except (TimeoutError, OSError):
+            raise VeniceAPIError(0, url, "video download connection failed") from None
 
     @staticmethod
     def _decode_json(status: int, path: str, ctype: str, raw: bytes) -> dict:

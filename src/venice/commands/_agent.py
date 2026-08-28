@@ -1918,7 +1918,6 @@ _JOB_STATUS_SCHEMA = _obj(
         "queue_id": _p("string", "The queue_id from a background venice_sfx/music/video call."),
         "type": _p("string", "sfx, music, or video -- the tool that started the job."),
         "model": _p("string", "The model id from the job handle."),
-        "download_url": _p("string", "The download_url from the job handle (VPS video only)."),
     },
     required=["queue_id", "type", "model"],
 )
@@ -1928,7 +1927,6 @@ _JOB_RESULT_SCHEMA = _obj(
         "queue_id": _p("string", "The queue_id from a background venice_sfx/music/video call."),
         "type": _p("string", "sfx, music, or video -- the tool that started the job."),
         "model": _p("string", "The model id from the job handle."),
-        "download_url": _p("string", "The download_url from the job handle (VPS video only)."),
         "max_wait": _p(
             "number",
             "Seconds to block-poll for the file (default 0 = one non-blocking "
@@ -2323,8 +2321,9 @@ _BUILTINS = [
         "venice_job_result",
         "job_result_tool",
         "Fetch a backgrounded media render's file once ready (started with "
-        "background=true). Pass back the job handle's queue_id, type, model (and "
-        "download_url for VPS video). Writes the file and returns its path, or "
+        "background=true). Pass back the job handle's queue_id, type, and model; "
+        "private VPS retrieval metadata is resolved locally. Writes the file and "
+        "returns its path, or "
         "status 'processing' if not ready yet -- retry later. Free (charged at "
         "queue time); not spend-gated.",
         _JOB_RESULT_SCHEMA,
@@ -2421,7 +2420,9 @@ def select(categories=None, names=None, exclude=None) -> set:
 
 
 # Loop-controlled kwargs the model must never supply (stripped defensively).
-_CONTROLLED = ("confirm", "max_spend", "output_dir", "path_authority")
+_CONTROLLED = (
+    "confirm", "max_spend", "output_dir", "path_authority", "download_url",
+)
 
 
 def _clean(arguments) -> dict:

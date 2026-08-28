@@ -512,8 +512,18 @@ price. Per-model support varies — the API rejects an unsupported combination.
 
 Some (VPS-backed) models return a presigned `download_url` at queue time and
 stream nothing back from `/video/retrieve`; the CLI fetches the mp4 from that
-URL transparently. When queued with `--background`, the URL is printed alongside
-the queue id — pass it back via `venice video-status <id> --download-url <url>`.
+URL transparently. Background jobs bind that URL to the queue id in a private
+mode-0600 local registry at `~/.config/venice/video_jobs.json`, so the signed URL
+is not printed or passed through an agent/MCP transcript. Entries are capped at
+100 and expire after seven days. `video-status --download-url` remains only as a
+deprecated operator fallback for jobs queued before v0.83.10.
+
+Presigned downloads use a fail-closed HTTPS boundary: every redirect is resolved
+and connected through a validated, pinned public address while retaining normal
+TLS hostname verification. Local, private, link-local, multicast, reserved,
+unspecified, and metadata destinations are rejected for IPv4 and IPv6; ambient
+proxies are ignored. Downloads accept video media types only, allow at most five
+redirects, stream to a private temporary file, and stop at 512 MiB or 15 minutes.
 
 ## Chat
 
@@ -2023,7 +2033,7 @@ The player list (`paplay` -> `aplay` -> `ffplay` -> `mpg123` -> `play`
 | `venice image --from-file PATH [...]` | batch-generate a card set |
 | `venice music PROMPT [--duration N] [--master] [--loop] [...]` | generate long-form ambience/music |
 | `venice video PROMPT [--duration 5s] [--resolution R] [--aspect-ratio A] [--image F] [--reference-image F ...] [--element JSON] [...]` | generate a video (async queue, mp4); text- or image-to-video with reference inputs |
-| `venice video-status QUEUE_ID [--download-url URL]` | fetch a backgrounded video job |
+| `venice video-status QUEUE_ID [--download-url URL]` | fetch a backgrounded video job (`--download-url` is legacy-only) |
 | `venice master INPUT [--loop] [--lufs N] [--bit-depth N] [...]` | master audio to WAV (48k/24-bit, LUFS/true-peak) |
 | `venice contact-sheet DIR_OR_GLOB [--cols N] [--cell WxH] [--label\|--no-label] [...]` | tile images into one contact sheet (no API call) |
 | `venice chat MESSAGE [--system S] [--model M] [--web-search on] [...]` | one-shot chat completion (OpenAI SDK) |

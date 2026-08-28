@@ -5,6 +5,7 @@ to resolve the default model (mirrors test_chat.py's catalog mock).
 """
 import argparse
 import base64
+import io
 import json
 import os
 import tempfile
@@ -77,6 +78,12 @@ class TestVideoFlow(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.cwd = os.getcwd()
         os.chdir(self.tmp.name)
+        self.jobs_file = str(Path(self.tmp.name) / "video_jobs.json")
+        _jobs = mock.patch.dict(
+            os.environ, {config.ENV_VIDEO_JOBS_FILE: self.jobs_file}
+        )
+        _jobs.start()
+        self.addCleanup(_jobs.stop)
 
     def tearDown(self):
         os.chdir(self.cwd)
@@ -142,7 +149,6 @@ class TestVideoFlow(unittest.TestCase):
                 }).encode(),
                 "application/json",
             ),
-            FakeResp(200, b"PRESIGNEDMP4", "video/mp4"),
             FakeResp(200, b'{"success": true}', "application/json"),
         ])
         seen = []
@@ -151,8 +157,15 @@ class TestVideoFlow(unittest.TestCase):
             seen.append(req.full_url)
             return next(responses)
 
+        def fake_download(client, value, directory, **kwargs):
+            seen.append(value)
+            path = Path(directory) / ".download.tmp"
+            path.write_bytes(b"PRESIGNEDMP4")
+            return "video/mp4", path, len(b"PRESIGNEDMP4")
+
         with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
              mock.patch("venice.client.urllib.request.urlopen", fake_urlopen), \
+             mock.patch("venice.client.VeniceClient.download_url_to_temp", fake_download), \
              mock.patch("venice.client.time.sleep"):
             rc = video._run_generate(_build_args())
 
@@ -160,7 +173,7 @@ class TestVideoFlow(unittest.TestCase):
         written = sorted(Path(".").glob("venice-video-*.mp4"))
         self.assertEqual(len(written), 1, f"expected 1 mp4, got {written}")
         self.assertEqual(written[0].read_bytes(), b"PRESIGNEDMP4")
-        # the presigned URL was fetched verbatim (no base_url prefix)
+        # The queue-issued URL reaches only the guarded downloader seam.
         self.assertIn(url, seen)
 
     def test_dry_run_quotes_and_exits_zero(self):
@@ -206,6 +219,30 @@ class TestVideoFlow(unittest.TestCase):
         self.assertEqual(rc, 0)
         writes = "".join(c.args[0] for c in out.write.call_args_list)
         self.assertIn("BGVID99999", writes)
+
+    def test_background_vps_url_is_stored_but_never_printed(self):
+        from venice.commands import _video_jobs, video
+
+        url = "https://cdn.example/video?signature=transcript-secret"
+        responses = iter([
+            _catalog(DEFAULT_MODEL),
+            FakeResp(200, b'{"quote": 0.5}', "application/json"),
+            FakeResp(200, json.dumps({
+                "queue_id": "BGVPS12345", "download_url": url,
+            }).encode(), "application/json"),
+        ])
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.client.urllib.request.urlopen", lambda *a, **kw: next(responses)), \
+             mock.patch("sys.stdout", stdout), mock.patch("sys.stderr", stderr):
+            rc = video._run_generate(_build_args(background=True))
+
+        self.assertEqual(rc, 0)
+        self.assertIn("BGVPS12345", stdout.getvalue())
+        self.assertNotIn(url, stdout.getvalue() + stderr.getvalue())
+        self.assertNotIn("transcript-secret", stdout.getvalue() + stderr.getvalue())
+        self.assertEqual(_video_jobs.lookup("BGVPS12345", DEFAULT_MODEL), url)
 
     def test_unknown_model_returns_exit_6(self):
         from venice.commands import video

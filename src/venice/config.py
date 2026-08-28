@@ -16,6 +16,12 @@ SECRETS_FILE = CONFIG_DIR / "secrets.json"
 # `credentials` lives). Names resolve to <PERSONAS_DIR>/<name>.md|.txt only.
 PERSONAS_DIR = CONFIG_DIR / "personas"
 
+# VPS video jobs return a presigned download URL only in the queue response.  Keep
+# that bearer-like URL in a private local registry so background CLI/agent flows can
+# refer to the public queue id without copying the signed URL through transcripts.
+VIDEO_JOBS_FILE = CONFIG_DIR / "video_jobs.json"
+ENV_VIDEO_JOBS_FILE = "VENICE_VIDEO_JOBS_FILE"
+
 # `venice chat`/`venice code` auto-save each REPL session (id + settings + usage +
 # transcript) here (#47), so `--resume <id>` / `--continue` restore a session, not
 # just its messages. One JSON envelope per session at <SESSIONS_DIR>/<id>.json,
