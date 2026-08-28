@@ -18,8 +18,9 @@ from unittest import mock
 from urllib.error import HTTPError
 
 from tests.test_client import FakeResp
+from venice import config
 from venice.client import VeniceClient
-from venice.commands import _mcp, _shared
+from venice.commands import _mcp, _shared, _video_jobs
 
 
 def _client():
@@ -52,6 +53,14 @@ class _ToolTest(unittest.TestCase):
     def setUp(self):
         self.td = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.td, ignore_errors=True)
+        self.jobs_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.jobs_dir, ignore_errors=True)
+        jobs = mock.patch.dict(
+            os.environ,
+            {config.ENV_VIDEO_JOBS_FILE: str(Path(self.jobs_dir) / "jobs.json")},
+        )
+        jobs.start()
+        self.addCleanup(jobs.stop)
 
     def stdout_guard(self):
         test = self
@@ -687,7 +696,6 @@ class TestVideoTool(_ToolTest):
             FakeResp(200, b'{"quote": 0.5}'),
             FakeResp(200, json.dumps({"queue_id": "vpsq1", "download_url": url}).encode()),
             FakeResp(200, json.dumps({"status": "COMPLETED"}).encode()),
-            FakeResp(200, b"PRESIGNEDMP4", "video/mp4"),   # get_url_bytes
             FakeResp(200, b'{"ok": true}'),
         )
         seen = []
@@ -696,14 +704,21 @@ class TestVideoTool(_ToolTest):
             seen.append(req.full_url)
             return responses(req, timeout)
 
+        def fake_download(client, value, directory, **kwargs):
+            seen.append(value)
+            path = Path(directory) / ".video.tmp"
+            path.write_bytes(b"PRESIGNEDMP4")
+            return "video/mp4", path, len(b"PRESIGNEDMP4")
+
         with mock.patch("venice.client.urllib.request.urlopen", fake), \
+             mock.patch("venice.client.VeniceClient.download_url_to_temp", fake_download), \
              mock.patch("venice.client.time.sleep"), self.stdout_guard():
             res = _mcp.video_tool(
                 _client(), "a koi pond", output_dir=self.td, confirm=True, max_wait=10
             )
         self.assertEqual(res["status"], "ok")
         self.assertEqual(Path(res["path"]).read_bytes(), b"PRESIGNEDMP4")
-        self.assertIn(url, seen)  # presigned URL fetched verbatim
+        self.assertIn(url, seen)
 
     def test_gate_blocks_before_queue(self):
         seen = []
@@ -728,7 +743,7 @@ class TestVideoTool(_ToolTest):
         res = _mcp.video_tool(_client(), "   ", confirm=True)
         self.assertEqual(res["status"], "error")
 
-    def test_background_returns_queue_id_with_download_url(self):
+    def test_background_returns_opaque_handle_and_stores_download_url_privately(self):
         url = "https://cdn.example.com/presigned?sig=abc"
 
         def fake(req, timeout=None):
@@ -749,7 +764,11 @@ class TestVideoTool(_ToolTest):
         self.assertEqual(res["status"], "queued")
         self.assertEqual(res["queue_id"], "bgvid1")
         self.assertEqual(res["type"], "video")
-        self.assertEqual(res["download_url"], url)
+        self.assertNotIn("download_url", res)
+        self.assertNotIn(url, json.dumps(res))
+        self.assertEqual(
+            _video_jobs.lookup("bgvid1", "seedance-2-0-text-to-video"), url
+        )
         self.assertEqual(os.listdir(self.td), [])
 
 
@@ -847,23 +866,33 @@ class TestJobResultTool(_ToolTest):
             seen.append(req.full_url)
             if req.full_url.endswith("/video/retrieve"):
                 return FakeResp(200, json.dumps({"status": "COMPLETED"}).encode())
-            if url in req.full_url:
-                return FakeResp(200, b"PRESIGNEDMP4", "video/mp4")
             if req.full_url.endswith("/video/complete"):
                 return FakeResp(200, b'{"ok": true}')
             raise AssertionError(f"unexpected: {req.full_url}")
 
+        _video_jobs.remember("vpsq1", "seedance-2-0-text-to-video", url)
+
+        def fake_download(client, value, directory, **kwargs):
+            seen.append(value)
+            path = Path(directory) / ".video.tmp"
+            path.write_bytes(b"PRESIGNEDMP4")
+            return "video/mp4", path, len(b"PRESIGNEDMP4")
+
         with mock.patch("venice.client.urllib.request.urlopen", fake), \
+             mock.patch("venice.client.VeniceClient.download_url_to_temp", fake_download), \
              mock.patch.dict(os.environ, {"VENICE_MCP_OUTPUT_DIR": self.td}), \
              self.stdout_guard():
             res = _mcp.job_result_tool(
                 _client(), queue_id="vpsq1", type="video",
-                model="seedance-2-0-text-to-video", download_url=url,
+                model="seedance-2-0-text-to-video",
             )
         self.assertEqual(res["status"], "ok")
         self.assertEqual(Path(res["path"]).read_bytes(), b"PRESIGNEDMP4")
         self.assertTrue(res["path"].endswith(".mp4"))
         self.assertIn(url, seen)
+        self.assertIsNone(
+            _video_jobs.lookup("vpsq1", "seedance-2-0-text-to-video")
+        )
 
     def test_video_completed_without_download_url_is_error(self):
         responses = _seq(FakeResp(200, json.dumps({"status": "COMPLETED"}).encode()))

@@ -13,14 +13,15 @@ A free `/models?type=video` catalog GET (via the lean client) validates
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 
 from .. import billing, config, userconfig
 from ..client import VeniceAPIError
-from . import _models, _queue, _shared
+from . import _models, _queue, _shared, _video_jobs
 
 VIDEO_EXT_BY_CTYPE = {
     "video/mp4": ".mp4",
@@ -181,8 +182,8 @@ def register_status(subparsers) -> None:
         help="Fetch a previously-backgrounded video job by queue_id.",
         description=(
             "Polls /video/retrieve for an already-queued job (typically from "
-            "`venice video ... --background`) and downloads the mp4 when ready. "
-            "For VPS-backed models, pass the --download-url printed at queue time."
+            "`venice video ... --background`) and downloads the media when ready. "
+            "Current jobs resolve private download metadata from the local registry."
         ),
     )
     sp.add_argument("queue_id")
@@ -195,7 +196,7 @@ def register_status(subparsers) -> None:
         "--download-url",
         default=None,
         dest="download_url",
-        help="Presigned URL from the original queue (VPS-backed models only).",
+        help="Deprecated: presigned URL for a job queued before v0.83.10.",
     )
     sp.add_argument("--output", "-o", type=Path, default=None)
     _shared.add_cleanup_flag(sp, section="video", endpoint="/video/complete")
@@ -463,11 +464,19 @@ def _run_generate(args) -> int:
     download_url = queued.get("download_url") or None
 
     if args.background:
+        if download_url:
+            try:
+                _video_jobs.remember(queue_id, model, download_url)
+            except _video_jobs.VideoJobStoreError as e:
+                print(
+                    f"video: queued as {queue_id}, but could not save private "
+                    f"retrieval metadata: {e}",
+                    file=sys.stderr,
+                )
+                return 9
         sys.stdout.write(queue_id + "\n")
         sys.stdout.flush()
         msg = f"queued as {queue_id}; fetch with: venice video-status {queue_id} --model {model}"
-        if download_url:
-            msg += f" --download-url {download_url}"
         print(msg, file=sys.stderr)
         return 0
 
@@ -506,8 +515,15 @@ def _run_status(args) -> int:
         )
         if rc is not None:
             return rc
+    download_url = args.download_url
+    if not download_url:
+        try:
+            download_url = _video_jobs.lookup(args.queue_id, model)
+        except _video_jobs.VideoJobStoreError as e:
+            print(f"video-status: cannot read private retrieval metadata: {e}", file=sys.stderr)
+            return 9
     return _retrieve_and_save(
-        client, model, args.queue_id, args.download_url,
+        client, model, args.queue_id, download_url,
         args.output, args.poll_interval, args.max_wait, bool(args.no_cleanup),
     )
 
@@ -519,12 +535,12 @@ class NoVideoStream(Exception):
 
 def retrieve_bytes(
     client, model, queue_id, *,
-    poll_interval, max_wait, download_url=None, on_tick=None,
-) -> Tuple[str, bytes]:
-    """Poll /video/retrieve until the video is ready and return (ctype, bytes).
+    poll_interval, max_wait, download_url=None, on_tick=None, download_dir=None,
+) -> Tuple[str, Union[bytes, Path], int]:
+    """Poll until ready and return ``(ctype, bytes-or-temp-path, byte_count)``.
 
     Print-free core of `_retrieve_and_save`: the bare poll plus the VPS-model
-    download-url fallback, with no stderr, file I/O, or cleanup -- so callers
+    download-url fallback, with no stderr or cleanup -- so callers
     that own stdout (e.g. the MCP stdio server) can reuse it without corrupting
     their transport. Non-VPS models stream the mp4 straight from /video/retrieve;
     VPS-backed models report COMPLETED (JSON) and the mp4 is fetched from the
@@ -542,11 +558,14 @@ def retrieve_bytes(
         terminal_statuses=("COMPLETED",),
     )
     if isinstance(payload, (bytes, bytearray)):
-        return ctype, bytes(payload)
+        data = bytes(payload)
+        return ctype, data, len(data)
     # VPS-backed model: retrieve reported COMPLETED (JSON) -- fetch the mp4.
     if not download_url:
         raise NoVideoStream(queue_id)
-    return client.get_url_bytes(download_url)
+    if download_dir is None:
+        raise ValueError("download_dir is required for a VPS video download")
+    return client.download_url_to_temp(download_url, Path(download_dir))
 
 
 def _retrieve_and_save(
@@ -554,12 +573,19 @@ def _retrieve_and_save(
     poll_interval, max_wait, no_cleanup,
 ) -> int:
     start = time.monotonic()
+    staging_hint = _queue.resolve_output_path(
+        out_arg, queue_id, ".mp4", prefix="venice-video"
+    )
+    staged_path: Optional[Path] = None
     try:
-        ctype, data = retrieve_bytes(
+        ctype, payload, byte_count = retrieve_bytes(
             client, model, queue_id,
             poll_interval=poll_interval, max_wait=max_wait,
             download_url=download_url, on_tick=_queue.progress_tick(start),
+            download_dir=staging_hint.parent,
         )
+        if isinstance(payload, Path):
+            staged_path = payload
     except VeniceAPIError as e:
         sys.stderr.write("\n")
         print(f"retrieve failed: {e}", file=sys.stderr)
@@ -575,9 +601,9 @@ def _retrieve_and_save(
         sys.stderr.write("\n")
         print(
             "video: job completed but returned no video stream and no "
-            "download_url is known; re-run `venice video-status "
-            f"{queue_id} --model {model} --download-url <url>` with the URL "
-            "printed when the job was queued.",
+            "private download metadata is known; for a pre-v0.83.10 job, re-run "
+            f"`venice video-status {queue_id} --model {model} "
+            "--download-url <url>`.",
             file=sys.stderr,
         )
         return 2
@@ -589,14 +615,29 @@ def _retrieve_and_save(
     out_path = _queue.resolve_output_path(out_arg, queue_id, ext, prefix="venice-video")
 
     try:
-        out_path.write_bytes(data)
+        if staged_path is not None:
+            os.replace(staged_path, out_path)
+            staged_path = None
+        else:
+            out_path.write_bytes(payload)
     except OSError as e:
         print(f"could not write {out_path}: {e}", file=sys.stderr)
         return 9
+    finally:
+        if staged_path is not None:
+            try:
+                staged_path.unlink()
+            except OSError:
+                pass
 
     abs_path = out_path.resolve()
     print(str(abs_path))
-    print(f"wrote {len(data)} bytes to {abs_path}", file=sys.stderr)
+    print(f"wrote {byte_count} bytes to {abs_path}", file=sys.stderr)
+
+    try:
+        _video_jobs.forget(queue_id, model)
+    except _video_jobs.VideoJobStoreError as e:
+        print(f"warning: could not clear private video job metadata: {e}", file=sys.stderr)
 
     if not no_cleanup:
         try:
