@@ -29,10 +29,11 @@ Safety model:
   child env. A shell command can still read/write **outside** the root (``cat ../x``);
   exec's boundary is the confirm gate + cwd + timeout + env-scrub + the optional
   allow/deny **shell policy**, **not** path containment -- which is why it is always
-  gated. ``git`` exposes only read-only subcommands freely; mutations go through the
-  (gated) ``run`` tool. The exec rails (``run_cmd``/``git_cmd``/``_scrubbed_env``/the
-  policy) live in :mod:`commands._exec` so `venice chat --shell` (#33) shares the
-  exact same gate.
+  gated. ``git`` exposes only argument-validated read forms freely, confines literal
+  pathspecs to the active root, and neutralizes Git-selected helpers/config; mutations
+  and arbitrary Git options go through the (gated) ``run`` tool. The exec rails
+  (``run_cmd``/``git_cmd``/``_scrubbed_env``/the policy) live in
+  :mod:`commands._exec` so `venice chat --shell` (#33) shares the exact same gate.
 """
 from __future__ import annotations
 
@@ -208,6 +209,22 @@ def _safe_path(roots: "Roots", arg, *, must_exist: bool = False, write: bool = F
     if must_exist and not os.path.exists(real):
         raise _PathError(f"no such file or directory: {arg}")
     return real, rel
+
+
+def _safe_git_path(roots: "Roots", arg) -> str:
+    """Resolve a literal Git pathspec inside the active repository root.
+
+    File tools may read any attached root, but one Git invocation is bound to the
+    active root's repository. Rewriting an approved path to an active-root-relative
+    POSIX path prevents absolute operands and attached-root ``..`` escapes from
+    crossing that boundary.
+    """
+    real, _rel = _safe_path(roots, arg, must_exist=True, write=False)
+    if not _index.resolves_inside(Path(real), Path(roots.base)):
+        raise _PathError(f"Git path escapes the active project root: {arg}")
+    if not os.path.isfile(real):
+        raise _PathError(f"Git path must name a regular file: {arg}")
+    return Path(os.path.relpath(real, roots.base)).as_posix()
 
 
 def _stage_write(target: str, text: str) -> str:
@@ -845,7 +862,14 @@ def code_tools(
                        allow=shell_allow, deny=shell_deny, **_clean(arguments))
 
     def git_invoke(arguments, *, confirm: bool = False):
-        return git_cmd(roots.base, exec_timeout=exec_timeout, **_clean(arguments))
+        clean = _clean(arguments)
+        return git_cmd(
+            roots.base,
+            clean.get("subcommand"),
+            args=clean.get("args"),
+            path_guard=lambda path: _safe_git_path(roots, path),
+            exec_timeout=exec_timeout,
+        )
 
     tools = [
         _agent.Tool("read_file",
@@ -890,8 +914,9 @@ def code_tools(
                     _RUN_SCHEMA, run_invoke, paid=True,
                     category="exec", tags=("exec", "mutate")),
         _agent.Tool("git",
-                    "Run a read-only git subcommand (status/diff/log/show/...) in "
-                    "the project root. For commits/adds use the run tool.",
+                    "Run a validated read-only Git operation in the project root. "
+                    "Put literal paths after --; mutations and arbitrary Git "
+                    "options are refused. For commits/adds use the run tool.",
                     _GIT_SCHEMA, git_invoke, paid=False,
                     category="vcs", tags=("read",)),
         _agent.Tool("attach_root",
@@ -996,7 +1021,14 @@ def read_only_tools(root: str, client=None, *, include_search: bool = False
         return invoke
 
     def git_invoke(arguments, *, confirm: bool = False):
-        return git_cmd(roots.base, exec_timeout=DEFAULT_EXEC_TIMEOUT, **_clean(arguments))
+        clean = _clean(arguments)
+        return git_cmd(
+            roots.base,
+            clean.get("subcommand"),
+            args=clean.get("args"),
+            path_guard=lambda path: _safe_git_path(roots, path),
+            exec_timeout=DEFAULT_EXEC_TIMEOUT,
+        )
 
     tools = [
         _agent.Tool("read_file",
@@ -1015,8 +1047,8 @@ def read_only_tools(root: str, client=None, *, include_search: bool = False
                     _GREP_SCHEMA, free(grep_files), paid=False,
                     category="fs", tags=("read", "search")),
         _agent.Tool("git",
-                    "Run a read-only git subcommand (status/diff/log/show/...) in "
-                    "the project root.",
+                    "Run a validated read-only Git operation in the project root. "
+                    "Put literal paths after --; arbitrary options are refused.",
                     _GIT_SCHEMA, git_invoke, paid=False,
                     category="vcs", tags=("read",)),
     ]

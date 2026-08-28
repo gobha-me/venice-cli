@@ -22,14 +22,21 @@ Policy (issue #33 decision -- "simple-command + globs"):
 The exec boundary is the confirm gate + cwd + timeout + env-scrub + this policy,
 **not** path containment: a shell command can still read/write outside the root,
 which is why it is always gated (and why an operator scopes it with allow/deny).
+
+The free Git boundary is different: :func:`git_cmd` accepts only exact read forms,
+requires its caller to resolve every literal path through project authority, and
+neutralizes Git environment/config features that can write or execute helpers.
+Package-authored review plumbing uses the private :func:`_git_cmd_internal`; its
+controlled ``diff --no-index`` form is never reachable from the model schema.
 """
 from __future__ import annotations
 
 import fnmatch
 import os
+import re
 import shlex
 import subprocess
-from typing import Optional
+from typing import Callable, List, Optional, Tuple
 
 # --------------------------------------------------------------------------- #
 # Limits + constants
@@ -87,10 +94,15 @@ _RUN_SCHEMA = _obj(
 )
 _GIT_SCHEMA = _obj(
     {
-        "subcommand": _p("string", "Read-only git subcommand (status/diff/log/show/...)."),
+        "subcommand": _p(
+            "string",
+            "Read-only Git operation. Arguments are validated per operation; "
+            "mutations require the confirmed run tool.",
+        ),
         "args": {"type": "array", "items": {"type": "string"},
-                 "description": "Extra arguments for the subcommand -- do NOT "
-                                "repeat the subcommand itself here."},
+                 "description": "Validated flags/revisions for the operation. "
+                                "Put literal project paths after -- and do NOT "
+                                "repeat the subcommand itself."},
     },
     ["subcommand"],
 )
@@ -101,6 +113,19 @@ _GIT_SCHEMA = _obj(
 # --------------------------------------------------------------------------- #
 def _scrubbed_env() -> dict:
     return {k: v for k, v in os.environ.items() if k not in _SECRET_ENV}
+
+
+def _git_env() -> dict:
+    """Return an exec environment that cannot redirect Git to helpers/config."""
+    env = {k: v for k, v in _scrubbed_env().items() if not k.startswith("GIT_")}
+    env.update({
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_PAGER": "cat",
+        "GIT_OPTIONAL_LOCKS": "0",
+    })
+    return env
 
 
 def _split(command: str):
@@ -188,40 +213,297 @@ def run_cmd(root: str, command, *, timeout=None, exec_timeout: int = DEFAULT_EXE
 
 _GIT_READONLY = frozenset({
     "status", "diff", "log", "show", "branch", "ls-files", "blame", "remote",
-    "rev-parse", "describe", "shortlog",
-    # `merge-base` computes the fork point of two refs and writes nothing (#80
-    # part 1a: `venice review` pins its diff range to merge-base(base, HEAD)).
-    "merge-base",
+    "rev-parse", "describe", "shortlog", "merge-base",
+})
+
+# Revisions deliberately exclude Git's ``REV:path`` object syntax and option-like
+# forms. Common refs, hashes, ancestry suffixes, and one range remain available.
+_REV_ATOM = r"(?:HEAD|[A-Za-z0-9][A-Za-z0-9._/@{}^~+/-]*)"
+_REV_RE = re.compile(rf"{_REV_ATOM}(?:(?:\.\.|\.\.\.){_REV_ATOM})?\Z")
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+_CONTEXT_RE = re.compile(
+    r"(?:-U\d{1,3}|--unified=\d{1,3}|--inter-hunk-context=\d{1,3})\Z"
+)
+_MAX_COUNT_RE = re.compile(r"--max-count=(\d+)\Z")
+
+_STATUS_FLAGS = frozenset({
+    "-s", "--short", "-b", "--branch", "--show-stash", "--porcelain",
+    "--porcelain=v1", "--porcelain=v2", "--long", "--ahead-behind",
+    "--no-ahead-behind", "--renames", "--no-renames", "--ignored",
+    "--ignored=traditional", "--ignored=matching", "--ignored=no",
+    "--untracked-files", "--untracked-files=all", "--untracked-files=normal",
+    "--untracked-files=no", "-uno", "-unormal", "-uall", "-z", "--null",
+})
+_DIFF_FLAGS = frozenset({
+    "--cached", "--staged", "--merge-base", "--stat", "--numstat",
+    "--shortstat", "--name-only", "--name-status", "--check", "--summary",
+    "--patch", "-p", "--no-patch", "-s", "--raw", "--no-color",
+    "--color=never", "--minimal", "--patience", "--histogram", "-w",
+    "--ignore-all-space", "-b", "--ignore-space-change", "--ignore-space-at-eol",
+    "--ignore-blank-lines", "-W", "--function-context", "--word-diff",
+    "--word-diff=plain", "--word-diff=color", "--word-diff=porcelain",
+    "--no-renames",
+})
+_LOG_FLAGS = frozenset({
+    "--oneline", "--decorate", "--decorate=short", "--decorate=full",
+    "--no-decorate", "--graph", "--all", "--branches", "--remotes", "--tags",
+    "--first-parent", "--merges", "--no-merges", "--reverse", "--topo-order",
+    "--date-order", "--author-date-order", "--no-color", "--color=never",
+})
+_SHOW_FLAGS = frozenset({
+    "--oneline", "--stat", "--numstat", "--shortstat", "--name-only",
+    "--name-status", "--summary", "--patch", "-p", "--no-patch", "-s",
+    "--raw", "--no-color", "--color=never", "-w", "--ignore-all-space",
+    "-b", "--ignore-space-change", "-W", "--function-context", "--no-renames",
+})
+_LS_FILES_FLAGS = frozenset({
+    "--cached", "-c", "--deleted", "-d", "--modified", "-m", "--others", "-o",
+    "--ignored", "-i", "--stage", "-s", "--unmerged", "-u", "--killed", "-k",
+    "--directory", "--no-empty-directory", "--exclude-standard", "-z",
+    "--deduplicate", "--sparse",
+})
+_BLAME_FLAGS = frozenset({
+    "--line-porcelain", "--porcelain", "-w", "--show-stats", "--root",
+    "--first-parent", "--show-name", "--show-number", "--score-debug",
+})
+_SHORTLOG_FLAGS = frozenset({"-n", "--numbered", "-s", "--summary", "-e", "--email"})
+_DESCRIBE_FLAGS = frozenset({
+    "--always", "--tags", "--all", "--long", "--exact-match", "--dirty",
+    "--contains", "--first-parent",
+})
+_REV_PARSE_FLAGS = frozenset({
+    "--verify", "--quiet", "-q", "--abbrev-ref", "--symbolic-full-name",
+    "--short", "--show-toplevel", "--show-prefix", "--show-cdup",
+    "--is-inside-work-tree", "--is-bare-repository", "--is-shallow-repository",
+})
+_MERGE_BASE_FLAGS = frozenset({
+    "--all", "--octopus", "--independent", "--is-ancestor", "--fork-point",
 })
 
 
-def git_cmd(root: str, subcommand, *, args=None,
-            exec_timeout: int = DEFAULT_EXEC_TIMEOUT) -> dict:
-    sub = str(subcommand or "").strip()
-    if sub not in _GIT_READONLY:
-        return _err(
-            "git: only read-only subcommands are allowed here "
-            f"({', '.join(sorted(_GIT_READONLY))}); use the run tool "
-            "(which confirms) for mutations like add/commit"
+class _GitPolicyError(ValueError):
+    pass
+
+
+def _safe_revision(value: str) -> bool:
+    if value.startswith("-") or ":" in value or "\\" in value:
+        return False
+    return bool(_REV_RE.fullmatch(value))
+
+
+def _split_paths(args: List[str]) -> Tuple[List[str], List[str]]:
+    if args.count("--") > 1:
+        raise _GitPolicyError("git: '--' may appear only once")
+    if "--" not in args:
+        return args, []
+    at = args.index("--")
+    paths = args[at + 1:]
+    if not paths:
+        raise _GitPolicyError("git: '--' must be followed by a project path")
+    return args[:at], paths
+
+
+def _bounded_max_count(token: str) -> bool:
+    match = _MAX_COUNT_RE.fullmatch(token)
+    return bool(match and 1 <= int(match.group(1)) <= 200)
+
+
+def _option_with_value(token: str, prefixes) -> bool:
+    return any(token.startswith(prefix) and len(token) > len(prefix) for prefix in prefixes)
+
+
+def _validate_simple(before: List[str], flags, *, max_revs: int,
+                     value_prefixes=()) -> None:
+    revs = 0
+    i = 0
+    while i < len(before):
+        token = before[i]
+        if token in flags or _CONTEXT_RE.fullmatch(token):
+            i += 1
+            continue
+        if _bounded_max_count(token):
+            i += 1
+            continue
+        if token in ("-n", "--max-count"):
+            if i + 1 >= len(before) or not before[i + 1].isdigit() \
+                    or not 1 <= int(before[i + 1]) <= 200:
+                raise _GitPolicyError("git: max-count must be an integer from 1 to 200")
+            i += 2
+            continue
+        if _option_with_value(token, value_prefixes):
+            i += 1
+            continue
+        if _safe_revision(token) and revs < max_revs:
+            revs += 1
+            i += 1
+            continue
+        raise _GitPolicyError(f"git: argument is not allowed for this read form: {token!r}")
+
+
+def _validate_branch(before: List[str]) -> None:
+    if not before:
+        return
+    listing = "--list" in before
+    no_value = {
+        "--list", "-a", "--all", "-r", "--remotes", "-v", "-vv", "--verbose",
+        "--no-color", "--color=never", "--show-current", "--column", "--no-column",
+    }
+    value_prefixes = (
+        "--contains=", "--no-contains=", "--merged=", "--no-merged=",
+        "--points-at=", "--sort=", "--column=",
+    )
+    for token in before:
+        if token in no_value:
+            continue
+        if _option_with_value(token, value_prefixes):
+            value = token.split("=", 1)[1]
+            if token.startswith((
+                    "--contains=", "--no-contains=", "--merged=",
+                    "--no-merged=", "--points-at=",
+            )) and not _safe_revision(value):
+                raise _GitPolicyError(f"git: unsafe branch revision: {value!r}")
+            continue
+        if listing and not token.startswith("-") and not _CONTROL_RE.search(token):
+            continue
+        raise _GitPolicyError(f"git: branch permits listing forms only: {token!r}")
+
+
+def _validate_args(sub: str, args: List[str],
+                   path_guard: Callable[[str], str]) -> List[str]:
+    before, paths = _split_paths(args)
+    if any(_CONTROL_RE.search(token) for token in args):
+        raise _GitPolicyError("git: control characters are not allowed in arguments")
+
+    if sub == "status":
+        if any(token not in _STATUS_FLAGS for token in before):
+            raise _GitPolicyError("git: status accepts display flags and '--' paths only")
+    elif sub == "diff":
+        _validate_simple(
+            before, _DIFF_FLAGS, max_revs=2,
+            value_prefixes=("--word-diff-regex=",),
         )
-    argv = ["git", sub]
-    if args:
-        if not isinstance(args, list):
-            return _err("args must be a list of strings")
-        if args and str(args[0]).strip() == sub:
-            return _err(
-                f"git: don't repeat the subcommand in 'args'; pass only the "
-                f"flags/arguments that follow {sub!r} (got args starting with "
-                f"{sub!r}, which would run 'git {sub} {sub} ...')"
+    elif sub == "log":
+        _validate_simple(
+            before, _LOG_FLAGS, max_revs=1,
+            value_prefixes=(
+                "--date=", "--author=", "--grep=", "--since=", "--until=",
+                "--after=", "--before=",
+            ),
+        )
+    elif sub == "show":
+        _validate_simple(before, _SHOW_FLAGS, max_revs=1)
+    elif sub == "ls-files":
+        if any(token not in _LS_FILES_FLAGS for token in before):
+            raise _GitPolicyError("git: ls-files option is not in the read allowlist")
+    elif sub == "blame":
+        i = 0
+        revs = 0
+        while i < len(before):
+            token = before[i]
+            if token in _BLAME_FLAGS:
+                i += 1
+            elif token == "-L" and i + 1 < len(before) \
+                    and re.fullmatch(r"\d+(?:,\d+)?", before[i + 1]):
+                i += 2
+            elif token.startswith("-L") and re.fullmatch(r"-L\d+(?:,\d+)?", token):
+                i += 1
+            elif _safe_revision(token) and revs == 0:
+                revs += 1
+                i += 1
+            else:
+                raise _GitPolicyError(f"git: blame argument is not allowed: {token!r}")
+        if len(paths) != 1:
+            raise _GitPolicyError("git: blame requires exactly one project path after '--'")
+    elif sub == "branch":
+        if paths:
+            raise _GitPolicyError("git: branch does not accept path operands")
+        _validate_branch(before)
+    elif sub == "remote":
+        if before or paths:
+            raise _GitPolicyError("git: remote permits names-only listing with no arguments")
+    elif sub == "rev-parse":
+        has_revision = False
+        for token in before:
+            if token in _REV_PARSE_FLAGS or re.fullmatch(r"--short=\d{1,2}", token):
+                continue
+            if _safe_revision(token):
+                has_revision = True
+                continue
+            raise _GitPolicyError(f"git: rev-parse argument is not allowed: {token!r}")
+        if has_revision and "--verify" not in before:
+            raise _GitPolicyError("git: rev-parse revisions require --verify")
+        if paths:
+            raise _GitPolicyError("git: rev-parse does not accept path operands")
+    elif sub == "describe":
+        for token in before:
+            if token in _DESCRIBE_FLAGS or re.fullmatch(r"--abbrev=\d{1,2}", token) \
+                    or _option_with_value(token, ("--match=", "--exclude=", "--candidates=")):
+                continue
+            if _safe_revision(token):
+                continue
+            raise _GitPolicyError(f"git: describe argument is not allowed: {token!r}")
+        if paths:
+            raise _GitPolicyError("git: describe does not accept path operands")
+    elif sub == "shortlog":
+        _validate_simple(before, _SHORTLOG_FLAGS, max_revs=2)
+        if paths:
+            raise _GitPolicyError("git: shortlog does not accept path operands")
+    elif sub == "merge-base":
+        for token in before:
+            if token in _MERGE_BASE_FLAGS or _safe_revision(token):
+                continue
+            raise _GitPolicyError(f"git: merge-base argument is not allowed: {token!r}")
+        if paths:
+            raise _GitPolicyError("git: merge-base does not accept path operands")
+    else:
+        raise _GitPolicyError(f"git: unsupported read operation: {sub!r}")
+
+    guarded = []
+    for path in paths:
+        if path.startswith(":") or any(ch in path for ch in "*?["):
+            raise _GitPolicyError(f"git: pathspec magic/globs are not allowed: {path!r}")
+        try:
+            guarded.append(path_guard(path))
+        except Exception as exc:
+            raise _GitPolicyError(str(exc)) from exc
+    if sub == "diff" and not guarded:
+        metadata = {
+            "--stat", "--numstat", "--shortstat", "--name-only",
+            "--name-status", "--raw", "--summary",
+        }
+        if not any(token in metadata for token in before):
+            raise _GitPolicyError(
+                "git: content diffs require one or more approved paths after '--'"
             )
-        for a in args:
-            if not isinstance(a, (str, int, float)):
-                return _err("each arg must be a string")
-            argv.append(str(a))
+    if sub == "show" and not guarded and not ({"--no-patch", "-s"} & set(before)):
+        raise _GitPolicyError(
+            "git: show without an approved path requires --no-patch"
+        )
+    if guarded:
+        return before + ["--"] + guarded
+    # Disambiguate revision-looking values from implicit filesystem operands.
+    if sub in ("diff", "log", "show"):
+        return before + ["--"]
+    return before
+
+
+def _run_git(root: str, sub: str, args: List[str], *, exec_timeout: int) -> dict:
+    """Execute code-authored Git argv with helper execution neutralized."""
+    argv = [
+        "git", "--no-pager",
+        "-c", "core.fsmonitor=false",
+        "-c", f"core.hooksPath={os.devnull}",
+        "-c", "diff.external=",
+        "-c", "interactive.diffFilter=",
+        sub,
+    ]
+    if sub in ("diff", "log", "show"):
+        argv.extend(("--no-ext-diff", "--no-textconv"))
+    argv.extend(args)
     try:
         proc = subprocess.run(
             argv, cwd=root, capture_output=True, text=True,
-            timeout=int(exec_timeout), env=_scrubbed_env(),
+            timeout=int(exec_timeout), env=_git_env(),
         )
     except FileNotFoundError:
         return _err("git is not installed")
@@ -236,3 +518,46 @@ def git_cmd(root: str, subcommand, *, args=None,
         stderr=errout[:MAX_OUTPUT_CHARS],
         truncated=(len(out) > MAX_OUTPUT_CHARS),
     )
+
+
+def _git_cmd_internal(root: str, subcommand: str, args, *,
+                      exec_timeout: int = DEFAULT_EXEC_TIMEOUT) -> dict:
+    """Run package-authored read-only Git argv outside the model tool schema."""
+    if subcommand not in _GIT_READONLY:
+        return _err(f"git: internal read operation is not supported: {subcommand!r}")
+    if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+        return _err("git: internal args must be a list of strings")
+    return _run_git(os.path.realpath(root), subcommand, args,
+                    exec_timeout=exec_timeout)
+
+
+def git_cmd(root: str, subcommand, *, args=None,
+            path_guard: Optional[Callable[[str], str]] = None,
+            exec_timeout: int = DEFAULT_EXEC_TIMEOUT) -> dict:
+    """Run one strictly validated, argument-aware, read-only Git operation."""
+    sub = str(subcommand or "").strip()
+    if sub not in _GIT_READONLY:
+        return _err(
+            "git: only validated read-only operations are allowed here "
+            f"({', '.join(sorted(_GIT_READONLY))}); use the run tool "
+            "(which confirms) for mutations like add/commit"
+        )
+    if args is None:
+        args = []
+    if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+        return _err("args must be a list of strings")
+    if args and args[0].strip() == sub:
+        return _err(
+            f"git: don't repeat the subcommand in 'args'; pass only the "
+            f"flags/arguments that follow {sub!r} (got args starting with "
+            f"{sub!r}, which would run 'git {sub} {sub} ...')"
+        )
+    if path_guard is None:
+        def path_guard(_path: str) -> str:
+            raise _GitPolicyError("git: path authority is unavailable")
+    try:
+        safe_args = _validate_args(sub, args, path_guard)
+    except (OSError, ValueError) as exc:
+        return _err(str(exc))
+    return _run_git(os.path.realpath(root), sub, safe_args,
+                    exec_timeout=exec_timeout)

@@ -1387,7 +1387,7 @@ jq '.usage.billed_total' ~/.config/venice/sessions/<id>.json
 | Tool | Does | Confirms? |
 | --- | --- | --- |
 | `read_file` / `list_dir` / `grep` | read a file, list a dir, regex-search the tree | no |
-| `git` | read-only git (`status`/`diff`/`log`/`show`/…) | no |
+| `git` | validated read-only Git (`status`/`diff`/`log`/`show`/…); literal paths go after `--` | no |
 | `project_search` | semantic search over the `.venice` index (if built) — a **snapshot** of the last build; use `grep` for live matches | no |
 | `reindex` | rebuild the `.venice` index so `project_search` reflects this session's edits (re-embeds only changed files); present only when an index exists | yes (paid) |
 | `venice_vision` | describe/inspect a local image or image URL via a vision-capable model | no |
@@ -1422,6 +1422,15 @@ forced cwd, timeout, and env-scrub — which is why it always confirms. git muta
 [`shell` allow/deny policy](#shell-exec-tool---shell) (config `shell.*` or
 `--shell-allow`/`--shell-deny`) — a denied command is refused; an empty policy leaves
 it unrestricted (unchanged behavior).
+
+The free `git` tool validates arguments per operation rather than trusting a
+subcommand name. `branch` and `remote` are listing-only; content diffs require
+literal, root-confined paths after `--`; pathspec magic, `REV:path`, `--no-index`,
+output files, external diff/text conversion, and config injection are refused before
+Git starts. Path operands must resolve to existing regular files, so a directory cannot
+smuggle protected descendants into a broad diff. Git also runs without inherited
+`GIT_*` controls, optional locks, system/global config, hooks, fsmonitor, pagers, or
+external diff helpers. Use the confirmed `run` tool for other Git forms.
 
 | flag | effect |
 | --- | --- |

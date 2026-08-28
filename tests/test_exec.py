@@ -110,6 +110,10 @@ class TestGitCmd(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp()
 
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.root, ignore_errors=True)
+
     def test_duplicate_subcommand_in_args_rejected_before_exec(self):
         # #69: passing the subcommand inside args (mirroring a CLI invocation)
         # would run `git remote remote -v`; reject it with a tool error and never
@@ -120,14 +124,18 @@ class TestGitCmd(unittest.TestCase):
         self.assertIn("don't repeat the subcommand", r["message"])
         run.assert_not_called()
 
-    def test_normal_args_are_unchanged(self):
-        # Regression guard: args that do NOT repeat the subcommand still build the
-        # expected argv and run.
+    def test_validated_args_reach_hardened_git(self):
         with mock.patch("venice.commands._exec.subprocess.run") as run:
-            run.return_value = mock.Mock(returncode=0, stdout="origin\n", stderr="")
-            r = _exec.git_cmd(self.root, "remote", args=["-v"])
+            run.return_value = mock.Mock(returncode=0, stdout=" M source.py\n", stderr="")
+            r = _exec.git_cmd(
+                self.root, "status", args=["--short", "--", "source.py"],
+                path_guard=lambda path: f"safe/{path}",
+            )
         self.assertEqual(r["status"], "ok")
-        self.assertEqual(run.call_args[0][0], ["git", "remote", "-v"])
+        argv = run.call_args[0][0]
+        self.assertEqual(argv[0:2], ["git", "--no-pager"])
+        self.assertIn("core.fsmonitor=false", argv)
+        self.assertEqual(argv[-4:], ["status", "--short", "--", "safe/source.py"])
 
     def test_merge_base_is_allowed(self):
         # #80 part 1a: `venice review` pins its diff range to merge-base(base, HEAD),
@@ -137,8 +145,8 @@ class TestGitCmd(unittest.TestCase):
             run.return_value = mock.Mock(returncode=0, stdout="abc123\n", stderr="")
             r = _exec.git_cmd(self.root, "merge-base", args=["origin/master", "HEAD"])
         self.assertEqual(r["status"], "ok")
-        self.assertEqual(run.call_args[0][0],
-                         ["git", "merge-base", "origin/master", "HEAD"])
+        self.assertEqual(run.call_args[0][0][-3:],
+                         ["merge-base", "origin/master", "HEAD"])
 
     def test_mutating_subcommands_still_refused(self):
         # Anti-vacuity for the row above: widening the allow-list must not have
@@ -148,8 +156,62 @@ class TestGitCmd(unittest.TestCase):
                 with mock.patch("venice.commands._exec.subprocess.run") as run:
                     r = _exec.git_cmd(self.root, sub)
                 self.assertEqual(r["status"], "error")
-                self.assertIn("only read-only subcommands", r["message"])
+                self.assertIn("read-only operations", r["message"])
                 run.assert_not_called()
+
+    def test_argument_level_mutations_and_escape_options_are_refused(self):
+        cases = (
+            ("remote", ["add", "audit", "https://example.invalid/repo"]),
+            ("branch", ["-D", "work"]),
+            ("branch", ["-f", "work", "HEAD"]),
+            ("diff", ["--no-index", "--", "one", "two"]),
+            ("diff", ["--output=leak.txt"]),
+            ("diff", ["--ext-diff"]),
+            ("diff", ["--textconv"]),
+            ("blame", ["--contents", "outside", "--", "inside"]),
+            ("rev-parse", ["--git-path", "config"]),
+            ("rev-parse", ["README.md"]),
+            ("show", ["HEAD:credentials"]),
+            ("show", ["HEAD"]),
+            ("diff", ["HEAD"]),
+        )
+        for sub, args in cases:
+            with self.subTest(sub=sub, args=args):
+                with mock.patch("venice.commands._exec.subprocess.run") as run:
+                    result = _exec.git_cmd(
+                        self.root, sub, args=list(args), path_guard=lambda path: path
+                    )
+                self.assertEqual(result["status"], "error")
+                run.assert_not_called()
+
+    def test_paths_require_authority_and_reject_magic(self):
+        for args in (["--", "file.txt"], ["--", ":(top)file"], ["--", "*.py"]):
+            with self.subTest(args=args):
+                with mock.patch("venice.commands._exec.subprocess.run") as run:
+                    result = _exec.git_cmd(self.root, "diff", args=args)
+                self.assertEqual(result["status"], "error")
+                run.assert_not_called()
+
+    def test_git_environment_discards_all_inherited_git_controls(self):
+        os.environ["GIT_DIR"] = "/outside"
+        os.environ["GIT_EXTERNAL_DIFF"] = "/outside/helper"
+        os.environ["VENICE_API_KEY"] = "test-fake-key"
+        try:
+            with mock.patch("venice.commands._exec.subprocess.run") as run:
+                run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+                result = _exec.git_cmd(self.root, "status")
+        finally:
+            os.environ.pop("GIT_DIR", None)
+            os.environ.pop("GIT_EXTERNAL_DIFF", None)
+            os.environ.pop("VENICE_API_KEY", None)
+        self.assertEqual(result["status"], "ok")
+        env = run.call_args.kwargs["env"]
+        self.assertNotIn("GIT_DIR", env)
+        self.assertNotIn("GIT_EXTERNAL_DIFF", env)
+        self.assertNotIn("VENICE_API_KEY", env)
+        self.assertEqual(env["GIT_CONFIG_NOSYSTEM"], "1")
+        self.assertEqual(env["GIT_CONFIG_GLOBAL"], os.devnull)
+        self.assertEqual(env["GIT_OPTIONAL_LOCKS"], "0")
 
 
 if __name__ == "__main__":
