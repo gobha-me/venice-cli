@@ -2,8 +2,9 @@ name: publish
 
 # Publishes venice-cli to PyPI via Trusted Publishing (OIDC) -- no API token is
 # stored anywhere. Deliberately NOT triggered by a bare tag push: a PyPI version
-# is immutable once uploaded, so the trigger is a published GitHub Release (a
-# deliberate human action) or an explicit manual dispatch.
+# is immutable once uploaded, so production requires a published GitHub Release
+# whose exact tag SHA has already passed the complete master test workflow.
+# Manual dispatch is TestPyPI-only.
 #
 # Requires, one time, outside this repo:
 #   - a pending publisher on pypi.org and test.pypi.org for project venice-cli
@@ -15,12 +16,6 @@ on:
   release:
     types: [published]
   workflow_dispatch:
-    inputs:
-      target:
-        description: "Publish target"
-        type: choice
-        options: [testpypi, pypi]
-        default: testpypi
 
 permissions:
   contents: read
@@ -28,8 +23,26 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
     steps:
       - uses: actions/checkout@v5
+        with:
+          # Pin the event's commit. For a release this is the commit recorded
+          # for its tag; for TestPyPI it is the ref selected in the Actions UI.
+          ref: ${{ github.sha }}
+
+      - name: Require successful exact-SHA CI
+        if: github.event_name == 'release'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          PYTHONPATH=src python scripts/verify_release.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$RELEASE_TAG" \
+            --sha "$(git rev-parse HEAD)"
 
       - uses: actions/setup-python@v6
         with:
@@ -41,19 +54,6 @@ jobs:
           python -m build
           twine check --strict dist/*
 
-      # The version is single-sourced in src/venice/__init__.py, so nothing else
-      # stops a release being tagged v0.14.0 on a tree that still says 0.13.1.
-      - name: Verify tag matches __version__
-        if: github.event_name == 'release'
-        run: |
-          VERSION=$(python -c "import re, pathlib; print(re.search(r'\"([^\"]+)\"', pathlib.Path('src/venice/__init__.py').read_text()).group(1))")
-          TAG="${GITHUB_REF_NAME#v}"
-          if [ "$VERSION" != "$TAG" ]; then
-            echo "::error::tag $GITHUB_REF_NAME does not match __version__ $VERSION"
-            exit 1
-          fi
-          echo "ok: tag $GITHUB_REF_NAME matches __version__ $VERSION"
-
       - uses: actions/upload-artifact@v7
         with:
           name: dist
@@ -61,7 +61,7 @@ jobs:
 
   testpypi:
     needs: build
-    if: github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     environment: testpypi
     permissions:
@@ -77,7 +77,7 @@ jobs:
 
   pypi:
     needs: build
-    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi')
+    if: github.event_name == 'release'
     runs-on: ubuntu-latest
     environment: pypi
     permissions:

@@ -88,6 +88,7 @@ packages = ["src/venice"]
 include = [
   "/src",
   "/tests",
+  "/scripts",
   "/bin",
   "/Makefile",
   "/install.sh",
