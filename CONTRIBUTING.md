@@ -105,6 +105,21 @@ distinction is invisible until you run the suite from a venv, where
 One `feat/<name>` branch per issue. Commit subjects follow
 `vX.Y: short description (#issue)`. Merges into `master` are `--no-ff`.
 
+## Releases
+
+Production releases are made only from `v<version>` tags on `master`. Merge the
+release-version PR, then wait for the complete `test` workflow to succeed for
+that exact merge SHA before creating and publishing the GitHub Release. The
+`publish` workflow independently verifies the tag against the imported package
+version and requires that exact successful `master` run before it builds or can
+mint PyPI credentials. A missing, pending, failed, branch-equivalent, PR, or
+manually dispatched test run never satisfies the gate.
+
+Manual dispatch of `publish` is TestPyPI-only. If a GitHub Release is published
+before exact-SHA CI finishes, production publication fails closed; after CI is
+green, rerun the failed release workflow rather than moving or recreating the
+tag.
+
 ## Reporting bugs
 
 Include the command you ran, what you expected, what happened, the exit code,
