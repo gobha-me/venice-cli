@@ -113,6 +113,20 @@ def resolve_output_dir(output_dir: Optional[str]) -> Path:
     return Path(output_dir or os.environ.get("VENICE_MCP_OUTPUT_DIR") or os.getcwd())
 
 
+def media_path_authority(path_authority=None) -> _shared.MediaPathAuthority:
+    """Return the caller-bound authority or a fail-closed cwd authority."""
+    return path_authority or _shared.MediaPathAuthority(os.getcwd())
+
+
+def _model_media_path(path_authority, value, *, kind: str, max_bytes: int, label: str):
+    try:
+        return media_path_authority(path_authority).resolve(
+            value, kind=kind, max_bytes=max_bytes
+        )
+    except _shared.MediaPathError as e:
+        return _err(f"{label}: {e}")
+
+
 def _write(path: Path, data: bytes) -> Optional[str]:
     """Write bytes to path (creating parents). Returns an error string, else None."""
     try:
@@ -538,9 +552,16 @@ def upscale_tool(
     output_dir: Optional[str] = None,
     confirm: bool = False,
     max_spend: Optional[float] = None,
+    path_authority=None,
 ) -> dict:
     """Upscale/enhance an image via /image/upscale (dynamic price -> needs confirm)."""
-    inp = Path(input_path)
+    resolved = _model_media_path(
+        path_authority, input_path, kind="image",
+        max_bytes=_shared.MAX_IMAGE_BYTES, label="upscale",
+    )
+    if isinstance(resolved, dict):
+        return resolved
+    inp, _mime = resolved
     ns = SimpleNamespace(
         input=inp, scale=scale, enhance=enhance,
         enhance_creativity=enhance_creativity, enhance_prompt=enhance_prompt,
@@ -567,9 +588,20 @@ def bg_remove_tool(
     output_dir: Optional[str] = None,
     confirm: bool = False,
     max_spend: Optional[float] = None,
+    path_authority=None,
 ) -> dict:
     """Remove an image background via /image/background-remove (dynamic -> confirm)."""
-    inp = Path(input_path) if input_path else None
+    if bool(input_path) == bool(image_url):
+        return _err("bg-remove: exactly one of input_path or image_url is required")
+    inp = None
+    if input_path:
+        resolved = _model_media_path(
+            path_authority, input_path, kind="image",
+            max_bytes=_shared.MAX_IMAGE_BYTES, label="bg-remove",
+        )
+        if isinstance(resolved, dict):
+            return resolved
+        inp, _mime = resolved
     ns = SimpleNamespace(input=inp, image_url=image_url)
     rc = _bg._validate(ns)  # stderr warnings only
     if rc is not None:
@@ -662,6 +694,7 @@ def vision_tool(
     prompt: Optional[str] = None,
     model: Optional[str] = None,
     max_tokens: Optional[int] = None,
+    path_authority=None,
 ) -> dict:
     """Describe/inspect an image via a multimodal /chat/completions call.
 
@@ -676,18 +709,23 @@ def vision_tool(
     if bool(input_path) == bool(image_url):
         return _err("vision: exactly one of input_path or image_url is required")
 
+    if input_path:
+        resolved = _model_media_path(
+            path_authority, input_path, kind="image",
+            max_bytes=_shared.MAX_IMAGE_BYTES, label="vision",
+        )
+        if isinstance(resolved, dict):
+            return resolved
+        p, mime = resolved
+        url = _shared.encode_data_url(
+            p, default_mime="image/png", detected_mime=mime
+        )
+    else:
+        url = image_url
+
     openai = _openai.import_openai("vision")  # stderr hint if missing
     if openai is None:
         return _err('vision: needs the openai package: pip install "venice-cli[openai]"')
-
-    if input_path:
-        p = Path(input_path)
-        rc = _shared.check_image_file(p, label="vision")  # stderr detail
-        if rc is not None:
-            return _err(f"vision: invalid input file (exit {rc})")
-        url = _shared.encode_data_url(p, default_mime="image/png")
-    else:
-        url = image_url
 
     models = _models.catalog(client, "text")
     if model:
@@ -768,6 +806,7 @@ def video_tool(
     max_spend: Optional[float] = None,
     max_wait: float = _video.config.VIDEO_POLL_MAX_WAIT_SEC,
     background: bool = False,
+    path_authority=None,
 ) -> dict:
     """Generate a video via Venice's async /video queue; write a file, return path.
 
@@ -784,14 +823,6 @@ def video_tool(
     if not prompt or not prompt.strip():
         return _err("video: prompt is required")
 
-    models = _models.catalog(client, "video")
-    model, rc = _models.resolve_model(
-        model, models, label="video", noun="video model",
-        config_key="defaults.video.model",
-    )
-    if rc is not None:
-        return _err(f"video: could not resolve model (exit {rc})")
-
     ns = SimpleNamespace(
         image=image_url, end_image=end_image_url, video=video_url,
         audio_input=audio_url, reference_image=reference_image_urls,
@@ -800,9 +831,19 @@ def video_tool(
         reference_video_duration=reference_video_duration,
         resolution=resolution, aspect_ratio=aspect_ratio, no_audio=no_audio,
     )
-    quote_media, queue_media, rc = _video._collect_media(ns)  # stderr on bad media
+    quote_media, queue_media, rc = _video._collect_media(
+        ns, path_authority=media_path_authority(path_authority)
+    )  # stderr on bad media
     if rc is not None:
         return _err(f"video: invalid media input (exit {rc})")
+
+    models = _models.catalog(client, "video")
+    model, rc = _models.resolve_model(
+        model, models, label="video", noun="video model",
+        config_key="defaults.video.model",
+    )
+    if rc is not None:
+        return _err(f"video: could not resolve model (exit {rc})")
 
     extra = _video._shared_params(ns)
     quote_body = {"model": model, "duration": duration}
@@ -1023,6 +1064,7 @@ def image_edit_tool(
     output_dir: Optional[str] = None,
     confirm: bool = False,
     max_spend: Optional[float] = None,
+    path_authority=None,
 ) -> dict:
     """Edit/inpaint an image via /image/edit (dynamic price -> needs confirm).
 
@@ -1030,8 +1072,35 @@ def image_edit_tool(
     `layer_paths` (masks/overlays) route to /image/multi-edit. Writes the
     result and returns its path.
     """
-    inp = Path(input_path) if input_path else None
-    layers = [Path(p) for p in (layer_paths or [])]
+    if bool(input_path) == bool(image_url):
+        return _err("image-edit: exactly one of input_path or image_url is required")
+    if not prompt:
+        return _err("image-edit: prompt is required")
+    if len(prompt) > _image_edit.MAX_PROMPT:
+        return _err(f"image-edit: prompt exceeds {_image_edit.MAX_PROMPT} chars")
+    if len(layer_paths or []) > _image_edit.MAX_LAYERS:
+        return _err(
+            f"image-edit: at most {_image_edit.MAX_LAYERS} layer paths are allowed"
+        )
+    inp = None
+    if input_path:
+        resolved = _model_media_path(
+            path_authority, input_path, kind="image",
+            max_bytes=_shared.MAX_IMAGE_BYTES, label="image-edit",
+        )
+        if isinstance(resolved, dict):
+            return resolved
+        inp, _mime = resolved
+    layers = []
+    for layer_path in layer_paths or []:
+        resolved = _model_media_path(
+            path_authority, layer_path, kind="image",
+            max_bytes=_shared.MAX_IMAGE_BYTES, label="image-edit",
+        )
+        if isinstance(resolved, dict):
+            return resolved
+        layer, _mime = resolved
+        layers.append(layer)
     ns = SimpleNamespace(
         input=inp, image_url=image_url, prompt=prompt, layer=layers or None,
         model=model, aspect_ratio=aspect_ratio, resolution=resolution,

@@ -45,7 +45,7 @@ import threading
 from pathlib import Path
 from typing import List, Optional
 
-from . import _agent, _exec, _index, _mcp, _memory
+from . import _agent, _exec, _index, _mcp, _memory, _shared
 from ._exec import (  # shared exec rails (#33): one gate for `code` and chat --shell
     DEFAULT_EXEC_TIMEOUT,
     MAX_OUTPUT_CHARS,
@@ -71,7 +71,7 @@ MAX_GREP_MATCHES = 200
 MAX_GREP_FILES = 5_000
 
 # Loop-controlled kwargs the model must never supply (mirrors _agent._CONTROLLED).
-_CONTROLLED = ("confirm", "max_spend", "output_dir")
+_CONTROLLED = ("confirm", "max_spend", "output_dir", "path_authority")
 
 
 def _clean(arguments) -> dict:
@@ -845,6 +845,9 @@ def code_tools(
     """
     roots = Roots(root, allow=allow_root, deny=deny_root)
     root = roots.base  # startup-root snapshot for the asset/browser output dirs
+    media_path_authority = _shared.MediaPathAuthority(
+        lambda: roots.base, lambda: roots.allow
+    )
 
     def free(fn):
         def invoke(arguments, *, confirm: bool = False):
@@ -967,7 +970,7 @@ def code_tools(
             # (== {venice_models, venice_model_details, venice_vision,
             # venice_job_status, venice_job_result}).
             only=_agent.select(categories={"catalog", "vision", "jobs"}),
-            config=config))
+            config=config, media_path_authority=media_path_authority))
 
     if assets and client is not None:
         asset_dir = os.environ.get("VENICE_MCP_OUTPUT_DIR") or root
@@ -978,6 +981,7 @@ def code_tools(
             # in _CODE_ASSET_BUILTINS -- select scans the union).
             only=_agent.select(categories={"image", "audio", "video"}),
             config=config,  # #58: asset tools honor defaults.<cmd>.*
+            media_path_authority=media_path_authority,
         ))
 
     if browser:

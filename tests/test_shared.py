@@ -8,6 +8,8 @@ raw-base64 round-trip and the exists / non-empty / size gate with its
 """
 import base64
 import io
+import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -84,6 +86,104 @@ class TestCheckImageFile(unittest.TestCase):
             rc, err = self._check(p, label="upscale")
             self.assertEqual(rc, 2)
             self.assertIn("must be < 25 MB", err)
+
+
+class TestMediaPathAuthority(unittest.TestCase):
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.outside = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.outside, ignore_errors=True)
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.authority = _shared.MediaPathAuthority(self.root)
+
+    def _write(self, directory, name, data):
+        path = Path(directory) / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        return path
+
+    def test_recognizes_supported_signatures_and_ignores_false_extension(self):
+        cases = (
+            ("image", b"\x89PNG\r\n\x1a\nbody", "image/png"),
+            ("image", b"\xff\xd8\xff\xe0body", "image/jpeg"),
+            ("image", b"GIF89abody", "image/gif"),
+            ("image", b"RIFFxxxxWEBPbody", "image/webp"),
+            ("video", b"\x00\x00\x00\x18ftypisombody", "video/mp4"),
+            ("video", b"\x1aE\xdf\xa3body", "video/webm"),
+            ("audio", b"ID3body", "audio/mpeg"),
+            ("audio", b"\xff\xfbbody", "audio/mpeg"),
+            ("audio", b"\xff\xf1body", "audio/aac"),
+            ("audio", b"RIFFxxxxWAVEbody", "audio/wav"),
+            ("audio", b"fLaCbody", "audio/flac"),
+            ("audio", b"OggSbody", "audio/ogg"),
+        )
+        for index, (kind, data, expected) in enumerate(cases):
+            with self.subTest(kind=kind, expected=expected):
+                path = self._write(self.root, f"media-{index}.txt", data)
+                resolved, mime = self.authority.resolve(
+                    path, kind=kind, max_bytes=1024
+                )
+                self.assertEqual(resolved, path.resolve())
+                self.assertEqual(mime, expected)
+
+    def test_rejects_outside_root_and_symlink_escape(self):
+        target = self._write(
+            self.outside, "outside.png", b"\x89PNG\r\n\x1a\nbody"
+        )
+        link = Path(self.root) / "inside.png"
+        os.symlink(target, link)
+        for candidate in (target, link):
+            with self.subTest(candidate=candidate):
+                with self.assertRaisesRegex(_shared.MediaPathError, "escapes"):
+                    self.authority.resolve(
+                        candidate, kind="image", max_bytes=1024
+                    )
+
+    def test_rejects_secret_and_protected_paths(self):
+        for name in ("credentials", ".env", ".git/object.png", ".venice/key.png"):
+            path = self._write(
+                self.root, name, b"\x89PNG\r\n\x1a\nbody"
+            )
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(_shared.MediaPathError, "protected"):
+                    self.authority.resolve(path, kind="image", max_bytes=1024)
+
+    def test_rejects_missing_directory_empty_oversized_and_non_media(self):
+        directory = Path(self.root) / "folder"
+        directory.mkdir()
+        empty = self._write(self.root, "empty.png", b"")
+        large = self._write(self.root, "large.png", b"\x89PNG\r\n\x1a\nxxx")
+        text = self._write(self.root, "fake.png", b"plain text")
+        cases = (
+            (Path(self.root) / "missing.png", "does not exist", 1024),
+            (directory, "regular file", 1024),
+            (empty, "empty", 1024),
+            (large, "limit", 8),
+            (text, "recognized image", 1024),
+        )
+        for candidate, message, limit in cases:
+            with self.subTest(candidate=candidate):
+                with self.assertRaisesRegex(_shared.MediaPathError, message):
+                    self.authority.resolve(
+                        candidate, kind="image", max_bytes=limit
+                    )
+
+    def test_dynamic_active_and_attached_roots(self):
+        other = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, other, ignore_errors=True)
+        media = self._write(other, "frame", b"\x89PNG\r\n\x1a\nbody")
+        state = {"base": self.root, "roots": [self.root]}
+        authority = _shared.MediaPathAuthority(
+            lambda: state["base"], lambda: state["roots"]
+        )
+        with self.assertRaises(_shared.MediaPathError):
+            authority.resolve(media, kind="image", max_bytes=1024)
+        state["roots"].append(other)
+        state["base"] = other
+        resolved, mime = authority.resolve("frame", kind="image", max_bytes=1024)
+        self.assertEqual(resolved, media.resolve())
+        self.assertEqual(mime, "image/png")
 
 
 if __name__ == "__main__":

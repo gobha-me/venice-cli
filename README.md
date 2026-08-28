@@ -1423,6 +1423,11 @@ forced cwd, timeout, and env-scrub — which is why it always confirms. git muta
 `--shell-allow`/`--shell-deny`) — a denied command is refused; an empty policy leaves
 it unrestricted (unchanged behavior).
 
+The same active/attached readable-root and secret-path policy applies when
+`venice_vision` or a `--assets` media tool reads a model-supplied local file. Those
+inputs must also match a recognized media signature; confirmation and `--auto` do
+not widen this authority.
+
 The free `git` tool validates arguments per operation rather than trusting a
 subcommand name. `branch` and `remote` are listing-only; content diffs require
 literal, root-confined paths after `--`; pathspec magic, `REV:path`, `--no-index`,
@@ -1774,6 +1779,13 @@ gated.
 inline base64). Files land in `VENICE_MCP_OUTPUT_DIR` (default: the current
 working directory), or a per-call `output_dir`. The API key is read the usual
 way (`$VENICE_API_KEY` or the credentials file) and is never echoed.
+
+**Local media inputs.** Paths supplied to image/video tools by an MCP host are
+confined to the server's startup working directory after resolving symlinks.
+Secret-shaped files and `.git`/`.venice` paths are refused, and the file must have
+a recognized bounded image/audio/video signature before any bytes are sent. This
+model-facing rail does not narrow paths explicitly supplied by an operator to the
+ordinary `venice upscale`, `bg-remove`, `image-edit`, or `video` CLI commands.
 
 Only stdout carries the JSON-RPC protocol; the server's own diagnostics go to
 stderr. Video generation and image editing are exposed over MCP too: the
