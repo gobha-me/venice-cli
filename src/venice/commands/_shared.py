@@ -9,12 +9,132 @@ from __future__ import annotations
 
 import base64
 import mimetypes
+import os
+import stat
 import sys
 from pathlib import Path
-from typing import List, Optional
+from typing import Callable, Iterable, List, Optional, Tuple, Union
 
 from .. import billing
 from ..client import VeniceAPIError
+from . import _index
+
+
+class MediaPathError(ValueError):
+    """A model-supplied local-media path failed the session's read authority."""
+
+
+_RootSource = Union[str, Path, Callable[[], Union[str, Path]]]
+_RootsSource = Union[Iterable[Union[str, Path]], Callable[[], Iterable[Union[str, Path]]]]
+_MEDIA_SNIFF_BYTES = 64
+
+
+def _root_value(source: _RootSource) -> str:
+    value = source() if callable(source) else source
+    return os.path.realpath(os.fspath(value))
+
+
+def _roots_value(source: _RootsSource) -> List[str]:
+    values = source() if callable(source) else source
+    return [os.path.realpath(os.fspath(value)) for value in values]
+
+
+def _sniff_media_mime(prefix: bytes, kind: str) -> Optional[str]:
+    """Return a conservative MIME type from a bounded media-file prefix."""
+    if kind == "image":
+        if prefix.startswith(b"\x89PNG\r\n\x1a\n"):
+            return "image/png"
+        if prefix.startswith(b"\xff\xd8\xff"):
+            return "image/jpeg"
+        if prefix.startswith((b"GIF87a", b"GIF89a")):
+            return "image/gif"
+        if len(prefix) >= 12 and prefix[:4] == b"RIFF" and prefix[8:12] == b"WEBP":
+            return "image/webp"
+        return None
+
+    if kind == "video":
+        if prefix.startswith(b"\x1aE\xdf\xa3"):
+            return "video/webm"
+        if len(prefix) >= 12 and prefix[4:8] == b"ftyp":
+            return "video/quicktime" if prefix[8:12] == b"qt  " else "video/mp4"
+        return None
+
+    if kind == "audio":
+        if prefix.startswith(b"fLaC"):
+            return "audio/flac"
+        if prefix.startswith(b"OggS"):
+            return "audio/ogg"
+        if len(prefix) >= 12 and prefix[:4] == b"RIFF" and prefix[8:12] == b"WAVE":
+            return "audio/wav"
+        if prefix.startswith(b"ID3"):
+            return "audio/mpeg"
+        if len(prefix) >= 2 and prefix[0] == 0xFF:
+            if prefix[1] & 0xF6 == 0xF0:
+                return "audio/aac"
+            if prefix[1] & 0xE0 == 0xE0 and prefix[1] & 0x06:
+                return "audio/mpeg"
+        if len(prefix) >= 12 and prefix[4:8] == b"ftyp":
+            return "audio/mp4"
+        return None
+
+    raise ValueError(f"unknown media kind: {kind}")
+
+
+class MediaPathAuthority:
+    """Resolve model-supplied media paths inside operator-authorized roots.
+
+    ``base`` controls relative-path resolution and ``roots`` controls readable
+    containment. Either may be a callable so ``venice code`` can bind this guard to
+    its mutable active/attached-root set without rebuilding every tool closure.
+    """
+
+    def __init__(self, base: _RootSource, roots: Optional[_RootsSource] = None):
+        self._base = base
+        self._roots = roots if roots is not None else lambda: [_root_value(self._base)]
+
+    def resolve(
+        self, value: Union[str, Path], *, kind: str, max_bytes: int
+    ) -> Tuple[Path, str]:
+        raw = os.fspath(value)
+        if not raw.strip():
+            raise MediaPathError("local media path is required")
+
+        base = _root_value(self._base)
+        roots = _roots_value(self._roots)
+        if base not in roots:
+            roots.append(base)
+        joined = raw if os.path.isabs(raw) else os.path.join(base, raw)
+        real = os.path.realpath(os.path.normpath(joined))
+        containers = [root for root in roots if _index.resolves_inside(Path(real), Path(root))]
+        if not containers:
+            raise MediaPathError("local media path escapes the authorized project roots")
+        container = max(containers, key=len)
+        rel = Path(os.path.relpath(real, container)).as_posix()
+        if _index.is_secret_path(rel) or _index.is_protected_dir_path(rel):
+            raise MediaPathError("local media path is in a protected location")
+
+        try:
+            info = os.stat(real)
+        except OSError:
+            raise MediaPathError("local media file does not exist") from None
+        if not stat.S_ISREG(info.st_mode):
+            raise MediaPathError("local media path must name a regular file")
+        if info.st_size == 0:
+            raise MediaPathError("local media file is empty")
+        if info.st_size > max_bytes:
+            raise MediaPathError(
+                f"local {kind} file is {info.st_size} bytes; limit is {max_bytes} bytes"
+            )
+
+        try:
+            with open(real, "rb") as handle:
+                prefix = handle.read(_MEDIA_SNIFF_BYTES)
+        except OSError:
+            raise MediaPathError("local media file could not be read") from None
+        mime = _sniff_media_mime(prefix, kind)
+        if mime is None:
+            raise MediaPathError(f"local file is not a recognized {kind} container")
+        return Path(real), mime
 
 
 def resolve_output(arg_output: Optional[Path], default_name: str) -> Path:
@@ -148,7 +268,10 @@ def resolve_poll(poll_interval, max_wait, *, label: str,
     return poll_interval, max_wait
 
 
-def encode_data_url(path: Path, *, default_mime: str = "application/octet-stream") -> str:
+def encode_data_url(
+    path: Path, *, default_mime: str = "application/octet-stream",
+    detected_mime: Optional[str] = None,
+) -> str:
     """Read a local file and return a `data:<mime>;base64,<b64>` URL.
 
     The MIME type is sniffed from the filename; callers pass `default_mime` as
@@ -156,7 +279,7 @@ def encode_data_url(path: Path, *, default_mime: str = "application/octet-stream
     base64 that `bg-remove`/`image-edit` send in an `image` field, the Venice
     `/video` media inputs want a full data URL, so this prepends the prefix.
     """
-    mime = mimetypes.guess_type(str(path))[0] or default_mime
+    mime = detected_mime or mimetypes.guess_type(str(path))[0] or default_mime
     b64 = base64.b64encode(path.read_bytes()).decode("ascii")
     return f"data:{mime};base64,{b64}"
 

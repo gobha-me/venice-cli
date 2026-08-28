@@ -9,7 +9,9 @@ import importlib.util
 import inspect
 import io
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 _HAS_MCP = importlib.util.find_spec("mcp") is not None
@@ -45,6 +47,39 @@ class TestServerWiring(unittest.TestCase):
         server = build_server(FakeClient())
         names = {t.name for t in server._tool_manager.list_tools()}
         self.assertEqual(names, EXPECTED_TOOLS)
+
+    def test_server_captures_startup_root_for_media_authority(self):
+        from venice.mcp_server import build_server
+        from venice.commands import _mcp, _shared
+
+        class FakeClient:
+            api_key = "fake"
+            base_url = "https://api.venice.ai/api/v1"
+
+        captured = {}
+
+        def upscale_tool(client, input_path, *, path_authority=None, **kwargs):
+            captured["authority"] = path_authority
+            return {"status": "ok"}
+
+        with tempfile.TemporaryDirectory() as root, \
+             tempfile.TemporaryDirectory() as outside, \
+             mock.patch.object(_mcp, "upscale_tool", upscale_tool):
+            server = build_server(FakeClient(), doc={}, root=root)
+            server._tool_manager.get_tool("venice_upscale").fn(input_path="frame.png")
+            frame = Path(root) / "frame.png"
+            frame.write_bytes(b"\x89PNG\r\n\x1a\nbody")
+            resolved, mime = captured["authority"].resolve(
+                frame, kind="image", max_bytes=1024
+            )
+            self.assertEqual(resolved, frame.resolve())
+            self.assertEqual(mime, "image/png")
+            denied = Path(outside) / "frame.png"
+            denied.write_bytes(b"\x89PNG\r\n\x1a\nbody")
+            with self.assertRaises(_shared.MediaPathError):
+                captured["authority"].resolve(
+                    denied, kind="image", max_bytes=1024
+                )
 
 
 @unittest.skipUnless(_HAS_MCP, "mcp SDK not installed (expected on Python 3.9)")

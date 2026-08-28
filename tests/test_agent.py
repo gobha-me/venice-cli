@@ -2649,6 +2649,30 @@ class TestAsyncJobSchemas(unittest.TestCase):
         self.assertFalse(by["venice_job_result"].paid)
 
 
+class TestMediaPathAuthorityWiring(unittest.TestCase):
+
+    def test_free_and_paid_media_tools_receive_only_host_authority(self):
+        authority = object()
+        with mock.patch.object(
+            _agent._mcp, "vision_tool", return_value={"status": "ok"}
+        ) as vision, mock.patch.object(
+            _agent._mcp, "upscale_tool", return_value={"status": "ok"}
+        ) as upscale:
+            tools = {tool.name: tool for tool in _agent.builtin_tools(
+                object(), only={"venice_vision", "venice_upscale"},
+                media_path_authority=authority,
+            )}
+            tools["venice_vision"].invoke({
+                "input_path": "frame.png", "path_authority": "model-controlled"
+            })
+            tools["venice_upscale"].invoke(
+                {"input_path": "frame.png", "path_authority": "model-controlled"},
+                confirm=True,
+            )
+        self.assertIs(vision.call_args.kwargs["path_authority"], authority)
+        self.assertIs(upscale.call_args.kwargs["path_authority"], authority)
+
+
 class TestReindexBuiltin(unittest.TestCase):
     """#44: reindex is a paid, no-arg builtin advertised by chat's default set."""
 

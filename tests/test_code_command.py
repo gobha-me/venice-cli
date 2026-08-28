@@ -12,6 +12,7 @@ import os
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from tests.test_chat import (
@@ -436,6 +437,15 @@ class TestCodeCommand(unittest.TestCase):
         # --auto -> confirm=True bypasses the spend gate
         self.assertTrue(stub.call_args.kwargs.get("confirm"))
         self.assertEqual(stub.call_args.kwargs.get("prompt"), "a koi pond at dawn")
+        authority = stub.call_args.kwargs.get("path_authority")
+        self.assertIsNotNone(authority)
+        frame = Path(self.root) / "frame.png"
+        frame.write_bytes(b"\x89PNG\r\n\x1a\nbody")
+        resolved, mime = authority.resolve(
+            frame, kind="image", max_bytes=1024
+        )
+        self.assertEqual(resolved, frame.resolve())
+        self.assertEqual(mime, "image/png")
 
     def test_acceptance_fail_returns_1(self):
         seq = [

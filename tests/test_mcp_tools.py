@@ -19,7 +19,7 @@ from urllib.error import HTTPError
 
 from tests.test_client import FakeResp
 from venice.client import VeniceClient
-from venice.commands import _mcp
+from venice.commands import _mcp, _shared
 
 
 def _client():
@@ -69,6 +69,9 @@ class _ToolTest(unittest.TestCase):
                 return False
 
         return _G()
+
+    def media_authority(self, root=None):
+        return _shared.MediaPathAuthority(root or self.td)
 
 
 class TestImageTool(_ToolTest):
@@ -302,7 +305,7 @@ class TestMusicTool(_ToolTest):
 class TestBinaryTools(_ToolTest):
     def _png(self):
         ip = Path(self.td) / "in.png"
-        ip.write_bytes(b"\x89PNG\r\n" + b"x" * 32)
+        ip.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 32)
         return ip
 
     def test_upscale_needs_confirm(self):
@@ -312,7 +315,10 @@ class TestBinaryTools(_ToolTest):
             raise AssertionError("must not hit the network without confirm")
 
         with mock.patch("venice.client.urllib.request.urlopen", boom):
-            res = _mcp.upscale_tool(_client(), str(ip), output_dir=self.td, confirm=False)
+            res = _mcp.upscale_tool(
+                _client(), str(ip), output_dir=self.td, confirm=False,
+                path_authority=self.media_authority(),
+            )
         self.assertEqual(res["status"], "confirmation_required")
         self.assertIsNone(res["estimated_cost_usd"])
 
@@ -322,7 +328,10 @@ class TestBinaryTools(_ToolTest):
             "venice.client.urllib.request.urlopen",
             _seq(FakeResp(200, b"UPSCALED", "image/png")),
         ), self.stdout_guard():
-            res = _mcp.upscale_tool(_client(), str(ip), output_dir=self.td, confirm=True)
+            res = _mcp.upscale_tool(
+                _client(), str(ip), output_dir=self.td, confirm=True,
+                path_authority=self.media_authority(),
+            )
         self.assertEqual(res["status"], "ok")
         self.assertEqual(Path(res["path"]).read_bytes(), b"UPSCALED")
         self.assertTrue(res["path"].endswith("-upscaled.png"))
@@ -337,6 +346,41 @@ class TestBinaryTools(_ToolTest):
             )
         self.assertEqual(res["status"], "ok")
         self.assertEqual(Path(res["path"]).read_bytes(), b"NOBG")
+
+    def test_bg_remove_from_authorized_local_image(self):
+        ip = self._png()
+        captured = {}
+
+        def fake(req, timeout=None):
+            captured["body"] = json.loads(req.data.decode())
+            return FakeResp(200, b"NOBG", "image/png")
+
+        with mock.patch("venice.client.urllib.request.urlopen", fake):
+            res = _mcp.bg_remove_tool(
+                _client(), str(ip), output_dir=self.td, confirm=True,
+                path_authority=self.media_authority(),
+            )
+        self.assertEqual(res["status"], "ok")
+        self.assertEqual(base64.b64decode(captured["body"]["image"]), ip.read_bytes())
+
+    def test_path_authority_cannot_be_overridden_by_confirmation(self):
+        outside_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, outside_dir, ignore_errors=True)
+        outside = Path(outside_dir) / "outside.png"
+        outside.write_bytes(b"\x89PNG\r\n\x1a\nbody")
+
+        def boom(*a, **kw):
+            raise AssertionError("denied media must not reach the network")
+
+        for confirm in (False, True):
+            with self.subTest(confirm=confirm), \
+                 mock.patch("venice.client.urllib.request.urlopen", boom):
+                res = _mcp.upscale_tool(
+                    _client(), str(outside), output_dir=self.td, confirm=confirm,
+                    path_authority=self.media_authority(),
+                )
+            self.assertEqual(res["status"], "error")
+            self.assertIn("escapes", res["message"])
 
     def test_bg_remove_requires_one_source(self):
         res = _mcp.bg_remove_tool(_client(), confirm=True)  # neither file nor url
@@ -393,7 +437,7 @@ def _vision_catalog(default_vision=False):
 class TestVisionTool(_ToolTest):
     def _png(self):
         ip = Path(self.td) / "shot.png"
-        ip.write_bytes(b"\x89PNG\r\n" + b"x" * 16)
+        ip.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 16)
         return ip
 
     def _oai(self, content="a red square"):
@@ -412,7 +456,10 @@ class TestVisionTool(_ToolTest):
         err = io.StringIO()
         with mock.patch.dict(sys.modules, {"openai": None}), \
              mock.patch.object(sys, "stderr", err):
-            res = _mcp.vision_tool(_client(), str(self._png()))
+            res = _mcp.vision_tool(
+                _client(), str(self._png()),
+                path_authority=self.media_authority(),
+            )
         self.assertEqual(res["status"], "error")
         self.assertIn("openai", res["message"])
 
@@ -424,7 +471,9 @@ class TestVisionTool(_ToolTest):
              self.stdout_guard():
             neither = _mcp.vision_tool(_client())
             both = _mcp.vision_tool(
-                _client(), str(self._png()), image_url="https://x/y.png")
+                _client(), str(self._png()), image_url="https://x/y.png",
+                path_authority=self.media_authority(),
+            )
         self.assertEqual(neither["status"], "error")
         self.assertEqual(both["status"], "error")
 
@@ -433,9 +482,31 @@ class TestVisionTool(_ToolTest):
         oai = self._oai()
         with mock.patch("openai.OpenAI", return_value=oai), \
              mock.patch.object(sys, "stderr", err), self.stdout_guard():
-            res = _mcp.vision_tool(_client(), str(Path(self.td) / "nope.png"))
+            res = _mcp.vision_tool(
+                _client(), str(Path(self.td) / "nope.png"),
+                path_authority=self.media_authority(),
+            )
         self.assertEqual(res["status"], "error")
         oai.chat.completions.create.assert_not_called()
+
+    def test_rejects_secret_named_and_non_image_inputs_before_api(self):
+        secret = Path(self.td) / "credentials"
+        secret.write_bytes(b"\x89PNG\r\n\x1a\nbody")
+        fake = Path(self.td) / "fake.png"
+        fake.write_text("not an image", encoding="utf-8")
+
+        def boom(*a, **kw):
+            raise AssertionError("denied media must not reach the API")
+
+        for candidate, message in ((secret, "protected"), (fake, "recognized image")):
+            with self.subTest(candidate=candidate), \
+                 mock.patch("venice.client.urllib.request.urlopen", boom):
+                res = _mcp.vision_tool(
+                    _client(), str(candidate),
+                    path_authority=self.media_authority(),
+                )
+            self.assertEqual(res["status"], "error")
+            self.assertIn(message, res["message"])
 
     def test_ok_local_image_sends_data_url(self):
         oai = self._oai()
@@ -443,7 +514,10 @@ class TestVisionTool(_ToolTest):
             "venice.client.urllib.request.urlopen",
             _seq(FakeResp(200, _vision_catalog())),
         ), mock.patch("openai.OpenAI", return_value=oai), self.stdout_guard():
-            res = _mcp.vision_tool(_client(), str(self._png()), model="qwen-vl")
+            res = _mcp.vision_tool(
+                _client(), str(self._png()), model="qwen-vl",
+                path_authority=self.media_authority(),
+            )
         self.assertEqual(res["status"], "ok")
         self.assertEqual(res["content"], "a red square")
         self.assertEqual(res["model"], "qwen-vl")
@@ -478,7 +552,9 @@ class TestVisionTool(_ToolTest):
             _seq(FakeResp(200, _vision_catalog())),
         ), mock.patch("openai.OpenAI", return_value=oai), self.stdout_guard():
             res = _mcp.vision_tool(
-                _client(), str(self._png()), model="venice-uncensored")
+                _client(), str(self._png()), model="venice-uncensored",
+                path_authority=self.media_authority(),
+            )
         self.assertEqual(res["status"], "error")
         self.assertIn("supportsVision", res["message"])
         oai.chat.completions.create.assert_not_called()
@@ -492,7 +568,10 @@ class TestVisionTool(_ToolTest):
         with mock.patch(
             "venice.client.urllib.request.urlopen", _seq(FakeResp(200, catalog))
         ), mock.patch("openai.OpenAI", return_value=oai), self.stdout_guard():
-            res = _mcp.vision_tool(_client(), str(self._png()), model="mystery")
+            res = _mcp.vision_tool(
+                _client(), str(self._png()), model="mystery",
+                path_authority=self.media_authority(),
+            )
         self.assertEqual(res["status"], "ok")
 
     def test_default_skips_non_vision_default_trait(self):
@@ -501,7 +580,10 @@ class TestVisionTool(_ToolTest):
             "venice.client.urllib.request.urlopen",
             _seq(FakeResp(200, _vision_catalog(default_vision=False))),
         ), mock.patch("openai.OpenAI", return_value=oai), self.stdout_guard():
-            res = _mcp.vision_tool(_client(), str(self._png()))
+            res = _mcp.vision_tool(
+                _client(), str(self._png()),
+                path_authority=self.media_authority(),
+            )
         self.assertEqual(res["status"], "ok")
         self.assertEqual(res["model"], "qwen-vl")
 
@@ -511,7 +593,10 @@ class TestVisionTool(_ToolTest):
             "venice.client.urllib.request.urlopen",
             _seq(FakeResp(200, _vision_catalog(default_vision=True))),
         ), mock.patch("openai.OpenAI", return_value=oai), self.stdout_guard():
-            res = _mcp.vision_tool(_client(), str(self._png()))
+            res = _mcp.vision_tool(
+                _client(), str(self._png()),
+                path_authority=self.media_authority(),
+            )
         self.assertEqual(res["status"], "ok")
         self.assertEqual(res["model"], "venice-uncensored")
 
@@ -526,13 +611,54 @@ class TestVisionTool(_ToolTest):
         with mock.patch(
             "venice.client.urllib.request.urlopen", _seq(FakeResp(200, catalog))
         ), mock.patch("openai.OpenAI", return_value=oai), self.stdout_guard():
-            res = _mcp.vision_tool(_client(), str(self._png()))
+            res = _mcp.vision_tool(
+                _client(), str(self._png()),
+                path_authority=self.media_authority(),
+            )
         self.assertEqual(res["status"], "error")
         self.assertIn("vision-capable", res["message"])
         oai.chat.completions.create.assert_not_called()
 
 
 class TestVideoTool(_ToolTest):
+    def test_authorized_local_media_uses_signature_mime_before_catalog(self):
+        frame = Path(self.td) / "frame.txt"
+        frame.write_bytes(b"\x00\x00\x00\x18ftypisombody")
+        seen_body = {}
+
+        def fake(req, timeout=None):
+            if req.full_url.endswith("/video/quote"):
+                seen_body["quote"] = json.loads(req.data.decode())
+                return FakeResp(200, b'{"quote": 5.0}')
+            if "type=video" in req.full_url:
+                return FakeResp(200, _video_catalog())
+            raise AssertionError(f"unexpected call: {req.full_url}")
+
+        with mock.patch("venice.client.urllib.request.urlopen", fake):
+            res = _mcp.video_tool(
+                _client(), "animate", video_url=str(frame), confirm=False,
+                max_spend=0.10, path_authority=self.media_authority(),
+            )
+        self.assertEqual(res["status"], "confirmation_required")
+        encoded = seen_body["quote"]["video_url"]
+        self.assertTrue(encoded.startswith("data:video/mp4;base64,"))
+
+    def test_denied_local_media_stops_before_catalog_or_quote(self):
+        outside_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, outside_dir, ignore_errors=True)
+        outside = Path(outside_dir) / "frame.png"
+        outside.write_bytes(b"\x89PNG\r\n\x1a\nbody")
+
+        def boom(*a, **kw):
+            raise AssertionError("denied media must stop before every API call")
+
+        with mock.patch("venice.client.urllib.request.urlopen", boom), \
+             self.stdout_guard():
+            res = _mcp.video_tool(
+                _client(), "animate", image_url=str(outside), confirm=True,
+                path_authority=self.media_authority(),
+            )
+        self.assertEqual(res["status"], "error")
     def test_ok_queue_poll_save(self):
         responses = _seq(
             FakeResp(200, _video_catalog()),               # /models?type=video
@@ -776,7 +902,7 @@ class TestJobResultTool(_ToolTest):
 class TestImageEditTool(_ToolTest):
     def _png(self):
         ip = Path(self.td) / "base.png"
-        ip.write_bytes(b"\x89PNG\r\n" + b"x" * 16)
+        ip.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 16)
         return ip
 
     def test_needs_confirm(self):
@@ -789,6 +915,7 @@ class TestImageEditTool(_ToolTest):
             res = _mcp.image_edit_tool(
                 _client(), "make it blue", input_path=str(ip),
                 output_dir=self.td, confirm=False,
+                path_authority=self.media_authority(),
             )
         self.assertEqual(res["status"], "confirmation_required")
         self.assertIsNone(res["estimated_cost_usd"])
@@ -806,6 +933,7 @@ class TestImageEditTool(_ToolTest):
             res = _mcp.image_edit_tool(
                 _client(), "make it blue", input_path=str(ip),
                 output_dir=self.td, confirm=True,
+                path_authority=self.media_authority(),
             )
         self.assertEqual(res["status"], "ok")
         self.assertEqual(Path(res["path"]).read_bytes(), b"EDITED")
@@ -825,18 +953,20 @@ class TestImageEditTool(_ToolTest):
 
         with mock.patch("venice.client.urllib.request.urlopen", fake), self.stdout_guard():
             _mcp.image_edit_tool(_client(), "make it blue", input_path=str(ip),
-                                 output_dir=self.td, confirm=True, safe_mode=False)
+                                 output_dir=self.td, confirm=True, safe_mode=False,
+                                 path_authority=self.media_authority())
         self.assertIs(captured["body"]["safe_mode"], False)
 
         with mock.patch("venice.client.urllib.request.urlopen", fake), self.stdout_guard():
             _mcp.image_edit_tool(_client(), "make it blue", input_path=str(ip),
-                                 output_dir=self.td, confirm=True)
+                                 output_dir=self.td, confirm=True,
+                                 path_authority=self.media_authority())
         self.assertIs(captured["body"]["safe_mode"], True)
 
     def test_multi_edit_with_layers(self):
         ip = self._png()
         layer = Path(self.td) / "mask.png"
-        layer.write_bytes(b"\x89PNG\r\nMASK")
+        layer.write_bytes(b"\x89PNG\r\n\x1a\nMASK")
         captured = {}
 
         def fake(req, timeout=None):
@@ -848,10 +978,30 @@ class TestImageEditTool(_ToolTest):
             res = _mcp.image_edit_tool(
                 _client(), "composite the mask", input_path=str(ip),
                 layer_paths=[str(layer)], output_dir=self.td, confirm=True,
+                path_authority=self.media_authority(),
             )
         self.assertEqual(res["status"], "ok")
         self.assertTrue(captured["url"].endswith("/image/multi-edit"))
         self.assertEqual(len(captured["body"]["images"]), 2)  # base + 1 layer
+
+    def test_denied_layer_stops_before_confirmation_and_api(self):
+        ip = self._png()
+        outside_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, outside_dir, ignore_errors=True)
+        layer = Path(outside_dir) / "mask.png"
+        layer.write_bytes(b"\x89PNG\r\n\x1a\nMASK")
+
+        def boom(*a, **kw):
+            raise AssertionError("denied layer must not reach the API")
+
+        with mock.patch("venice.client.urllib.request.urlopen", boom):
+            res = _mcp.image_edit_tool(
+                _client(), "composite", input_path=str(ip),
+                layer_paths=[str(layer)], output_dir=self.td, confirm=True,
+                path_authority=self.media_authority(),
+            )
+        self.assertEqual(res["status"], "error")
+        self.assertIn("escapes", res["message"])
 
     def test_missing_source_is_error(self):
         res = _mcp.image_edit_tool(_client(), "edit", confirm=True)  # no input/url

@@ -221,14 +221,24 @@ def _is_url(value: str) -> bool:
     return value.startswith(("http://", "https://", "data:"))
 
 
-def _resolve_media(value: str, *, kind: str):
+def _resolve_media(value: str, *, kind: str, path_authority=None):
     """Resolve one media input to a URL string. A value that is already an
     http(s)/data URL passes through; anything else is a local file that is
     size-checked and encoded to a `data:` URL. Returns (url_or_None, rc_or_None).
     """
     if _is_url(value):
         return value, None
-    path = Path(value)
+    detected_mime = None
+    if path_authority is not None:
+        try:
+            path, detected_mime = path_authority.resolve(
+                value, kind=kind, max_bytes=MEDIA_LIMITS[kind]
+            )
+        except _shared.MediaPathError as e:
+            print(f"video: {e}", file=sys.stderr)
+            return None, 2
+    else:
+        path = Path(value)
     if not path.is_file():
         print(f"video: input file not found: {value}", file=sys.stderr)
         return None, 2
@@ -244,10 +254,14 @@ def _resolve_media(value: str, *, kind: str):
             file=sys.stderr,
         )
         return None, 2
-    return _shared.encode_data_url(path, default_mime=DEFAULT_MIME[kind]), None
+    return _shared.encode_data_url(
+        path, default_mime=DEFAULT_MIME[kind], detected_mime=detected_mime
+    ), None
 
 
-def _resolve_media_list(values, *, kind: str, cap: int, flag: str):
+def _resolve_media_list(
+    values, *, kind: str, cap: int, flag: str, path_authority=None
+):
     """Resolve a repeatable media flag. Returns (list_or_None, rc_or_None);
     (None, None) when the flag was not given."""
     if values is None:
@@ -257,14 +271,14 @@ def _resolve_media_list(values, *, kind: str, cap: int, flag: str):
         return None, 2
     out = []
     for value in values:
-        url, rc = _resolve_media(value, kind=kind)
+        url, rc = _resolve_media(value, kind=kind, path_authority=path_authority)
         if rc is not None:
             return None, rc
         out.append(url)
     return out, None
 
 
-def _resolve_elements(raw_list):
+def _resolve_elements(raw_list, *, path_authority=None):
     """Parse `--element` JSON objects, resolving any media paths inside. Returns
     (list_or_None, rc_or_None). Unknown keys pass through verbatim so the JSON
     escape hatch stays forward-compatible with the schema."""
@@ -286,7 +300,9 @@ def _resolve_elements(raw_list):
         resolved = dict(el)  # keep any unknown keys as-is
         for key, kind in (("frontal_image_url", "image"), ("video_url", "video")):
             if el.get(key) is not None:
-                url, rc = _resolve_media(el[key], kind=kind)
+                url, rc = _resolve_media(
+                    el[key], kind=kind, path_authority=path_authority
+                )
                 if rc is not None:
                     return None, rc
                 resolved[key] = url
@@ -298,6 +314,7 @@ def _resolve_elements(raw_list):
             urls, rc = _resolve_media_list(
                 refs, kind="image", cap=ELEMENT_REF_IMAGE_MAX,
                 flag="element reference_image_urls",
+                path_authority=path_authority,
             )
             if rc is not None:
                 return None, rc
@@ -306,7 +323,7 @@ def _resolve_elements(raw_list):
     return out, None
 
 
-def _collect_media(args):
+def _collect_media(args, *, path_authority=None):
     """Resolve every media input up front (before any spend). Returns
     (quote_media, queue_media, rc). `quote_media` holds fields valid on
     /video/quote (video_url + reference_video_total_duration); `queue_media`
@@ -325,7 +342,9 @@ def _collect_media(args):
         value = getattr(args, attr, None)
         if value is None:
             continue
-        url, rc = _resolve_media(value, kind=kind)
+        url, rc = _resolve_media(
+            value, kind=kind, path_authority=path_authority
+        )
         if rc is not None:
             return None, None, rc
         queue_media[field] = url
@@ -339,13 +358,18 @@ def _collect_media(args):
         ("reference_audio", "audio", REF_AUDIO_MAX, "--reference-audio", "reference_audio_urls"),
         ("scene_image", "image", SCENE_MAX, "--scene-image", "scene_image_urls"),
     ):
-        urls, rc = _resolve_media_list(getattr(args, attr, None), kind=kind, cap=cap, flag=flag)
+        urls, rc = _resolve_media_list(
+            getattr(args, attr, None), kind=kind, cap=cap, flag=flag,
+            path_authority=path_authority,
+        )
         if rc is not None:
             return None, None, rc
         if urls is not None:
             queue_media[field] = urls
 
-    elements, rc = _resolve_elements(getattr(args, "element", None))
+    elements, rc = _resolve_elements(
+        getattr(args, "element", None), path_authority=path_authority
+    )
     if rc is not None:
         return None, None, rc
     if elements is not None:

@@ -47,6 +47,7 @@ from . import _memory
 from . import _models
 from . import _compact
 from . import _openai
+from . import _shared
 from .models import MODEL_TYPES
 
 
@@ -2420,7 +2421,7 @@ def select(categories=None, names=None, exclude=None) -> set:
 
 
 # Loop-controlled kwargs the model must never supply (stripped defensively).
-_CONTROLLED = ("confirm", "max_spend", "output_dir")
+_CONTROLLED = ("confirm", "max_spend", "output_dir", "path_authority")
 
 
 def _clean(arguments) -> dict:
@@ -2572,6 +2573,7 @@ def builtin_tools(
     browser_output_dir: Optional[str] = None,
     memory: bool = False,
     exec_timeout: int = _exec.DEFAULT_EXEC_TIMEOUT,
+    media_path_authority=None,
 ) -> List[Tool]:
     """Build the in-process venice tools, bound to `client`.
 
@@ -2599,31 +2601,44 @@ def builtin_tools(
     `memory` (issue #49) appends the persistent memory + task rails (`memory_tools`):
     free, local notes (two tiers) + a project task list. Also a rail (added after the
     `only` filter, absent from `_BUILTINS`/`mcp-serve`).
+
+    `media_path_authority` is loop-controlled and never advertised. It confines
+    every model-supplied local media input to operator-authorized roots; chat
+    defaults to the cwd captured here, while code supplies its mutable root set.
     """
+
+    if media_path_authority is None:
+        media_path_authority = _shared.MediaPathAuthority(os.getcwd())
 
     def _config_defaults(section, impl) -> dict:
         # #58: shared with mcp-serve -- layer defaults.<section>.* under tool args.
         return userconfig.config_defaults_for(section, impl, config)
 
-    def _make_paid(impl, section):
+    def _make_paid(impl, section, impl_name):
         defaults = _config_defaults(section, impl)
 
         def invoke(arguments, *, confirm: bool = False):
-            return impl(
-                client,
-                confirm=confirm,
-                max_spend=max_spend,
-                output_dir=output_dir,
-                **{**defaults, **_clean(arguments)},
-            )
+            controlled = {
+                "confirm": confirm,
+                "max_spend": max_spend,
+                "output_dir": output_dir,
+            }
+            if impl_name in {
+                "upscale_tool", "bg_remove_tool", "video_tool", "image_edit_tool"
+            }:
+                controlled["path_authority"] = media_path_authority
+            return impl(client, **controlled, **{**defaults, **_clean(arguments)})
 
         return invoke
 
-    def _make_free(impl, section):
+    def _make_free(impl, section, impl_name):
         defaults = _config_defaults(section, impl)
 
         def invoke(arguments, *, confirm: bool = False):
-            return impl(client, **{**defaults, **_clean(arguments)})
+            controlled = {}
+            if impl_name == "vision_tool":
+                controlled["path_authority"] = media_path_authority
+            return impl(client, **controlled, **{**defaults, **_clean(arguments)})
 
         return invoke
 
@@ -2634,9 +2649,13 @@ def builtin_tools(
             description=spec.description,
             parameters=spec.parameters,
             invoke=(
-                _make_paid(getattr(_mcp, spec.impl), _tool_section(spec.name))
+                _make_paid(
+                    getattr(_mcp, spec.impl), _tool_section(spec.name), spec.impl
+                )
                 if spec.paid
-                else _make_free(getattr(_mcp, spec.impl), _tool_section(spec.name))
+                else _make_free(
+                    getattr(_mcp, spec.impl), _tool_section(spec.name), spec.impl
+                )
             ),
             paid=spec.paid,
             category=spec.category,

@@ -10,12 +10,13 @@ Do NOT add `from __future__ import annotations` here: FastMCP builds each tool's
 input schema via typing.get_type_hints, so the annotations must stay concrete
 (`typing.Optional[int]`, not stringized `int | None`).
 """
+import os
 from typing import List, Optional
 
 from mcp.server.fastmcp import FastMCP
 
 from . import userconfig
-from .commands import _mcp
+from .commands import _mcp, _shared
 
 
 def _merged(defaults: dict, host: dict) -> dict:
@@ -27,7 +28,7 @@ def _merged(defaults: dict, host: dict) -> dict:
     return {**defaults, **{k: v for k, v in host.items() if v is not None}}
 
 
-def build_server(client, doc=None) -> FastMCP:
+def build_server(client, doc=None, root=None) -> FastMCP:
     """Build a FastMCP server exposing venice tools, all bound to `client`.
 
     `doc` is a userconfig document (issue #58): `defaults.<section>.*` values are
@@ -36,6 +37,9 @@ def build_server(client, doc=None) -> FastMCP:
     contract `venice chat`/`code` already honor. `doc=None` loads the config file.
     """
     server = FastMCP("venice")
+    path_authority = _shared.MediaPathAuthority(
+        os.path.realpath(root or os.getcwd())
+    )
     if doc is None:
         doc = userconfig.load_config()
     _defaults = {
@@ -181,7 +185,7 @@ def build_server(client, doc=None) -> FastMCP:
                 scale=scale, enhance=enhance,
                 enhance_creativity=enhance_creativity, enhance_prompt=enhance_prompt,
                 replication=replication, output_dir=output_dir, confirm=confirm,
-                max_spend=max_spend,
+                max_spend=max_spend, path_authority=path_authority,
             )),
         )
 
@@ -202,6 +206,7 @@ def build_server(client, doc=None) -> FastMCP:
             **_merged(_defaults["bg_remove"], dict(
                 image_url=image_url, output_dir=output_dir,
                 confirm=confirm, max_spend=max_spend,
+                path_authority=path_authority,
             )),
         )
 
@@ -273,7 +278,7 @@ def build_server(client, doc=None) -> FastMCP:
                 scene_image_urls=scene_image_urls,
                 reference_video_duration=reference_video_duration,
                 output_dir=output_dir, confirm=confirm, max_spend=max_spend,
-                max_wait=max_wait,
+                max_wait=max_wait, path_authority=path_authority,
             )),
         )
 
@@ -303,7 +308,7 @@ def build_server(client, doc=None) -> FastMCP:
                 layer_paths=layer_paths, model=model, aspect_ratio=aspect_ratio,
                 resolution=resolution, output_format=output_format,
                 safe_mode=safe_mode, output_dir=output_dir, confirm=confirm,
-                max_spend=max_spend,
+                max_spend=max_spend, path_authority=path_authority,
             )),
         )
 
