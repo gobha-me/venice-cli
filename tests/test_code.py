@@ -4,6 +4,7 @@ Hermetic: a throwaway project tree under a tmpdir, no network, no real key. The
 engine is stdlib-only + mcp-free, so this whole file runs on the 3.9 floor.
 """
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -375,6 +376,94 @@ class TestCodeTools(unittest.TestCase):
         bad = self.tools["git"].invoke({"subcommand": "commit", "args": ["-m", "x"]})
         self.assertEqual(bad["status"], "error")
         self.assertIn("read-only", bad["message"])
+
+    def _init_git_fixture(self):
+        subprocess.run(
+            ["git", "init", "-q", "-b", "master", "."], cwd=self.root, check=True
+        )
+        self._write("tracked.txt", "before\n")
+        subprocess.run(["git", "add", "tracked.txt"], cwd=self.root, check=True)
+        subprocess.run(
+            ["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+             "commit", "-qm", "baseline"],
+            cwd=self.root, check=True,
+        )
+
+    def test_git_remote_and_branch_mutations_leave_repository_unchanged(self):
+        self._init_git_fixture()
+        subprocess.run(["git", "branch", "keep"], cwd=self.root, check=True)
+
+        remote = self.tools["git"].invoke({
+            "subcommand": "remote",
+            "args": ["add", "audit", "https://example.invalid/repo"],
+        })
+        branch = self.tools["git"].invoke({
+            "subcommand": "branch", "args": ["-D", "keep"],
+        })
+
+        self.assertEqual(remote["status"], "error")
+        self.assertEqual(branch["status"], "error")
+        remotes = subprocess.run(
+            ["git", "remote"], cwd=self.root, check=True, capture_output=True, text=True
+        ).stdout.splitlines()
+        branches = subprocess.run(
+            ["git", "branch", "--list", "keep"], cwd=self.root, check=True,
+            capture_output=True, text=True,
+        ).stdout
+        self.assertNotIn("audit", remotes)
+        self.assertIn("keep", branches)
+
+    def test_git_paths_enforce_root_secret_and_symlink_authority(self):
+        self._init_git_fixture()
+        outside_dir = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, outside_dir, True)
+        outside = Path(outside_dir) / "outside.txt"
+        outside.write_text("outside marker\n", encoding="utf-8")
+        (Path(self.root) / "escape.txt").symlink_to(outside)
+        self._write(".env", "not-a-real-secret\n")
+
+        for path in (str(outside), "escape.txt", ".env", ".git/config", "."):
+            with self.subTest(path=path):
+                result = self.tools["git"].invoke({
+                    "subcommand": "diff", "args": ["--", path],
+                })
+                self.assertEqual(result["status"], "error")
+                self.assertIn("path", result["message"].lower())
+
+        object_read = self.tools["git"].invoke({
+            "subcommand": "show", "args": ["HEAD:.env"],
+        })
+        self.assertEqual(object_read["status"], "error")
+
+    def test_git_configured_executables_never_run(self):
+        self._init_git_fixture()
+        marker = Path(self.root) / "helper-ran"
+        helper = self._write(
+            "helper.sh", f"#!/bin/sh\ntouch {marker}\nexit 0\n"
+        )
+        helper.chmod(0o755)
+        subprocess.run(
+            ["git", "config", "core.fsmonitor", str(helper)],
+            cwd=self.root, check=True,
+        )
+        subprocess.run(
+            ["git", "config", "diff.external", str(helper)],
+            cwd=self.root, check=True,
+        )
+        self._write("tracked.txt", "after\n")
+        os.environ["GIT_EXTERNAL_DIFF"] = str(helper)
+        try:
+            status = self.tools["git"].invoke({
+                "subcommand": "status", "args": ["--short"],
+            })
+            diff = self.tools["git"].invoke({
+                "subcommand": "diff", "args": ["--", "tracked.txt"],
+            })
+        finally:
+            os.environ.pop("GIT_EXTERNAL_DIFF", None)
+        self.assertEqual(status["status"], "ok")
+        self.assertEqual(diff["status"], "ok")
+        self.assertFalse(marker.exists())
 
 
 class TestCodeFactory(unittest.TestCase):

@@ -149,7 +149,7 @@ def classify(path: str, added: str = "", deleted: str = "") -> str:
 
 
 # --------------------------------------------------------------------------- #
-# git plumbing (everything goes through the read-only `_exec.git_cmd` gate)
+# git plumbing (code-authored argv use `_exec`'s private hardened runner)
 # --------------------------------------------------------------------------- #
 class ReviewError(Exception):
     """A review could not be set up. `.message` is printable; `.code` is the exit code."""
@@ -168,7 +168,9 @@ def _git(root: str, sub: str, args, exec_timeout: int,
     differ" as exit 1 -- the normal, expected outcome when diffing an untracked
     file against /dev/null.
     """
-    out = _exec.git_cmd(root, sub, args=list(args), exec_timeout=exec_timeout)
+    out = _exec._git_cmd_internal(
+        root, sub, args=list(args), exec_timeout=exec_timeout
+    )
     if out.get("status") != "ok" or out.get("exit_code") not in ok_codes:
         return False, (out.get("stderr") or out.get("message") or "").strip()
     return True, (out.get("stdout") or "").strip()
