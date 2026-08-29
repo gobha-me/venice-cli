@@ -1426,20 +1426,26 @@ def models_tool(client, *, type: str) -> dict:
             f"models: unknown type {type!r}; choose from "
             + ", ".join(("all", *valid))
         )
-    types = valid if type == "all" else (type,)
-    by_type = {}
-    for t in types:
-        cat = _models.catalog(client, t)
-        if cat is None:
-            return _err(f"models: /models catalog unavailable for type {t!r}")
-        by_type[t] = [m["id"] for m in cat
-                      if isinstance(m, dict) and m.get("id")]
     if type == "all":
+        try:
+            catalog = _models_cmd._fetch_all(client)
+        except VeniceAPIError:
+            return _err("models: /models catalog unavailable for type 'all'")
+        by_type = {
+            t: [m["id"] for m in cat
+                if isinstance(m, dict) and m.get("id")]
+            for t, cat in catalog.items()
+        }
         return {"status": "ok", "type": "all",
                 "count": sum(len(v) for v in by_type.values()),
                 "models": by_type}
+    cat = _models.catalog(client, type)
+    if cat is None:
+        return _err(f"models: /models catalog unavailable for type {type!r}")
+    models = [m["id"] for m in cat
+              if isinstance(m, dict) and m.get("id")]
     return {"status": "ok", "type": type,
-            "count": len(by_type[type]), "models": by_type[type]}
+            "count": len(models), "models": models}
 
 
 def model_details_tool(client, *, model: str) -> dict:

@@ -2087,7 +2087,8 @@ _MODELS_SCHEMA = _obj(
             "type": "string",
             "enum": ["all", *MODEL_TYPES],
             "description": "Which catalog type to list model ids for "
-            "(text, code, image, video, music, tts, embedding, upscale), "
+            "(text, code, image, video, music, tts, embedding, upscale, asr, "
+            "inpaint), "
             "or 'all' for a {type: [ids]} map.",
         },
     },
@@ -2284,7 +2285,8 @@ _BUILTINS = [
         "venice_models",
         "models_tool",
         "List available Venice model ids for a catalog type (text/code/image/video/"
-        "music/tts/embedding/upscale, or 'all') via the free /models catalog. Use it "
+        "music/tts/embedding/upscale/asr/inpaint, or 'all') via the free /models "
+        "catalog. Use it "
         "to choose a valid `model` for the other venice_* tools instead of guessing. "
         "Read-only; not spend-gated.",
         _MODELS_SCHEMA,
