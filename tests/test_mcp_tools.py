@@ -168,16 +168,89 @@ class TestTtsTool(_ToolTest):
     def test_ok_writes_audio(self):
         price = json.dumps(
             {"data": [{"id": "tts-kokoro",
-                       "model_spec": {"pricing": {"input": {"usd": 3.5}}}}]}
+                       "model_spec": {
+                           "pricing": {"input": {"usd": 3.5}},
+                           "supported_formats": ["mp3", "wav"],
+                           "default_format": "mp3",
+                       }}]}
         ).encode()
+        captured = {}
+
+        def responses(req, timeout=None):
+            if req.full_url.endswith("/models?type=tts"):
+                return FakeResp(200, price)
+            captured["body"] = json.loads(req.data.decode("utf-8"))
+            return FakeResp(200, b"AUDIO", "audio/mpeg")
+
         with mock.patch(
             "venice.client.urllib.request.urlopen",
-            _seq(FakeResp(200, price), FakeResp(200, b"AUDIO", "audio/mpeg")),
+            responses,
         ), self.stdout_guard():
             res = _mcp.tts_tool(_client(), "hello world", output_dir=self.td, confirm=True)
         self.assertEqual(res["status"], "ok")
         self.assertEqual(Path(res["path"]).read_bytes(), b"AUDIO")
         self.assertTrue(res["path"].endswith(".mp3"))
+        self.assertEqual(res["format"], "mp3")
+        self.assertNotIn("response_format", captured["body"])
+
+    def test_explicit_supported_format_is_sent(self):
+        catalog = json.dumps({"data": [{
+            "id": "tts-kokoro",
+            "model_spec": {
+                "pricing": {"input": {"usd": 3.5}},
+                "supported_formats": ["mp3", "wav"],
+                "default_format": "mp3",
+            },
+        }]}).encode()
+        captured = {}
+
+        def responses(req, timeout=None):
+            if req.full_url.endswith("/models?type=tts"):
+                return FakeResp(200, catalog)
+            captured["body"] = json.loads(req.data.decode("utf-8"))
+            return FakeResp(200, b"WAV", "audio/wav")
+
+        with mock.patch(
+            "venice.client.urllib.request.urlopen", responses,
+        ), self.stdout_guard():
+            res = _mcp.tts_tool(
+                _client(), "hello", format="wav", output_dir=self.td, confirm=True
+            )
+        self.assertEqual(res["status"], "ok")
+        self.assertEqual(captured["body"]["response_format"], "wav")
+        self.assertEqual(res["format"], "wav")
+
+    def test_wav_only_default_and_unsupported_explicit_format(self):
+        catalog = json.dumps({"data": [{
+            "id": "tts-inworld-1-5-max",
+            "model_spec": {
+                "pricing": {"input": {"usd": 12.5}},
+                "supported_formats": ["wav"],
+                "default_format": "wav",
+            },
+        }]}).encode()
+        with mock.patch(
+            "venice.client.urllib.request.urlopen",
+            _seq(FakeResp(200, catalog), FakeResp(200, b"WAV", "audio/wav")),
+        ), self.stdout_guard():
+            res = _mcp.tts_tool(
+                _client(), "hello", model="tts-inworld-1-5-max",
+                output_dir=self.td, confirm=True,
+            )
+        self.assertEqual(res["status"], "ok")
+        self.assertEqual(res["format"], "wav")
+        self.assertTrue(res["path"].endswith(".wav"))
+
+        with mock.patch(
+            "venice.client.urllib.request.urlopen",
+            _seq(FakeResp(200, catalog)),
+        ), self.stdout_guard():
+            bad = _mcp.tts_tool(
+                _client(), "hello", model="tts-inworld-1-5-max", format="mp3",
+                output_dir=self.td, confirm=True,
+            )
+        self.assertEqual(bad["status"], "error")
+        self.assertIn("not supported", bad["message"])
 
     def test_bad_speed_is_error(self):
         res = _mcp.tts_tool(_client(), "hi", speed=9.0, confirm=True)
@@ -1262,9 +1335,13 @@ class TestModelDetailsTool(_ToolTest):
         # #64: TTS models expose model_spec.voices (flat list of ids); surface it so
         # the agent can pick a valid voice for venice_tts without guessing.
         spec = {"name": "Kokoro", "pricing": {"input": {"usd": 3.5}},
-                "voices": ["Achernar", "Aiden", "Alex"]}
+                "voices": ["Achernar", "Aiden", "Alex"],
+                "supported_formats": ["mp3", "wav"],
+                "default_format": "mp3"}
         out = self._details(spec, mtype="tts")
         self.assertEqual(out["voices"], ["Achernar", "Aiden", "Alex"])
+        self.assertEqual(out["supported_formats"], ["mp3", "wav"])
+        self.assertEqual(out["default_format"], "mp3")
 
     def test_non_voice_model_voices_is_none(self):
         # image/text models have no voices -> null, like capabilities/constraints.

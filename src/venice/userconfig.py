@@ -524,9 +524,9 @@ _COMMAND_MAP = {
         "output_format": ("output_format", _one_of("venice.commands.image_edit", "OUTPUT_FORMATS")),
     },
     "tts": {
-        # #57 Class C: literals now live in `tts._run`'s `apply_literals` call.
-        "model": ("model", _one_of("venice.commands.tts", "TTS_MODELS")),
-        "format": ("format", _one_of("venice.commands.tts", "FORMATS")),
+        # Model and format are validated against the live TTS catalog before spend.
+        "model": ("model", str),
+        "format": ("format", str),
         "voice": ("voice", str),
         "speed": ("speed", _numeric.finite_float),
         # `--play`/`--no-play` is a tri-stated store_true(None)/store_false pair.

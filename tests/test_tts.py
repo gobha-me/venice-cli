@@ -36,7 +36,7 @@ def _build_args(**ov):
 
 
 def _tts_models_payload():
-    """Mimics /models?type=tts response with two entries."""
+    """Mimics /models?type=tts with model-specific format contracts."""
     return json.dumps({
         "object": "list",
         "data": [
@@ -47,6 +47,8 @@ def _tts_models_payload():
                     "name": "Kokoro",
                     "pricing": {"input": {"usd": 3.5}},
                     "voices": ["af_sky", "am_michael"],
+                    "supported_formats": ["mp3", "wav"],
+                    "default_format": "mp3",
                 },
             },
             {
@@ -55,6 +57,26 @@ def _tts_models_payload():
                 "model_spec": {
                     "pricing": {"input": {"usd": 18.75}},
                     "voices": ["voice_a"],
+                    "supported_formats": ["mp3", "wav"],
+                    "default_format": "mp3",
+                },
+            },
+            {
+                "id": "tts-inworld-1-5-max",
+                "type": "tts",
+                "model_spec": {
+                    "pricing": {"input": {"usd": 12.5}},
+                    "supported_formats": ["wav"],
+                    "default_format": "wav",
+                },
+            },
+            {
+                "id": "tts-gradium-v1",
+                "type": "tts",
+                "model_spec": {
+                    "pricing": {"input": {"usd": 20.0}},
+                    "supported_formats": ["wav", "pcm", "opus"],
+                    "default_format": "wav",
                 },
             },
         ],
@@ -82,18 +104,104 @@ class TestTtsFlow(unittest.TestCase):
     def test_generate_writes_mp3(self):
         from venice.commands import tts
 
+        captured = {}
         responses = iter([
             FakeResp(200, _tts_models_payload(), "application/json"),
             FakeResp(200, b"FAKEMP3", "audio/mpeg"),
         ])
 
+        def fake_urlopen(req, timeout=None):
+            if req.full_url.endswith("/audio/speech"):
+                captured["body"] = json.loads(req.data.decode("utf-8"))
+            return next(responses)
+
         with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
-             mock.patch("venice.client.urllib.request.urlopen", lambda *a, **kw: next(responses)):
+             mock.patch("venice.client.urllib.request.urlopen", fake_urlopen):
             rc = tts._run(_build_args(text="Hello, voice."))
         self.assertEqual(rc, 0)
         written = sorted(Path(".").glob("venice-tts-*.mp3"))
         self.assertEqual(len(written), 1, f"expected 1 mp3, got {written}")
         self.assertEqual(written[0].read_bytes(), b"FAKEMP3")
+        self.assertNotIn("response_format", captured["body"])
+
+    def test_wav_only_model_uses_catalog_default(self):
+        from venice.commands import tts
+
+        captured = {}
+        responses = iter([
+            FakeResp(200, _tts_models_payload(), "application/json"),
+            FakeResp(200, b"WAV", "audio/wav; charset=binary"),
+        ])
+
+        def fake_urlopen(req, timeout=None):
+            if req.full_url.endswith("/audio/speech"):
+                captured["body"] = json.loads(req.data.decode("utf-8"))
+            return next(responses)
+
+        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.client.urllib.request.urlopen", fake_urlopen):
+            rc = tts._run(_build_args(model="tts-inworld-1-5-max"))
+        self.assertEqual(rc, 0)
+        self.assertNotIn("response_format", captured["body"])
+        self.assertEqual(len(list(Path(".").glob("venice-tts-*.wav"))), 1)
+
+    def test_response_content_type_wins_for_generated_extension(self):
+        from venice.commands import tts
+
+        responses = iter([
+            FakeResp(200, _tts_models_payload(), "application/json"),
+            FakeResp(200, b"WAV", "audio/wav"),
+        ])
+        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.client.urllib.request.urlopen",
+                        lambda *a, **kw: next(responses)):
+            rc = tts._run(_build_args(format="mp3"))
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(list(Path(".").glob("venice-tts-*.wav"))), 1)
+
+    def test_explicit_output_filename_is_preserved(self):
+        from venice.commands import tts
+
+        output = Path("custom.audio")
+        responses = iter([
+            FakeResp(200, _tts_models_payload(), "application/json"),
+            FakeResp(200, b"WAV", "audio/wav"),
+        ])
+        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.client.urllib.request.urlopen",
+                        lambda *a, **kw: next(responses)):
+            rc = tts._run(_build_args(output=output))
+        self.assertEqual(rc, 0)
+        self.assertEqual(output.read_bytes(), b"WAV")
+
+    def test_unsupported_format_fails_before_speech_request(self):
+        from venice.commands import tts
+
+        calls = []
+
+        def fake_urlopen(req, timeout=None):
+            calls.append(req.full_url)
+            return FakeResp(200, _tts_models_payload(), "application/json")
+
+        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.client.urllib.request.urlopen", fake_urlopen):
+            rc = tts._run(_build_args(
+                model="tts-inworld-1-5-max", format="mp3"
+            ))
+        self.assertEqual(rc, 2)
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0].endswith("/models?type=tts"))
+
+    def test_unknown_model_fails_before_speech_request(self):
+        from venice.commands import tts
+
+        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.client.urllib.request.urlopen",
+                        lambda *a, **kw: FakeResp(
+                            200, _tts_models_payload(), "application/json"
+                        )):
+            rc = tts._run(_build_args(model="tts-nope"))
+        self.assertEqual(rc, 2)
 
     def test_dry_run_does_not_call_speech(self):
         from venice.commands import tts
@@ -207,6 +315,15 @@ class TestTtsFlow(unittest.TestCase):
 
 
 class TestTtsPricingValidation(unittest.TestCase):
+    def test_catalog_api_failure_is_rejected(self):
+        from venice.client import VeniceAPIError
+        from venice.commands import tts
+
+        client = mock.Mock()
+        client.get_json.side_effect = VeniceAPIError(0, "/models", "offline")
+        with self.assertRaisesRegex(ValueError, "could not fetch live TTS catalog"):
+            tts._resolve_tts(client, "m", None)
+
     def test_non_finite_catalog_price_is_rejected(self):
         from venice.commands import tts
 
@@ -215,11 +332,46 @@ class TestTtsPricingValidation(unittest.TestCase):
             def get_json(*args, **kwargs):
                 return {"data": [{
                     "id": "m",
-                    "model_spec": {"pricing": {"input": {"usd": float("nan")}}},
+                    "model_spec": {
+                        "pricing": {"input": {"usd": float("nan")}},
+                        "supported_formats": ["wav"],
+                        "default_format": "wav",
+                    },
                 }]}
 
         with self.assertRaisesRegex(ValueError, "invalid TTS price"):
-            tts._fetch_tts_price_per_million(Client(), "m")
+            tts._resolve_tts(Client(), "m", None)
+
+    def test_catalog_contract_failures_are_rejected(self):
+        from venice.commands import tts
+
+        cases = (
+            ({}, "no data list"),
+            ({"data": []}, "not in the live TTS catalog"),
+            ({"data": [{"id": "m"}]}, "has no model_spec"),
+            ({"data": [{"id": "m", "model_spec": {}}]},
+             "invalid supported_formats"),
+            ({"data": [{"id": "m", "model_spec": {
+                "supported_formats": ["wav"]}}]}, "has no default_format"),
+            ({"data": [{"id": "m", "model_spec": {
+                "supported_formats": ["wav"], "default_format": "mp3"}}]},
+             "is not in supported_formats"),
+        )
+        for doc, message in cases:
+            with self.subTest(message=message):
+                client = mock.Mock()
+                client.get_json.return_value = doc
+                with self.assertRaisesRegex(ValueError, message):
+                    tts._resolve_tts(client, "m", None)
+
+    def test_parser_accepts_live_catalog_values(self):
+        from venice import cli
+
+        args = cli.build_parser().parse_args([
+            "tts", "hello", "--model", "tts-gradium-v1", "--format", "opus"
+        ])
+        self.assertEqual(args.model, "tts-gradium-v1")
+        self.assertEqual(args.format, "opus")
 
 
 if __name__ == "__main__":

@@ -109,7 +109,8 @@ def build_server(client, doc=None, root=None) -> FastMCP:
         """Synthesize speech from text via Venice /audio/speech. Writes an audio file
         and returns its path. Paid: cost is estimated per character; over-cap calls
         need confirm=true. Omitted args fall back to defaults.tts.* in the user's
-        config, then to the built-ins (model=tts-kokoro, format=mp3)."""
+        config, then to model=tts-kokoro and the selected model's live catalog
+        format default."""
         return _mcp.tts_tool(
             client, text,
             **_merged(_defaults["tts"], dict(

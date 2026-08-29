@@ -1900,9 +1900,12 @@ _IMAGE_SCHEMA = _obj(
 _TTS_SCHEMA = _obj(
     {
         "text": _p("string", "The text to speak."),
-        "model": _p("string"),
+        "model": _p("string", "Live TTS catalog model id; defaults to tts-kokoro."),
         "voice": _p("string"),
-        "format": _p("string", "Audio format, e.g. mp3, opus, wav."),
+        "format": _p(
+            "string",
+            "Model-specific audio format. Omit to use the model's catalog default.",
+        ),
         "speed": _p("number", "0.25-4.0."),
     },
     required=["text"],
@@ -2294,7 +2297,8 @@ _BUILTINS = [
         "Get one model's details: pricing (cost), capabilities (text models: "
         "supportsVision/supportsFunctionCalling/...), constraints (image/media "
         "models: aspectRatios, resolutions, qualities, promptCharacterLimit), and "
-        "voices (TTS models: the valid voice ids for venice_tts) -- plus "
+        "voices and formats (TTS models: valid voice ids plus supported/default "
+        "formats for venice_tts) -- plus "
         "the full model_spec. Use it to budget input and confirm a model fits before "
         "using it. Read-only; not spend-gated.",
         _MODEL_DETAILS_SCHEMA,

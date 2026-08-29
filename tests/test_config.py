@@ -146,6 +146,22 @@ class TestApplyDefaults(_Base):
         uc.apply_defaults(args2, "chat", doc)
         self.assertEqual(args2.model, "explicit")
 
+    def test_tts_live_catalog_values_remain_config_backable(self):
+        doc = {"defaults": {"tts": {
+            "model": "tts-gradium-v1", "format": "opus",
+        }}}
+        args = _build_parser(tts).parse_args(["tts", "hello"])
+        uc.apply_defaults(args, "tts", doc)
+        self.assertEqual(args.model, "tts-gradium-v1")
+        self.assertEqual(args.format, "opus")
+
+        explicit = _build_parser(tts).parse_args([
+            "tts", "hello", "--model", "tts-inworld-1-5-max", "--format", "wav"
+        ])
+        uc.apply_defaults(explicit, "tts", doc)
+        self.assertEqual(explicit.model, "tts-inworld-1-5-max")
+        self.assertEqual(explicit.format, "wav")
+
     def test_apply_fills_chat_persona(self):
         # #68: defaults.chat.persona is a plain-string key like system/character.
         doc = {"defaults": {"chat": {"persona": "pirate"}}}
@@ -767,9 +783,6 @@ _CLASS_C_CASES = [
     dict(key="tts", mod=tts, argv=["tts", "hi"], dest="model",
          literal=tts.DEFAULT_TTS_MODEL, cfg="tts-orpheus", want="tts-orpheus",
          explicit=["--model", "tts-xai-v1"], eval="tts-xai-v1"),
-    dict(key="tts", mod=tts, argv=["tts", "hi"], dest="format",
-         literal=tts.DEFAULT_FORMAT, cfg="wav", want="wav",
-         explicit=["--format", "flac"], eval="flac"),
     dict(key="sfx", mod=sfx, argv=["sfx", "p"], dest="model",
          literal=sfx.DEFAULT_SFX_MODEL, cfg="mmaudio-v2-text-to-audio",
          want="mmaudio-v2-text-to-audio",
@@ -993,8 +1006,6 @@ class TestClassCParity(unittest.TestCase):
         reaches SFX_MODELS[model] as a raw KeyError traceback."""
         cases = [
             ("image", image, ["image", "p"], "format", "gif"),
-            ("tts", tts, ["tts", "hi"], "model", "tts-nope"),
-            ("tts", tts, ["tts", "hi"], "format", "ogg"),
             ("sfx", sfx, ["sfx", "p"], "model", "bogus"),
             ("video", video, ["video", "p"], "duration", "99s"),
             # #57 C2/D: the first int choice set, and the first choices row
