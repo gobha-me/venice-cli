@@ -254,6 +254,12 @@ venice image "frost wyrm, splash art" --variants 4 --yes
 venice image "portrait card frame" --width 768 --height 1024 \
     --negative-prompt "text, watermark" --seed 42 --cfg-scale 7.5 --yes
 
+# Model-native controls. Style references accept local files, HTTP(S) URLs,
+# data URLs, or raw base64; repeat the JSON flag for each reference.
+venice image "portrait in the same painted style" --resolution 1K --quality high \
+    --style-reference '{"image":"style.png","strength":0.7}' \
+    --embed-exif-metadata --enhance-prompt --yes
+
 # Omit the Venice watermark (best for finished card art).
 venice image "frost wyrm, splash art" --hide-watermark --yes
 
@@ -315,6 +321,17 @@ Choose a model with `--model` (default `venice-sd35`); see
 `venice models --type image --detail` for ids and per-image pricing.
 Formats: `png` (default), `webp`, `jpeg`. Aspect-ratio/resolution-tier
 models take `--aspect-ratio`/`--resolution` instead of `--width`/`--height`.
+Native controls include repeatable `--style-reference JSON`, `--quality`,
+`--lora-strength`, `--embed-exif-metadata`, `--web-search`,
+`--disable-prompt-optimization-thinking`, and `--enhance-prompt` (with explicit
+inverse forms for boolean options). Style-reference image data is bounded below
+8 MiB; local files are checked as recognized images and encoded as data URLs.
+Raw base64 is accepted and preserved. Reference count,
+reference-strength support, and quality are validated against the selected
+model's live catalog entry. Quality/resolution pricing is selected from the
+matching catalog matrix. Because web search and prompt enhancement can add an
+unlisted charge, their total is treated as unknown: `--max-spend` fails closed
+and MCP/agent callers must explicitly confirm.
 `--hide-watermark` drops the Venice watermark (Venice may keep it for some
 content); `--no-safe-mode` stops adult-classified art from being blurred. To
 drop the watermark **by default**, set `defaults.image.hide_watermark` in config
@@ -371,9 +388,10 @@ confirm before the charge.
 ## Edit images
 
 Iterate on already-generated art without regenerating it — recolor, restyle, or
-inpaint a card — via `/image/edit`. Add one or two `--layer` images (masks or
-overlays) to composite instead, which routes to `/image/multi-edit` (up to 3
-images total, base first):
+inpaint a card — via `/image/edit`. Add repeatable `--layer` images (masks or
+overlays) to composite instead, which routes to `/image/multi-edit` (base
+first). The selected model's live `maxInputImages` constraint supplies the
+limit:
 
 ```sh
 # Prompt-only edit -> ./card-edit.png.
@@ -387,14 +405,21 @@ venice image-edit --image-url https://example.com/card.png \
 # Mask/overlay composite -> /image/multi-edit (base first, then layers).
 venice image-edit base.png -p "apply this mask" --layer mask.png --yes
 
+# Multi-edit-only quality plus prompt controls shared by both edit routes.
+venice image-edit base.png -p "combine these references" --layer style.png \
+    --quality high --enhance-prompt \
+    --disable-prompt-optimization-thinking --yes
+
 # Dry-run: show the planned output + balance, spend nothing.
 venice image-edit card.png -p "brighter" --dry-run
 ```
 
 Provide exactly one base source: a positional file (base64-encoded under 25 MB)
 or `--image-url`. `--prompt/-p` is required. Optional `--model`, `--aspect-ratio`,
-`--resolution`, `--output-format`, and `--safe-mode`/`--no-safe-mode` (config-backable
-via `defaults.image_edit.safe_mode`) map straight to the API;
+`--resolution`, `--output-format`, prompt optimization controls, and
+`--safe-mode`/`--no-safe-mode` map straight to the API. `--quality` applies only
+to multi-edit and is checked against that model's advertised qualities. These
+preferences are config-backable via `defaults.image_edit.*`;
 omit them to take the model defaults (`firered-image-edit`, PNG for 1K). Pricing
 is dynamic like `upscale`; balance is shown and you confirm before the charge.
 
@@ -1871,12 +1896,15 @@ safety), it should be settable in config." Currently config-backable:
 
 - `defaults.image.*` — `model`, `format`, `variants`, `width`, `height`,
   `aspect_ratio`, `resolution`, `style_prefix`, `preset`, `preset_file`,
-  `negative_prompt`, `cfg_scale`, `steps`, `style_preset`, `hide_watermark`,
+  `negative_prompt`, `cfg_scale`, `steps`, `style_preset`, `style_references`,
+  `embed_exif_metadata`, `lora_strength`, `quality`, `enable_web_search`,
+  `disable_prompt_optimization_thinking`, `enhance_prompt`, `hide_watermark`,
   `safe_mode` (tri-state `--safe-mode`/`--no-safe-mode`; set `false` to skip
   Venice's safety blur). Note `variants` is a **cost multiplier** — it is
   reflected in the confirmation prompt before anything is charged
 - `defaults.image_edit.*` — `model`, `aspect_ratio`, `resolution`, `output_format`,
-  `safe_mode` (tri-state `--safe-mode`/`--no-safe-mode`)
+  `quality`, `disable_prompt_optimization_thinking`, `enhance_prompt`, `safe_mode`
+  (tri-state `--safe-mode`/`--no-safe-mode`)
 - `defaults.tts.*` — `model`, `format`, `voice`, `speed`, `play`
 - `defaults.sfx.*` — `model`, `duration`, `play`, `master`, `loop`,
   `no_cleanup`, `poll_interval`, `max_wait` (`loop` only takes effect when
@@ -1920,7 +1948,7 @@ positionals) stay CLI-only by design.
 These per-command defaults also apply when a generator runs as an **agent tool**
 inside `venice chat --tools` and `venice code` — e.g. `defaults.image.safe_mode`
 is honored when the model calls `venice_image`, not just on the `venice image`
-CLI. `defaults.image_edit.safe_mode`, `defaults.music.instrumental`,
+CLI. `defaults.image_edit.*`, `defaults.music.instrumental`,
 `defaults.video.no_audio` and `defaults.upscale.enhance` reach the tools the same
 way, as do the generation knobs `defaults.image.{model,format,variants}`,
 `defaults.tts.{model,format}`, `defaults.sfx.{model,duration}`,
@@ -1935,9 +1963,10 @@ CLI-only because the tool implementations fix their own polling cadence, and
 their sections apply only on the command line.
 
 **Any** config value whose flag has a fixed set of choices is validated against
-that set — `defaults.image.format`,
+that set — `defaults.image.{format,quality}`,
 `defaults.sfx.model`,
-`defaults.image_edit.{aspect_ratio,output_format}`, `defaults.chat.web_search`,
+`defaults.image_edit.{aspect_ratio,output_format,quality}`,
+`defaults.chat.web_search`,
 `defaults.bit_depth` and `defaults.contact_sheet.engine`.
 An unrecognized value is reported on stderr, naming the legal values exactly as
 `--flag` would, and skipped — so the command falls back to its built-in default

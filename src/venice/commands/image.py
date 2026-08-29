@@ -24,13 +24,16 @@ import base64
 import binascii
 import hashlib
 import json
+import os
 import re
+import stat
 import sys
 from pathlib import Path
 from typing import List, Optional, Tuple
 
 from .. import _numeric, auth, billing, config, userconfig
 from ..client import VeniceAPIError, build_client_from_auth
+from . import _models, _shared
 from ._shared import (
     add_balance_flag as _add_balance_flag,
     confirm_or_exit as _confirm_or_exit,
@@ -55,6 +58,8 @@ EXT_BY_FORMAT = {
 MIN_VARIANTS = 1
 MAX_VARIANTS = 4
 DEFAULT_VARIANTS = 1
+QUALITY_CHOICES = ("low", "medium", "high")
+STYLE_REFERENCE_MAX_BYTES = 8 * 1024 * 1024
 
 
 def register(subparsers) -> None:
@@ -150,6 +155,53 @@ def register(subparsers) -> None:
     p.add_argument("--style-preset", default=None,
                    help="Predefined style preset (model-dependent).")
     p.add_argument(
+        "--style-reference",
+        action="append",
+        dest="style_references",
+        default=None,
+        metavar="JSON",
+        help="Style reference as JSON with image=PATH|URL|data: and optional "
+        "strength=0.1-1. Repeatable; count is validated from the live model catalog.",
+    )
+    p.add_argument(
+        "--embed-exif-metadata",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Embed generation metadata in the output image when supported.",
+    )
+    p.add_argument("--lora-strength", type=int, default=None, metavar="N",
+                   help="LoRA strength 0-100 for models using additional LoRAs.")
+    p.add_argument("--quality", choices=QUALITY_CHOICES, default=None,
+                   help="Model-supported output quality; may change the price.")
+    p.add_argument(
+        "--web-search",
+        action=argparse.BooleanOptionalAction,
+        dest="enable_web_search",
+        default=None,
+        help="Allow supported image models to use web search (additional cost).",
+    )
+    thinking = p.add_mutually_exclusive_group()
+    thinking.add_argument(
+        "--disable-prompt-optimization-thinking",
+        action="store_true",
+        dest="disable_prompt_optimization_thinking",
+        default=None,
+        help="Skip supported models' prompt-optimization thinking step.",
+    )
+    thinking.add_argument(
+        "--enable-prompt-optimization-thinking",
+        action="store_false",
+        dest="disable_prompt_optimization_thinking",
+        default=None,
+        help="Force supported models' prompt-optimization thinking step on.",
+    )
+    p.add_argument(
+        "--enhance-prompt",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Rewrite the prompt before generation (additional cost when applied).",
+    )
+    p.add_argument(
         "--variants",
         type=int,
         default=None,
@@ -230,6 +282,15 @@ def _build_body(prompt: str, args) -> dict:
         "cfg_scale": args.cfg_scale,
         "steps": args.steps,
         "style_preset": args.style_preset,
+        "style_references": getattr(args, "style_references", None),
+        "embed_exif_metadata": getattr(args, "embed_exif_metadata", None),
+        "lora_strength": getattr(args, "lora_strength", None),
+        "quality": getattr(args, "quality", None),
+        "enable_web_search": getattr(args, "enable_web_search", None),
+        "disable_prompt_optimization_thinking": getattr(
+            args, "disable_prompt_optimization_thinking", None
+        ),
+        "enhance_prompt": getattr(args, "enhance_prompt", None),
     }
     for k, v in optional.items():
         if v is not None:
@@ -272,7 +333,12 @@ def _sidecar_params(doc: dict, body: dict) -> dict:
         data = req.get("data")
         if isinstance(data, dict) and data:
             resolved = data
-    params = dict(resolved if resolved is not None else body)
+    # Keep every provider-shaped request field even when the response echoes only
+    # a subset, then let resolved values (especially the server-selected seed)
+    # override what was sent.
+    params = dict(body)
+    if resolved is not None:
+        params.update(resolved)
     params.pop("variants", None)
     params.setdefault("model", body.get("model"))
     params.setdefault("prompt", body.get("prompt"))
@@ -280,48 +346,293 @@ def _sidecar_params(doc: dict, body: dict) -> dict:
     return params
 
 
+# ---- native controls, catalog validation, and pricing -----------------------
+
+def validate_lora_strength(value) -> None:
+    if value is None:
+        return
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 0 <= value <= 100
+    ):
+        raise ValueError("lora_strength must be an integer between 0 and 100")
+
+
+def _decode_data_image(value: str) -> None:
+    """Validate a style-reference data URL without rewriting it."""
+    if "," not in value:
+        raise ValueError("style reference data URL is missing its payload")
+    header, payload = value.split(",", 1)
+    if not header.lower().startswith("data:image/") or ";base64" not in header.lower():
+        raise ValueError("style reference data URL must be a base64 image")
+    max_encoded = 4 * ((STYLE_REFERENCE_MAX_BYTES + 2) // 3)
+    if len(payload) > max_encoded:
+        raise ValueError(
+            "style reference data URL exceeds the encoded 8 MiB image limit"
+        )
+    try:
+        data = base64.b64decode(payload, validate=True)
+    except (binascii.Error, ValueError):
+        raise ValueError("style reference data URL has invalid base64") from None
+    if not data:
+        raise ValueError("style reference data URL is empty")
+    if _shared._sniff_media_mime(data[:64], "image") is None:
+        raise ValueError("style reference data URL is not a recognized image container")
+    if len(data) >= STYLE_REFERENCE_MAX_BYTES:
+        raise ValueError(
+            f"style reference data is {len(data)} bytes; limit is less than "
+            f"{STYLE_REFERENCE_MAX_BYTES} bytes"
+        )
+
+
+def _is_raw_base64_image(value: str) -> bool:
+    """Recognize a bounded raw-base64 image without mistaking paths for data."""
+    max_encoded = 4 * ((STYLE_REFERENCE_MAX_BYTES + 2) // 3)
+    if len(value) > max_encoded:
+        return False
+    try:
+        data = base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError):
+        return False
+    return bool(data) and len(data) < STYLE_REFERENCE_MAX_BYTES and (
+        _shared._sniff_media_mime(data[:64], "image") is not None
+    )
+
+
+def _resolve_style_image(value, *, path_authority=None) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("style reference image must be a non-empty string")
+    value = value.strip()
+    if value.startswith(("http://", "https://")):
+        return value
+    if value.startswith("data:"):
+        _decode_data_image(value)
+        return value
+    if len(value) > 4 * ((STYLE_REFERENCE_MAX_BYTES + 2) // 3):
+        raise ValueError("style reference exceeds the encoded 8 MiB image limit")
+    if _is_raw_base64_image(value):
+        return value
+
+    if path_authority is not None:
+        try:
+            path, mime = path_authority.resolve(
+                value, kind="image", max_bytes=STYLE_REFERENCE_MAX_BYTES - 1
+            )
+        except _shared.MediaPathError as e:
+            raise ValueError(str(e)) from None
+    else:
+        path = Path(value).expanduser()
+        try:
+            info = path.stat()
+        except OSError:
+            raise ValueError(f"style reference file does not exist: {value}") from None
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError("style reference path must name a regular file")
+        if info.st_size == 0:
+            raise ValueError("style reference file is empty")
+        if info.st_size >= STYLE_REFERENCE_MAX_BYTES:
+            raise ValueError(
+                f"style reference file is {info.st_size} bytes; limit is less than "
+                f"{STYLE_REFERENCE_MAX_BYTES} bytes"
+            )
+        try:
+            with path.open("rb") as fh:
+                prefix = fh.read(64)
+        except OSError:
+            raise ValueError("style reference file could not be read") from None
+        mime = _shared._sniff_media_mime(prefix, "image")
+        if mime is None:
+            raise ValueError("style reference is not a recognized image container")
+    return _shared.encode_data_url(path, detected_mime=mime)
+
+
+def resolve_style_references(raw_values, *, path_authority=None) -> Optional[List[dict]]:
+    """Parse CLI/config/tool style references and normalize their image values."""
+    if raw_values is None:
+        return None
+    if not isinstance(raw_values, list):
+        raise ValueError("style_references must be a list")
+    out: List[dict] = []
+    for raw in raw_values:
+        if isinstance(raw, str):
+            try:
+                item = json.loads(raw)
+            except ValueError as e:
+                raise ValueError(f"--style-reference is not valid JSON: {e}") from None
+        else:
+            item = raw
+        if not isinstance(item, dict):
+            raise ValueError("each style reference must be a JSON object")
+        unknown = set(item) - {"image", "strength"}
+        if unknown:
+            raise ValueError(
+                "style reference has unknown field(s): " + ", ".join(sorted(unknown))
+            )
+        resolved = {"image": _resolve_style_image(
+            item.get("image"), path_authority=path_authority
+        )}
+        if item.get("strength") is not None:
+            try:
+                strength = _numeric.finite_float(item["strength"])
+            except ValueError as e:
+                raise ValueError(f"invalid style reference strength: {e}") from None
+            if not 0.1 <= strength <= 1.0:
+                raise ValueError("style reference strength must be between 0.1 and 1")
+            resolved["strength"] = strength
+        out.append(resolved)
+    return out
+
+
+def _model_entry(models, model: str) -> Optional[dict]:
+    if not isinstance(models, list):
+        return None
+    return next(
+        (m for m in models if isinstance(m, dict) and m.get("id") == model), None
+    )
+
+
+def _validated_usd(node) -> Optional[float]:
+    if not isinstance(node, dict) or "usd" not in node:
+        return None
+    try:
+        return _numeric.non_negative_float(node["usd"])
+    except ValueError:
+        raise ValueError("model catalog contains an invalid image price") from None
+
+
+def _price_from_entry(entry, *, resolution=None, quality=None) -> Optional[float]:
+    spec = entry.get("model_spec") if isinstance(entry, dict) else None
+    pricing = spec.get("pricing") if isinstance(spec, dict) else None
+    constraints = spec.get("constraints") if isinstance(spec, dict) else None
+    if not isinstance(pricing, dict):
+        return None
+    constraints = constraints if isinstance(constraints, dict) else {}
+
+    quality_matrix = pricing.get("quality")
+    if quality is not None or isinstance(quality_matrix, dict):
+        selected_quality = quality or constraints.get("defaultQuality")
+        selected_resolution = resolution or constraints.get("defaultResolution")
+        if selected_quality and selected_resolution and isinstance(quality_matrix, dict):
+            by_resolution = quality_matrix.get(selected_resolution)
+            if isinstance(by_resolution, dict):
+                return _validated_usd(by_resolution.get(selected_quality))
+        if quality is not None:
+            return None
+
+    resolution_prices = pricing.get("resolutions")
+    selected_resolution = resolution or constraints.get("defaultResolution")
+    if selected_resolution and isinstance(resolution_prices, dict):
+        return _validated_usd(resolution_prices.get(selected_resolution))
+
+    for key in ("generation", "image", "output"):
+        price = _validated_usd(pricing.get(key))
+        if price is not None:
+            return price
+    return _validated_usd(pricing)
+
+
+def _validate_model_controls(entry, args) -> None:
+    spec = entry.get("model_spec") if isinstance(entry, dict) else None
+    constraints = spec.get("constraints") if isinstance(spec, dict) else None
+    constraints = constraints if isinstance(constraints, dict) else {}
+    refs = getattr(args, "style_references", None) or []
+    if refs:
+        if not isinstance(spec, dict) or spec.get("supportsStyleReferences") is not True:
+            raise ValueError(f"model {args.model!r} does not support style references")
+        cap = constraints.get("maxStyleReferences")
+        if (
+            isinstance(cap, bool)
+            or not isinstance(cap, (int, float))
+            or int(cap) != cap
+            or cap < 1
+        ):
+            raise ValueError(
+                f"live image catalog entry for {args.model!r} has no valid "
+                "maxStyleReferences"
+            )
+        if len(refs) > int(cap):
+            raise ValueError(
+                f"model {args.model!r} accepts at most {int(cap)} style references"
+            )
+        if any("strength" in ref for ref in refs):
+            if constraints.get("supportsStyleReferenceStrength") is not True:
+                raise ValueError(
+                    f"model {args.model!r} does not support style reference strength"
+                )
+
+    quality = getattr(args, "quality", None)
+    if quality is not None:
+        choices = constraints.get("qualities")
+        if not isinstance(choices, list) or any(not isinstance(v, str) for v in choices):
+            raise ValueError(
+                f"live image catalog entry for {args.model!r} has no valid qualities"
+            )
+        if quality not in choices:
+            raise ValueError(
+                f"quality {quality!r} is not supported by {args.model!r}; "
+                "choose from " + ", ".join(choices)
+            )
+
+
+def prepare_request(client, args, *, path_authority=None) -> Optional[float]:
+    """Normalize native inputs, validate the live model contract, and return price."""
+    args.style_references = resolve_style_references(
+        getattr(args, "style_references", None), path_authority=path_authority
+    )
+    models = _models.catalog(client, "image")
+    entry = _model_entry(models, args.model)
+    quality = getattr(args, "quality", None)
+    if (args.style_references or quality is not None) and entry is None:
+        if models is None:
+            raise ValueError("could not fetch the live image catalog")
+        raise ValueError(f"model {args.model!r} is not in the live image catalog")
+    if entry is not None:
+        _validate_model_controls(entry, args)
+    price = _price_from_entry(
+        entry, resolution=getattr(args, "resolution", None), quality=quality
+    )
+    # These switches explicitly carry additional, unlisted charges. Never let the
+    # base image price masquerade as a complete max-spend estimate.
+    if (
+        getattr(args, "enable_web_search", None) is True
+        or getattr(args, "enhance_prompt", None) is True
+    ):
+        return None
+    return price
+
+
+def _price_description(args, prefix: str) -> str:
+    parts = [prefix, f"model={args.model}"]
+    if getattr(args, "resolution", None):
+        parts.append(f"resolution={args.resolution}")
+    if getattr(args, "quality", None):
+        parts.append(f"quality={args.quality}")
+    if getattr(args, "style_references", None):
+        parts.append(f"style_refs={len(args.style_references)}")
+    if getattr(args, "enable_web_search", None):
+        parts.append("web_search=on")
+    if getattr(args, "enhance_prompt", None):
+        parts.append("enhance_prompt=on")
+    return ", ".join(parts)
+
+
 # ---- pricing + cost estimation ----------------------------------------------
 
 def _fetch_image_price(client, model: str) -> Optional[float]:
-    """Per-image USD price for the model from /models?type=image. Best-effort.
-
-    Schema-tolerant: returns the first USD value found in model_spec.pricing
-    (values may be nested one level, as with tts's {"input": {"usd": ...}}).
-    """
-    try:
-        doc = client.get_json("/models", params={"type": "image"})
-    except VeniceAPIError:
-        return None
-    data = doc.get("data") if isinstance(doc, dict) else None
-    if not isinstance(data, list):
-        return None
-    for m in data:
-        if isinstance(m, dict) and m.get("id") == model:
-            spec = m.get("model_spec")
-            pricing = spec.get("pricing") if isinstance(spec, dict) else None
-            return _usd_from_pricing(pricing)
-    return None
+    """Compatibility wrapper for callers/tests that need only the base price."""
+    return _price_from_entry(_model_entry(_models.catalog(client, "image"), model))
 
 
 def _usd_from_pricing(pricing) -> Optional[float]:
+    """Compatibility parser for a base-price block, without matrix guessing."""
     if not isinstance(pricing, dict):
         return None
-    for v in pricing.values():
-        if isinstance(v, (int, float)):
-            # e.g. {"usd": 0.01} handled below; a bare number is unlabeled.
-            continue
-        if isinstance(v, dict) and "usd" in v:
-            try:
-                return _numeric.non_negative_float(v["usd"])
-            except ValueError:
-                raise ValueError("model catalog contains an invalid image price") from None
-    # Fall back to a top-level "usd" key.
-    if "usd" in pricing:
-        try:
-            return _numeric.non_negative_float(pricing["usd"])
-        except ValueError:
-            raise ValueError("model catalog contains an invalid image price") from None
-    return None
+    for key in ("generation", "image", "output"):
+        price = _validated_usd(pricing.get(key))
+        if price is not None:
+            return price
+    return _validated_usd(pricing)
 
 
 def _estimate_cost(
@@ -416,9 +727,12 @@ def _write_sidecar(json_path: Path, params: dict) -> None:
     """Best-effort: write a params sidecar. Warns but never fails the run --
     the image is already on disk; the sidecar is reproducibility metadata."""
     try:
-        with json_path.open("w", encoding="utf-8") as fh:
+        fd = os.open(json_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            os.fchmod(fh.fileno(), 0o600)
             json.dump(params, fh, indent=2, sort_keys=True, allow_nan=False)
             fh.write("\n")
+        os.chmod(json_path, 0o600)
     except OSError as e:
         print(f"warning: could not write sidecar {json_path}: {e}", file=sys.stderr)
         return
@@ -457,7 +771,9 @@ def _generate_one(client, prompt: str, args, paths: List[Path]) -> int:
 _REPLAY_FIELDS = (
     "model", "prompt", "format", "width", "height", "aspect_ratio",
     "resolution", "negative_prompt", "seed", "cfg_scale", "steps",
-    "style_preset", "variants", "safe_mode", "hide_watermark",
+    "style_preset", "style_references", "variants", "safe_mode",
+    "hide_watermark", "embed_exif_metadata", "lora_strength", "quality",
+    "enable_web_search", "disable_prompt_optimization_thinking", "enhance_prompt",
 )
 
 
@@ -503,7 +819,7 @@ def _apply_replay(args):
 
     merged = argparse.Namespace(**vars(args))
     for f in _REPLAY_FIELDS:
-        cur = getattr(args, f)
+        cur = getattr(args, f, None)
         if f == "prompt":
             explicit = bool(cur and cur.strip())
         else:
@@ -597,6 +913,15 @@ def _run(args) -> int:
         )
         return 2
 
+    try:
+        validate_lora_strength(getattr(args, "lora_strength", None))
+    except ValueError:
+        print(
+            "image: --lora-strength must be an integer between 0 and 100",
+            file=sys.stderr,
+        )
+        return 2
+
     if args.from_file is None and not (args.prompt and args.prompt.strip()):
         print(
             "image: prompt required (positional prompt or --from-file PATH)",
@@ -618,13 +943,13 @@ def _run(args) -> int:
 def _run_single(client, args) -> int:
     prompt = args.prompt.strip()
     try:
-        price = _fetch_image_price(client, args.model)
+        price = prepare_request(client, args)
     except ValueError as e:
         print(f"image: {e}", file=sys.stderr)
         return 2
     cost = _estimate_cost(price, args.variants)
     desc = f"{args.variants} image" + ("s" if args.variants != 1 else "")
-    _print_estimate(cost, f"{desc}, model={args.model}")
+    _print_estimate(cost, _price_description(args, desc))
     _print_balance_and_remaining(client, cost, show=not args.no_balance)
 
     if _over_budget(cost, args.max_spend):
@@ -656,13 +981,13 @@ def _run_batch(client, args) -> int:
 
     n = len(items)
     try:
-        price = _fetch_image_price(client, args.model)
+        price = prepare_request(client, args)
     except ValueError as e:
         print(f"image: {e}", file=sys.stderr)
         return 2
     cost = _estimate_cost(price, args.variants, n)
     desc = f"{n} prompt" + ("s" if n != 1 else "") + f" x {args.variants}"
-    _print_estimate(cost, f"{desc}, model={args.model}")
+    _print_estimate(cost, _price_description(args, desc))
     _print_balance_and_remaining(client, cost, show=not args.no_balance)
 
     if _over_budget(cost, args.max_spend):

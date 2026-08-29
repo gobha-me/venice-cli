@@ -99,6 +99,32 @@ class TestServerWiring(unittest.TestCase):
         self.assertEqual(creativity["minimum"], 0.0)
         self.assertEqual(creativity["maximum"], 0.02)
 
+    def test_image_wrappers_expose_native_controls(self):
+        from venice.mcp_server import build_server
+
+        class FakeClient:
+            api_key = "fake"
+            base_url = "https://api.venice.ai/api/v1"
+
+        server = build_server(FakeClient(), doc={})
+        image_props = server._tool_manager.get_tool(
+            "venice_image"
+        ).parameters["properties"]
+        for name in (
+            "style_references", "aspect_ratio", "resolution",
+            "embed_exif_metadata", "lora_strength", "quality",
+            "enable_web_search", "disable_prompt_optimization_thinking",
+            "enhance_prompt",
+        ):
+            self.assertIn(name, image_props)
+        edit_props = server._tool_manager.get_tool(
+            "venice_image_edit"
+        ).parameters["properties"]
+        for name in (
+            "quality", "disable_prompt_optimization_thinking", "enhance_prompt"
+        ):
+            self.assertIn(name, edit_props)
+
     def test_retired_upscale_config_returns_error_without_delegating(self):
         from venice.mcp_server import build_server
         from venice.commands import _mcp

@@ -49,6 +49,7 @@ from . import _models
 from . import _compact
 from . import _openai
 from . import _shared
+from . import image as _image
 from . import upscale as _upscale
 from . import video as _video
 from .models import MODEL_TYPES
@@ -1892,6 +1893,50 @@ _IMAGE_SCHEMA = _obj(
         "cfg_scale": _p("number"),
         "steps": _p("integer"),
         "style_preset": _p("string"),
+        "style_references": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "image": _p(
+                        "string",
+                        "Authorized local path, HTTP(S) URL, data URL, or raw base64.",
+                    ),
+                    "strength": {
+                        "type": "number",
+                        "minimum": 0.1,
+                        "maximum": 1.0,
+                        "description": "Optional model-supported strength.",
+                    },
+                },
+                "required": ["image"],
+                "additionalProperties": False,
+            },
+            "description": (
+                "Style references, bounded by the selected live model catalog."
+            ),
+        },
+        "aspect_ratio": _p("string"),
+        "resolution": _p("string"),
+        "embed_exif_metadata": _p("boolean"),
+        "lora_strength": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "description": "LoRA strength.",
+        },
+        "quality": {
+            "type": "string",
+            "enum": list(_image.QUALITY_CHOICES),
+            "description": "Model-supported quality.",
+        },
+        "enable_web_search": _p(
+            "boolean", "Allow supported models to use paid web search."
+        ),
+        "disable_prompt_optimization_thinking": _p("boolean"),
+        "enhance_prompt": _p(
+            "boolean", "Rewrite the prompt before generation; may add cost."
+        ),
         "safe_mode": _p("boolean", "Blur adult/NSFW content. Defaults to on; set false to disable."),
         "hide_watermark": _p("boolean", "Omit the Venice watermark. Defaults to off; set true to hide it."),
     },
@@ -2130,12 +2175,22 @@ _IMAGE_EDIT_SCHEMA = _obj(
         "layer_paths": {
             "type": "array",
             "items": {"type": "string"},
-            "description": "One or two local mask/overlay images (routes to /image/multi-edit).",
+            "description": (
+                "Local mask/overlay images (routes to /image/multi-edit); "
+                "the live model catalog supplies the count limit."
+            ),
         },
         "model": _p("string", "Edit model id (default: the server picks one)."),
         "aspect_ratio": _p("string", "Output aspect ratio ('auto' infers from the input)."),
         "resolution": _p("string", "Output resolution tier, e.g. 1K/2K/4K."),
         "output_format": _p("string", "Output image format: png, jpeg, or webp."),
+        "quality": {
+            "type": "string",
+            "enum": list(_image.QUALITY_CHOICES),
+            "description": "Multi-edit quality.",
+        },
+        "disable_prompt_optimization_thinking": _p("boolean"),
+        "enhance_prompt": _p("boolean", "Rewrite the edit prompt before generation."),
         "safe_mode": _p("boolean", "Blur adult/NSFW content. Defaults to on; set false to disable."),
     },
     required=["prompt"],
@@ -2710,7 +2765,8 @@ def builtin_tools(
                 "output_dir": output_dir,
             }
             if impl_name in {
-                "upscale_tool", "bg_remove_tool", "video_tool", "image_edit_tool"
+                "image_tool", "upscale_tool", "bg_remove_tool", "video_tool",
+                "image_edit_tool",
             }:
                 controlled["path_authority"] = media_path_authority
             return impl(client, **controlled, **{**defaults, **_clean(arguments)})

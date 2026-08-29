@@ -2701,6 +2701,30 @@ class TestAsyncJobSchemas(unittest.TestCase):
         for name in ("video_url", "audio_url", "reference_video_duration"):
             self.assertIn(name, props)
 
+    def test_image_schemas_expose_native_controls(self):
+        image_props = _agent._IMAGE_SCHEMA["properties"]
+        for name in (
+            "style_references", "embed_exif_metadata", "lora_strength", "quality",
+            "enable_web_search", "disable_prompt_optimization_thinking",
+            "enhance_prompt", "aspect_ratio", "resolution",
+        ):
+            self.assertIn(name, image_props)
+        refs = image_props["style_references"]
+        self.assertEqual(refs["type"], "array")
+        self.assertEqual(
+            set(refs["items"]["properties"]), {"image", "strength"}
+        )
+        self.assertEqual(refs["items"]["properties"]["strength"]["minimum"], 0.1)
+        self.assertEqual(refs["items"]["properties"]["strength"]["maximum"], 1.0)
+        self.assertEqual(image_props["lora_strength"]["minimum"], 0)
+        self.assertEqual(image_props["lora_strength"]["maximum"], 100)
+        self.assertEqual(image_props["quality"]["enum"], ["low", "medium", "high"])
+        edit_props = _agent._IMAGE_EDIT_SCHEMA["properties"]
+        for name in (
+            "quality", "disable_prompt_optimization_thinking", "enhance_prompt"
+        ):
+            self.assertIn(name, edit_props)
+
     def test_job_schemas_require_handle_fields_and_hide_controls(self):
         for schema in (_agent._JOB_STATUS_SCHEMA, _agent._JOB_RESULT_SCHEMA):
             self.assertEqual(schema.get("required"), ["queue_id", "type", "model"])
@@ -2732,9 +2756,11 @@ class TestMediaPathAuthorityWiring(unittest.TestCase):
             _agent._mcp, "vision_tool", return_value={"status": "ok"}
         ) as vision, mock.patch.object(
             _agent._mcp, "upscale_tool", return_value={"status": "ok"}
-        ) as upscale:
+        ) as upscale, mock.patch.object(
+            _agent._mcp, "image_tool", return_value={"status": "ok"}
+        ) as image:
             tools = {tool.name: tool for tool in _agent.builtin_tools(
-                object(), only={"venice_vision", "venice_upscale"},
+                object(), only={"venice_vision", "venice_upscale", "venice_image"},
                 media_path_authority=authority,
             )}
             tools["venice_vision"].invoke({
@@ -2744,8 +2770,13 @@ class TestMediaPathAuthorityWiring(unittest.TestCase):
                 {"input_path": "frame.png", "path_authority": "model-controlled"},
                 confirm=True,
             )
+            tools["venice_image"].invoke(
+                {"prompt": "p", "path_authority": "model-controlled"},
+                confirm=True,
+            )
         self.assertIs(vision.call_args.kwargs["path_authority"], authority)
         self.assertIs(upscale.call_args.kwargs["path_authority"], authority)
+        self.assertIs(image.call_args.kwargs["path_authority"], authority)
 
     def test_upscale_schema_matches_current_contract(self):
         tool = next(t for t in _agent.builtin_tools(
@@ -2885,10 +2916,22 @@ class TestConfigDefaults(unittest.TestCase):
         captured = {}
 
         def image_tool(client, prompt=None, *, hide_watermark=None, steps=None,
-                       safe_mode=None, confirm=False, max_spend=None,
+                       safe_mode=None, style_references=None,
+                       embed_exif_metadata=None, quality=None,
+                       enable_web_search=None,
+                       disable_prompt_optimization_thinking=None,
+                       enhance_prompt=None, confirm=False, max_spend=None,
                        output_dir=None, **kw):
             captured.update(hide_watermark=hide_watermark, steps=steps,
-                            safe_mode=safe_mode)
+                            safe_mode=safe_mode,
+                            style_references=style_references,
+                            embed_exif_metadata=embed_exif_metadata,
+                            quality=quality,
+                            enable_web_search=enable_web_search,
+                            disable_prompt_optimization_thinking=(
+                                disable_prompt_optimization_thinking
+                            ),
+                            enhance_prompt=enhance_prompt)
             captured.update(kw)
             return {"status": "ok"}
 
@@ -2936,6 +2979,29 @@ class TestConfigDefaults(unittest.TestCase):
         tool.invoke({"prompt": "p"})
         self.assertIs(captured["hide_watermark"], True)  # _as_bool
         self.assertEqual(captured["steps"], 12)          # int
+
+    def test_native_image_config_is_coerced_and_injected(self):
+        captured, spy = self._spy()
+        doc = {"defaults": {"image": {
+            "style_references": {
+                "image": "https://x.test/style.png", "strength": 0.5
+            },
+            "embed_exif_metadata": "false",
+            "quality": "high",
+            "enable_web_search": "true",
+            "disable_prompt_optimization_thinking": "false",
+            "enhance_prompt": "true",
+        }}}
+        tool = self._tool(spy, doc)
+        tool.invoke({"prompt": "p"})
+        self.assertEqual(captured["style_references"], [{
+            "image": "https://x.test/style.png", "strength": 0.5
+        }])
+        self.assertIs(captured["embed_exif_metadata"], False)
+        self.assertEqual(captured["quality"], "high")
+        self.assertIs(captured["enable_web_search"], True)
+        self.assertIs(captured["disable_prompt_optimization_thinking"], False)
+        self.assertIs(captured["enhance_prompt"], True)
 
     def test_safety_flags_flow_through_and_model_wins(self):
         # #61: safe_mode/hide_watermark are now on _IMAGE_SCHEMA, so a model-supplied
