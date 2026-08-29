@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import sys
 import time
 from pathlib import Path
@@ -28,6 +29,13 @@ VIDEO_EXT_BY_CTYPE = {
     "video/webm": ".webm",
     "video/quicktime": ".mov",
 }
+
+
+def _status_retry_hint(queue_id: str, model: str) -> str:
+    return (
+        f"venice video-status {shlex.quote(queue_id)} "
+        f"--model {shlex.quote(model)}"
+    )
 
 # Media inputs (issue #18): a value is passed through when it is already an
 # http(s)/data URL, otherwise it is treated as a local file, size-checked, and
@@ -474,7 +482,8 @@ def _run_generate(args) -> int:
             except _video_jobs.VideoJobStoreError as e:
                 print(
                     f"video: queued as {queue_id}, but could not save private "
-                    f"retrieval metadata: {e}",
+                    f"retrieval metadata: {e}; check later with: "
+                    f"{_status_retry_hint(queue_id, model)}",
                     file=sys.stderr,
                 )
                 return 9
@@ -524,7 +533,11 @@ def _run_status(args) -> int:
         try:
             download_url = _video_jobs.lookup(args.queue_id, model)
         except _video_jobs.VideoJobStoreError as e:
-            print(f"video-status: cannot read private retrieval metadata: {e}", file=sys.stderr)
+            print(
+                "video-status: cannot read private retrieval metadata: "
+                f"{e}; retry with: {_status_retry_hint(args.queue_id, model)}",
+                file=sys.stderr,
+            )
             return 9
     return _retrieve_and_save(
         client, model, args.queue_id, download_url,
@@ -577,6 +590,7 @@ def _retrieve_and_save(
     poll_interval, max_wait, no_cleanup,
 ) -> int:
     start = time.monotonic()
+    retry_hint = _status_retry_hint(queue_id, model)
     staging_hint = _queue.resolve_output_path(
         out_arg, queue_id, ".mp4", prefix="venice-video"
     )
@@ -592,22 +606,21 @@ def _retrieve_and_save(
             staged_path = payload
     except VeniceAPIError as e:
         sys.stderr.write("\n")
-        print(f"retrieve failed: {e}", file=sys.stderr)
+        print(
+            f"retrieve failed: {e}; check later with: {retry_hint}",
+            file=sys.stderr,
+        )
         return _queue.status_to_exit(e)
     except TimeoutError as e:
         sys.stderr.write("\n")
-        print(
-            f"{e}; check later with: venice video-status {queue_id} --model {model}",
-            file=sys.stderr,
-        )
+        print(f"{e}; check later with: {retry_hint}", file=sys.stderr)
         return 7
     except NoVideoStream:
         sys.stderr.write("\n")
         print(
             "video: job completed but returned no video stream and no "
             "private download metadata is known; for a pre-v0.83.10 job, re-run "
-            f"`venice video-status {queue_id} --model {model} "
-            "--download-url <url>`.",
+            f"`{retry_hint} --download-url <url>`.",
             file=sys.stderr,
         )
         return 2
@@ -625,7 +638,10 @@ def _retrieve_and_save(
         else:
             out_path.write_bytes(payload)
     except OSError as e:
-        print(f"could not write {out_path}: {e}", file=sys.stderr)
+        print(
+            f"could not write {out_path}: {e}; retry with: {retry_hint}",
+            file=sys.stderr,
+        )
         return 9
     finally:
         if staged_path is not None:

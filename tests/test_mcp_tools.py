@@ -246,6 +246,22 @@ class TestSfxTool(_ToolTest):
         self.assertEqual(os.listdir(self.td), [])            # nothing written
         self.assertTrue(all("/audio/retrieve" not in u for u in seen))
 
+    def test_malformed_retrieve_returns_retryable_error(self):
+        responses = _seq(
+            FakeResp(200, b'{"quote": 0.0027}'),
+            FakeResp(200, b'{"queue_id":"sfxretry123"}'),
+            FakeResp(200, b"{broken", "application/json"),
+        )
+        with mock.patch(
+            "venice.client.urllib.request.urlopen", responses
+        ), self.stdout_guard():
+            res = _mcp.sfx_tool(
+                _client(), "thunder", output_dir=self.td, confirm=True
+            )
+        self.assertEqual(res["status"], "error")
+        self.assertIn("sfxretry123", res["message"])
+        self.assertIn("retry venice_job_result", res["message"])
+
 
 class TestMusicTool(_ToolTest):
     def test_ok_queue_poll_save(self):

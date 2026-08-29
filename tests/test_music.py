@@ -9,6 +9,7 @@ import contextlib
 import io
 import json
 import os
+import socket
 import sys
 import tempfile
 import unittest
@@ -318,6 +319,34 @@ class TestMusicFlow(unittest.TestCase):
         self.assertEqual(rc, 0)
         writes = "".join(c.args[0] for c in out.write.call_args_list)
         self.assertIn("BGMUSIC99", writes)
+
+    def test_transport_timeout_keeps_queue_recovery_hint_and_exit(self):
+        from venice.commands import music
+
+        responses = iter([
+            FakeResp(200, _models_payload(), "application/json"),
+            _quote(),
+            _queue("musicqueue123456"),
+        ])
+
+        def urlopen(req, timeout=None):
+            try:
+                return next(responses)
+            except StopIteration:
+                raise socket.timeout("slow retrieve")
+
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.client.urllib.request.urlopen", urlopen), \
+             contextlib.redirect_stderr(err):
+            rc = music._run_generate(_build_args())
+
+        self.assertEqual(rc, 8)
+        self.assertIn(
+            "venice music-status musicqueue123456 --model elevenlabs-music",
+            err.getvalue(),
+        )
+        self.assertNotIn("Traceback", err.getvalue())
 
     def test_config_model_reaches_the_body_and_the_status_hint(self):
         """#57 Class C1. Mirror of the sfx guard: `defaults.music.model` must

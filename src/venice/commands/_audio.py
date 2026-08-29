@@ -80,7 +80,10 @@ def retrieve_and_save(
         )
     except VeniceAPIError as e:
         sys.stderr.write("\n")
-        print(f"retrieve failed: {e}", file=sys.stderr)
+        print(
+            f"retrieve failed: {e}; check later with: {retry_hint}",
+            file=sys.stderr,
+        )
         return _queue.status_to_exit(e)
     except TimeoutError as e:
         sys.stderr.write("\n")
@@ -96,7 +99,10 @@ def retrieve_and_save(
     try:
         out_path.write_bytes(audio)
     except OSError as e:
-        print(f"could not write {out_path}: {e}", file=sys.stderr)
+        print(
+            f"could not write {out_path}: {e}; retry with: {retry_hint}",
+            file=sys.stderr,
+        )
         return 9
 
     abs_path = out_path.resolve()

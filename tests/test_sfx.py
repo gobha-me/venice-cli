@@ -139,6 +139,34 @@ class TestSfxFullFlow(unittest.TestCase):
         writes = "".join(c.args[0] for c in out.write.call_args_list)
         self.assertIn("BGID12345", writes)
 
+    def test_malformed_retrieve_keeps_queue_recovery_hint(self):
+        from venice.commands import sfx
+
+        responses = iter([
+            FakeResp(200, b'{"quote": 0.0027}', "application/json"),
+            FakeResp(
+                200,
+                b'{"queue_id":"abcdef1234567890","status":"QUEUED"}',
+                "application/json",
+            ),
+            FakeResp(200, b"{broken", "application/json"),
+        ])
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch(
+                 "venice.client.urllib.request.urlopen",
+                 lambda *a, **kw: next(responses),
+             ), contextlib.redirect_stderr(err):
+            rc = sfx._run_generate(_build_args())
+
+        self.assertEqual(rc, 2)
+        self.assertIn(
+            "venice sfx-status abcdef1234567890 "
+            "--model elevenlabs-sound-effects-v2",
+            err.getvalue(),
+        )
+        self.assertNotIn("Traceback", err.getvalue())
+
     def test_master_flag_masters_saved_file(self):
         from venice.commands import sfx
 
