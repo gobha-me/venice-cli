@@ -1007,7 +1007,6 @@ class TestClassCParity(unittest.TestCase):
         cases = [
             ("image", image, ["image", "p"], "format", "gif"),
             ("sfx", sfx, ["sfx", "p"], "model", "bogus"),
-            ("video", video, ["video", "p"], "duration", "99s"),
             # #57 C2/D: the first int choice set, and the first choices row
             # reached through _GLOBAL_MAP rather than a section.
             ("master", master, ["master", "in.wav"], "bit_depth", 8),

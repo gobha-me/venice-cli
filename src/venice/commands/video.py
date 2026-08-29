@@ -7,8 +7,9 @@ models return a `download_url` at queue time -- for those, `/video/retrieve`
 reports JSON status only and the mp4 is fetched from that presigned URL once
 COMPLETED. Non-VPS models stream `video/mp4` straight from `/video/retrieve`.
 
-A free `/models?type=video` catalog GET (via the lean client) validates
-`--model` and resolves a default before the paid quote -- mirrors `venice chat`.
+A free `/models?type=video` catalog GET (via the lean client) resolves the model
+and validates its advertised duration/resolution/aspect-ratio constraints before
+the paid quote.
 """
 from __future__ import annotations
 
@@ -47,23 +48,14 @@ MEDIA_LIMITS = {
     "audio": 15 * 1024 * 1024,  # audio inputs <= 15 MB
 }
 DEFAULT_MIME = {"image": "image/png", "video": "video/mp4", "audio": "audio/mpeg"}
-REF_IMAGE_MAX = 9
-REF_VIDEO_MAX = 3
-REF_AUDIO_MAX = 3
+REF_IMAGE_MAX = 30
+REF_VIDEO_MAX = 10
+REF_AUDIO_MAX = 10
 SCENE_MAX = 4
 ELEMENTS_MAX = 4
 ELEMENT_REF_IMAGE_MAX = 3
 
 DEFAULT_VIDEO_DURATION = "5s"
-DURATION_CHOICES = (
-    "2s", "3s", "4s", "5s", "6s", "7s", "8s", "9s", "10s", "11s", "12s", "13s",
-    "14s", "15s", "16s", "18s", "20s", "25s", "30s", "1 gen", "Auto",
-)
-RESOLUTION_CHOICES = (
-    "256p", "360p", "480p", "540p", "580p", "720p", "1080p", "1440p", "2160p",
-    "4k", "2x", "4x", "true_1080p",
-)
-ASPECT_CHOICES = ("1:1", "2:3", "3:2", "3:4", "4:3", "9:16", "16:9", "21:9")
 
 
 def register(subparsers) -> None:
@@ -84,13 +76,18 @@ def register(subparsers) -> None:
         help="Video model id (default: the catalog's 'default'-trait model).",
     )
     p.add_argument(
-        "--duration", choices=DURATION_CHOICES, default=None,
-        help=f"Clip length (default {DEFAULT_VIDEO_DURATION}). Config-backable "
-        "via defaults.video.duration; an explicit --duration still wins.",
+        "--duration", default=None,
+        help=f"Clip length (default {DEFAULT_VIDEO_DURATION}); validated against "
+        "the selected model's live catalog constraints. Config-backable via "
+        "defaults.video.duration; an explicit --duration still wins.",
     )
-    p.add_argument("--resolution", choices=RESOLUTION_CHOICES, default=None)
     p.add_argument(
-        "--aspect-ratio", choices=ASPECT_CHOICES, default=None, dest="aspect_ratio"
+        "--resolution", default=None,
+        help="Output resolution; validated against the selected model's live catalog.",
+    )
+    p.add_argument(
+        "--aspect-ratio", default=None, dest="aspect_ratio",
+        help="Output aspect ratio; validated against the selected model's live catalog.",
     )
     p.add_argument("--negative-prompt", default=None, dest="negative_prompt")
     # Tri-stated so `defaults.video.no_audio` can reach the dest (#57 Class B).
@@ -215,8 +212,8 @@ def register_status(subparsers) -> None:
 
 
 def _shared_params(args) -> dict:
-    """Optional params accepted by both /video/quote and /video/queue."""
-    extra: dict = {}
+    """Params accepted by both /video/quote and /video/queue."""
+    extra: dict = {"duration": args.duration}
     if args.resolution:
         extra["resolution"] = args.resolution
     if args.aspect_ratio:
@@ -224,6 +221,82 @@ def _shared_params(args) -> dict:
     if args.no_audio:
         extra["audio"] = False
     return extra
+
+
+def _constraint_values(constraints: dict, field: str, model: str) -> Tuple[str, ...]:
+    values = constraints.get(field)
+    if (
+        not isinstance(values, list)
+        or any(not isinstance(value, str) or not value.strip() for value in values)
+    ):
+        raise ValueError(
+            f"live video catalog entry for {model!r} has invalid "
+            f"constraints.{field}"
+        )
+    return tuple(values)
+
+
+def validate_model_options(
+    models,
+    model: str,
+    *,
+    duration: str,
+    resolution: Optional[str] = None,
+    aspect_ratio: Optional[str] = None,
+) -> None:
+    """Validate request choices against one selected live video catalog entry.
+
+    Unlike the generic model resolver, generation cannot proceed with an explicit
+    model when the catalog is unavailable: the catalog is the authority for these
+    model-specific values, and guessing could reach a paid request with stale
+    options.
+    """
+    if models is None:
+        raise ValueError("could not fetch the live video catalog")
+
+    entry = next(
+        (
+            item
+            for item in models
+            if isinstance(item, dict) and item.get("id") == model
+        ),
+        None,
+    )
+    if entry is None:
+        raise ValueError(f"model {model!r} is not in the live video catalog")
+    spec = entry.get("model_spec")
+    constraints = spec.get("constraints") if isinstance(spec, dict) else None
+    if not isinstance(constraints, dict):
+        raise ValueError(
+            f"live video catalog entry for {model!r} has no constraints object"
+        )
+
+    available = {
+        "duration": _constraint_values(constraints, "durations", model),
+        "resolution": _constraint_values(constraints, "resolutions", model),
+        "aspect ratio": _constraint_values(constraints, "aspect_ratios", model),
+    }
+    requested = {
+        "duration": duration,
+        "resolution": resolution,
+        "aspect ratio": aspect_ratio,
+    }
+    for label, value in requested.items():
+        if value is None:
+            if label == "duration":
+                raise ValueError("duration must be a non-empty string")
+            continue
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{label} must be a non-empty string")
+        choices = available[label]
+        if value not in choices:
+            if choices:
+                suffix = "choose from " + ", ".join(choices)
+            else:
+                suffix = f"{model!r} advertises no {label} values"
+            raise ValueError(
+                f"{label} {value!r} is not supported by {model!r}; {suffix}"
+            )
 
 
 def _is_url(value: str) -> bool:
@@ -409,6 +482,13 @@ def _run_generate(args) -> int:
         return rc
 
     models = _models.catalog(client, "video")
+    if models is None:
+        print(
+            "video: could not fetch the live video catalog; cannot validate "
+            "model-specific options",
+            file=sys.stderr,
+        )
+        return 2
     model, rc = _models.resolve_model(
         args.model, models, label="video", noun="video model",
         config_key="defaults.video.model",
@@ -416,12 +496,24 @@ def _run_generate(args) -> int:
     if rc is not None:
         return rc
 
+    try:
+        validate_model_options(
+            models,
+            model,
+            duration=args.duration,
+            resolution=args.resolution,
+            aspect_ratio=args.aspect_ratio,
+        )
+    except ValueError as e:
+        print(f"video: {e}", file=sys.stderr)
+        return 2
+
     quote_media, queue_media, rc = _collect_media(args)
     if rc is not None:
         return rc
 
     extra = _shared_params(args)
-    quote_body = {"model": model, "duration": args.duration}
+    quote_body = {"model": model}
     quote_body.update(extra)
     quote_body.update(quote_media)
     try:
@@ -457,7 +549,7 @@ def _run_generate(args) -> int:
         if rc is not None:
             return rc
 
-    queue_body = {"model": model, "prompt": args.prompt, "duration": args.duration}
+    queue_body = {"model": model, "prompt": args.prompt}
     queue_body.update(extra)
     if args.negative_prompt:
         queue_body["negative_prompt"] = args.negative_prompt

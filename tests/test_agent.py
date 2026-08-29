@@ -2687,6 +2687,20 @@ class TestAsyncJobSchemas(unittest.TestCase):
             self.assertIn("background", props)
             self.assertEqual(props["background"]["type"], "boolean")
 
+    def test_video_schema_exposes_bounded_reference_inputs(self):
+        props = _agent._VIDEO_SCHEMA["properties"]
+        expected = {
+            "reference_image_urls": _agent._video.REF_IMAGE_MAX,
+            "reference_video_urls": _agent._video.REF_VIDEO_MAX,
+            "reference_audio_urls": _agent._video.REF_AUDIO_MAX,
+            "scene_image_urls": _agent._video.SCENE_MAX,
+        }
+        for name, maximum in expected.items():
+            self.assertEqual(props[name]["type"], "array")
+            self.assertEqual(props[name]["maxItems"], maximum)
+        for name in ("video_url", "audio_url", "reference_video_duration"):
+            self.assertIn(name, props)
+
     def test_job_schemas_require_handle_fields_and_hide_controls(self):
         for schema in (_agent._JOB_STATUS_SCHEMA, _agent._JOB_RESULT_SCHEMA):
             self.assertEqual(schema.get("required"), ["queue_id", "type", "model"])

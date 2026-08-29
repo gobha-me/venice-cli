@@ -860,6 +860,7 @@ def video_tool(
         return _err(f"video: invalid max_wait: {e}")
 
     ns = SimpleNamespace(
+        duration=duration,
         image=image_url, end_image=end_image_url, video=video_url,
         audio_input=audio_url, reference_image=reference_image_urls,
         reference_video=reference_video_urls, reference_audio=reference_audio_urls,
@@ -874,6 +875,11 @@ def video_tool(
         return _err(f"video: invalid media input (exit {rc})")
 
     models = _models.catalog(client, "video")
+    if models is None:
+        return _err(
+            "video: could not fetch the live video catalog; cannot validate "
+            "model-specific options"
+        )
     model, rc = _models.resolve_model(
         model, models, label="video", noun="video model",
         config_key="defaults.video.model",
@@ -881,8 +887,19 @@ def video_tool(
     if rc is not None:
         return _err(f"video: could not resolve model (exit {rc})")
 
+    try:
+        _video.validate_model_options(
+            models,
+            model,
+            duration=duration,
+            resolution=resolution,
+            aspect_ratio=aspect_ratio,
+        )
+    except ValueError as e:
+        return _err(f"video: {e}")
+
     extra = _video._shared_params(ns)
-    quote_body = {"model": model, "duration": duration}
+    quote_body = {"model": model}
     quote_body.update(extra)
     quote_body.update(quote_media)
     try:
@@ -898,7 +915,7 @@ def video_tool(
     if gate is not None:
         return gate
 
-    queue_body = {"model": model, "prompt": prompt.strip(), "duration": duration}
+    queue_body = {"model": model, "prompt": prompt.strip()}
     queue_body.update(extra)
     if negative_prompt:
         queue_body["negative_prompt"] = negative_prompt
