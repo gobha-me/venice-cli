@@ -2996,6 +2996,12 @@ class TestToolRegistry(unittest.TestCase):
         desc = spec.parameters["properties"]["format"]["description"]
         self.assertIn("catalog default", desc)
 
+    def test_models_schema_exposes_current_catalog_types(self):
+        spec = _agent.get("venice_models")
+        model_types = spec.parameters["properties"]["type"]["enum"]
+        self.assertIn("asr", model_types)
+        self.assertIn("inpaint", model_types)
+
     def test_every_registry_tool_has_a_category(self):
         # drift guard: a new tool with no/empty category fails here.
         for spec in _agent._REGISTRY:

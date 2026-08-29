@@ -17,6 +17,8 @@ MODEL_TYPES = (
     "tts",
     "embedding",
     "upscale",
+    "asr",
+    "inpaint",
 )
 
 
@@ -61,11 +63,30 @@ def _fetch_type(client, mtype: str) -> List[dict]:
 
 
 def _fetch_all(client) -> dict:
-    return {t: _fetch_type(client, t) for t in MODEL_TYPES}
+    # The API's `all` filter is the forward-compatible catalog surface: every
+    # native model carries its own `type`, including types added after this CLI
+    # release. `code` is different -- it is a convenience filter over text
+    # models, not a ModelResponse type -- so preserve that existing bucket with
+    # one separate request.
+    models = _fetch_type(client, "all")
+    by_type = {t: [] for t in MODEL_TYPES}
+    for model in models:
+        if not isinstance(model, dict):
+            continue
+        model_type = model.get("type")
+        if isinstance(model_type, str) and model_type:
+            by_type.setdefault(model_type, []).append(model)
+    by_type["code"] = _fetch_type(client, "code")
+    return {t: by_type[t] for t in _ordered_types(by_type)}
+
+
+def _ordered_types(by_type: dict) -> List[str]:
+    """Known display order followed by future catalog types, deterministically."""
+    return list(MODEL_TYPES) + sorted(t for t in by_type if t not in MODEL_TYPES)
 
 
 def _print_counts(by_type: dict) -> None:
-    rows = [(t, len(by_type.get(t, []))) for t in MODEL_TYPES]
+    rows = [(t, len(by_type.get(t, []))) for t in _ordered_types(by_type)]
     total = sum(c for _, c in rows)
     width = max(len(t) for t, _ in rows)
     print(f"{'TYPE':<{width}}  COUNT")
@@ -113,10 +134,9 @@ def _print_listing(models: Iterable[dict], detail: bool) -> None:
 
 
 def _find_model(client, slug: str) -> Optional[dict]:
-    for t in MODEL_TYPES:
-        for m in _fetch_type(client, t):
-            if m.get("id") == slug:
-                return m
+    for m in _fetch_type(client, "all"):
+        if isinstance(m, dict) and m.get("id") == slug:
+            return m
     return None
 
 
@@ -153,7 +173,7 @@ def _run(args) -> int:
             return 0
 
         if args.type == "all":
-            for t in MODEL_TYPES:
+            for t in _ordered_types(by_type):
                 print(f"### {t} ({len(by_type[t])})")
                 _print_listing(by_type[t], detail=args.detail)
                 print()

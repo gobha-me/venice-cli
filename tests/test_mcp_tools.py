@@ -1269,13 +1269,37 @@ class TestModelsTool(_ToolTest):
 
     def test_all_returns_map_keyed_by_type(self):
         from venice.commands.models import MODEL_TYPES
-        resps = _seq(*[FakeResp(200, self._catalog(f"{t}-1")) for t in MODEL_TYPES])
+
+        native = [
+            {"id": f"{t}-1", "type": t}
+            for t in MODEL_TYPES if t != "code"
+        ]
+        native.append({"id": "future-1", "type": "future-media"})
+        all_catalog = json.dumps({"data": native}).encode()
+        resps = _seq(
+            FakeResp(200, all_catalog),
+            FakeResp(200, self._catalog("code-1")),
+        )
         with mock.patch("venice.client.urllib.request.urlopen", resps), \
                 self.stdout_guard():
             out = _mcp.models_tool(_client(), type="all")
         self.assertEqual(out["status"], "ok")
-        self.assertEqual(set(out["models"]), set(MODEL_TYPES))
-        self.assertEqual(out["count"], len(MODEL_TYPES))
+        self.assertEqual(set(out["models"]), set(MODEL_TYPES) | {"future-media"})
+        self.assertEqual(out["models"]["asr"], ["asr-1"])
+        self.assertEqual(out["models"]["inpaint"], ["inpaint-1"])
+        self.assertEqual(out["models"]["code"], ["code-1"])
+        self.assertEqual(out["models"]["future-media"], ["future-1"])
+        self.assertEqual(out["count"], len(MODEL_TYPES) + 1)
+
+    def test_lists_current_asr_and_inpaint_types(self):
+        for model_type in ("asr", "inpaint"):
+            with self.subTest(model_type=model_type), \
+                    mock.patch("venice.client.urllib.request.urlopen", _seq(
+                        FakeResp(200, self._catalog(f"{model_type}-1")))), \
+                    self.stdout_guard():
+                out = _mcp.models_tool(_client(), type=model_type)
+            self.assertEqual(out["status"], "ok")
+            self.assertEqual(out["models"], [f"{model_type}-1"])
 
     def test_unknown_type_errors_without_http(self):
         def boom(*a, **kw):
@@ -1349,9 +1373,8 @@ class TestModelDetailsTool(_ToolTest):
         self.assertIsNone(out["voices"])
 
     def test_unknown_model_errors(self):
-        from venice.commands.models import MODEL_TYPES
         empty = json.dumps({"data": []}).encode()
-        resps = _seq(*[FakeResp(200, empty) for _ in MODEL_TYPES])
+        resps = _seq(FakeResp(200, empty))
         with mock.patch("venice.client.urllib.request.urlopen", resps), \
                 self.stdout_guard():
             out = _mcp.model_details_tool(_client(), model="nope")
