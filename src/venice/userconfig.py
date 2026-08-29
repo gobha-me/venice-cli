@@ -599,10 +599,12 @@ _COMMAND_MAP = {
         # #57 Class C: literal now lives in `video._run_generate`. `_run_status`
         # already snapshots/restores args.model around apply_defaults, since
         # there the model is job identity rather than a preference.
-        "duration": ("duration", _one_of("venice.commands.video", "DURATION_CHOICES")),
+        # These three are model-specific and validated against the selected
+        # model's live catalog constraints before quote/spend.
+        "duration": ("duration", str),
         "model": ("model", str),
-        "resolution": ("resolution", _one_of("venice.commands.video", "RESOLUTION_CHOICES")),
-        "aspect_ratio": ("aspect_ratio", _one_of("venice.commands.video", "ASPECT_CHOICES")),
+        "resolution": ("resolution", str),
+        "aspect_ratio": ("aspect_ratio", str),
         "negative_prompt": ("negative_prompt", str),
         # #57 Class B: tri-stated --no-audio/--with-audio and --no-cleanup.
         "no_audio": ("no_audio", _as_bool),

@@ -18,14 +18,25 @@ from venice import config
 from tests.test_client import FakeResp
 
 DEFAULT_MODEL = "seedance-2-0-text-to-video"
+DEFAULT_CONSTRAINTS = {
+    "durations": ["5s", "10s"],
+    "resolutions": ["720p", "1080p"],
+    "aspect_ratios": ["16:9", "9:16"],
+}
 
 
-def _catalog(*ids_with_default):
+def _catalog(*ids_with_default, constraints=None):
     """Build a /models?type=video response; first id carries the 'default' trait."""
     data = []
     for i, mid in enumerate(ids_with_default):
         traits = ["default"] if i == 0 else []
-        data.append({"id": mid, "model_spec": {"traits": traits}})
+        data.append({
+            "id": mid,
+            "model_spec": {
+                "traits": traits,
+                "constraints": constraints or DEFAULT_CONSTRAINTS,
+            },
+        })
     return FakeResp(200, json.dumps({"data": data}).encode(), "application/json")
 
 
@@ -285,6 +296,180 @@ class TestVideoFlow(unittest.TestCase):
         self.assertEqual(rc, 6)
         self.assertEqual(list(Path(".").glob("venice-video-*")), [])
 
+    def test_current_catalog_values_reach_matching_quote_and_queue_bodies(self):
+        from venice.commands import video
+
+        constraints = {
+            "durations": ["1s", "17s", "auto"],
+            "resolutions": ["2K", "768P"],
+            "aspect_ratios": ["adaptive", "9:21"],
+        }
+        seen = {}
+
+        def fake_urlopen(req, timeout=None):
+            if "type=video" in req.full_url:
+                return _catalog(DEFAULT_MODEL, constraints=constraints)
+            if req.full_url.endswith("/video/quote"):
+                seen["quote"] = json.loads(req.data.decode())
+                return FakeResp(200, b'{"quote": 0.5}', "application/json")
+            if req.full_url.endswith("/video/queue"):
+                seen["queue"] = json.loads(req.data.decode())
+                return FakeResp(200, b'{"queue_id":"newvalues123"}', "application/json")
+            raise AssertionError(f"unexpected call: {req.full_url}")
+
+        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.client.urllib.request.urlopen", fake_urlopen), \
+             mock.patch("sys.stdout"):
+            rc = video._run_generate(_build_args(
+                duration="17s", resolution="2K", aspect_ratio="adaptive",
+                background=True,
+            ))
+
+        self.assertEqual(rc, 0)
+        for field in ("duration", "resolution", "aspect_ratio"):
+            self.assertEqual(seen["quote"][field], seen["queue"][field])
+
+    def test_model_specific_rejection_stops_before_quote(self):
+        from venice.commands import video
+
+        calls = []
+
+        def fake_urlopen(req, timeout=None):
+            calls.append(req.full_url)
+            return _catalog(DEFAULT_MODEL)
+
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.client.urllib.request.urlopen", fake_urlopen), \
+             contextlib.redirect_stderr(err):
+            rc = video._run_generate(_build_args(duration="17s"))
+
+        self.assertEqual(rc, 2)
+        self.assertEqual(len(calls), 1)
+        self.assertIn("duration '17s' is not supported", err.getvalue())
+        self.assertIn("5s, 10s", err.getvalue())
+
+    def test_validator_uses_selected_model_and_accepts_current_values(self):
+        from venice.commands import video
+
+        first = {
+            "durations": ["1s", "17s", "auto"],
+            "resolutions": ["2K", "768P"],
+            "aspect_ratios": ["adaptive", "9:21"],
+        }
+        second = {
+            "durations": ["5s"],
+            "resolutions": ["720p"],
+            "aspect_ratios": ["16:9"],
+        }
+        models = [
+            {"id": "current", "model_spec": {"constraints": first}},
+            {"id": "other", "model_spec": {"constraints": second}},
+        ]
+        requests = (
+            {"duration": "1s", "resolution": "2K", "aspect_ratio": "adaptive"},
+            {"duration": "17s", "resolution": "768P", "aspect_ratio": "9:21"},
+            {"duration": "auto"},
+        )
+        for request in requests:
+            with self.subTest(request=request):
+                video.validate_model_options(models, "current", **request)
+        with self.assertRaisesRegex(ValueError, "not supported"):
+            video.validate_model_options(models, "other", **requests[0])
+
+    def test_catalog_outage_stops_before_quote_with_or_without_explicit_model(self):
+        from venice.commands import video
+
+        for model in (None, DEFAULT_MODEL):
+            with self.subTest(model=model):
+                err = io.StringIO()
+                with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+                     mock.patch.object(video._models, "catalog", return_value=None), \
+                     contextlib.redirect_stderr(err):
+                    rc = video._run_generate(_build_args(model=model))
+
+                self.assertEqual(rc, 2)
+                self.assertIn("could not fetch the live video catalog", err.getvalue())
+                self.assertNotIn("pass --model", err.getvalue())
+
+    def test_missing_constraints_and_unsupported_default_fail_loud(self):
+        from venice.commands import video
+
+        cases = [
+            ({"data": [{"id": DEFAULT_MODEL, "model_spec": {"traits": ["default"]}}]},
+             "has no constraints object"),
+            ({"data": [{
+                "id": DEFAULT_MODEL,
+                "model_spec": {
+                    "traits": ["default"],
+                    "constraints": {
+                        "durations": "5s",
+                        "resolutions": [],
+                        "aspect_ratios": [],
+                    },
+                },
+            }]}, "invalid constraints.durations"),
+            ({"data": [{
+                "id": DEFAULT_MODEL,
+                "model_spec": {
+                    "traits": ["default"],
+                    "constraints": {
+                        "durations": ["10s"],
+                        "resolutions": [],
+                        "aspect_ratios": [],
+                    },
+                },
+            }]}, "duration '5s' is not supported"),
+        ]
+        for doc, message in cases:
+            with self.subTest(message=message):
+                calls = []
+
+                def fake_urlopen(req, timeout=None):
+                    calls.append(req.full_url)
+                    return FakeResp(200, json.dumps(doc).encode(), "application/json")
+
+                err = io.StringIO()
+                with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+                     mock.patch("venice.client.urllib.request.urlopen", fake_urlopen), \
+                     contextlib.redirect_stderr(err):
+                    rc = video._run_generate(_build_args())
+                self.assertEqual(rc, 2)
+                self.assertEqual(len(calls), 1)
+                self.assertIn(message, err.getvalue())
+
+    def test_parser_accepts_catalog_driven_values(self):
+        from venice.commands import video
+
+        parser = argparse.ArgumentParser()
+        subparsers = parser.add_subparsers(dest="command")
+        video.register(subparsers)
+        args = parser.parse_args([
+            "video", "p", "--duration", "1s", "--resolution", "768P",
+            "--aspect-ratio", "9:21",
+        ])
+        self.assertEqual((args.duration, args.resolution, args.aspect_ratio),
+                         ("1s", "768P", "9:21"))
+
+    def test_config_value_is_validated_against_selected_model(self):
+        from venice.commands import video
+
+        doc = {"version": 1, "mcpServers": {},
+               "defaults": {"video": {"duration": "99s"}}}
+        calls = []
+
+        def fake_urlopen(req, timeout=None):
+            calls.append(req.full_url)
+            return _catalog(DEFAULT_MODEL)
+
+        with mock.patch("venice.userconfig.load_config", lambda *a, **k: doc), \
+             mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.client.urllib.request.urlopen", fake_urlopen), \
+             contextlib.redirect_stderr(io.StringIO()):
+            rc = video._run_generate(_build_args(duration=None))
+        self.assertEqual(rc, 2)
+        self.assertEqual(len(calls), 1)
+
     def test_missing_api_key_returns_exit_2(self):
         from venice.commands import video
 
@@ -447,6 +632,30 @@ class TestVideoMediaInputs(unittest.TestCase):
         self.assertTrue(refs[0].startswith("data:image/png;base64,"))
         self.assertEqual(base64.b64decode(refs[0].split(",", 1)[1]), b"AAA")
         self.assertEqual(refs[1], "https://x.test/b.png")
+
+    def test_reference_arrays_accept_schema_maxima_and_reject_one_more(self):
+        from venice.commands import video
+
+        cases = (
+            ("reference_image", video.REF_IMAGE_MAX),
+            ("reference_video", video.REF_VIDEO_MAX),
+            ("reference_audio", video.REF_AUDIO_MAX),
+        )
+        for attr, cap in cases:
+            with self.subTest(attr=attr, count=cap):
+                args = _build_args(**{
+                    attr: [f"https://x.test/{i}" for i in range(cap)]
+                })
+                _quote, queue, rc = video._collect_media(args)
+                self.assertIsNone(rc)
+                self.assertEqual(len(queue[f"{attr}_urls"]), cap)
+            with self.subTest(attr=attr, count=cap + 1):
+                args = _build_args(**{
+                    attr: [f"https://x.test/{i}" for i in range(cap + 1)]
+                })
+                with contextlib.redirect_stderr(io.StringIO()):
+                    _quote, _queue_body, rc = video._collect_media(args)
+                self.assertEqual(rc, 2)
 
     def test_reference_video_duration_is_quote_only(self):
         rc, cap = self._run_full(_build_args(

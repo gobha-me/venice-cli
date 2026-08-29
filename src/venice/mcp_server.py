@@ -271,7 +271,9 @@ def build_server(client, doc=None, root=None) -> FastMCP:
         takes an http(s)/data URL or a local path. LONG-RUNNING -- blocks while polling
         up to max_wait seconds (a host may time out). Paid: a quote is fetched first;
         over-cap or dynamic quotes need confirm=true. Omitted args fall back to
-        defaults.video.* in the user's config, then to the built-in duration=5s."""
+        defaults.video.* in the user's config, then to the built-in duration=5s.
+        Duration/resolution/aspect ratio are validated against the selected model's
+        live catalog constraints before quote or spend."""
         return _mcp.video_tool(
             client, prompt,
             **_merged(_defaults["video"], dict(

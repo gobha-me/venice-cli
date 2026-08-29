@@ -39,10 +39,17 @@ def _price_doc(model, usd):
     ).encode()
 
 
-def _video_catalog(model="seedance-2-0-text-to-video"):
+def _video_catalog(model="seedance-2-0-text-to-video", constraints=None):
     """A /models?type=video catalog whose first id carries the 'default' trait."""
+    constraints = constraints or {
+        "durations": ["5s", "10s"],
+        "resolutions": ["720p", "1080p"],
+        "aspect_ratios": ["16:9", "9:16"],
+    }
     return json.dumps(
-        {"data": [{"id": model, "model_spec": {"traits": ["default"]}}]}
+        {"data": [{"id": model, "model_spec": {
+            "traits": ["default"], "constraints": constraints,
+        }}]}
     ).encode()
 
 
@@ -744,6 +751,84 @@ class TestVisionTool(_ToolTest):
 
 
 class TestVideoTool(_ToolTest):
+    def test_catalog_values_reach_matching_quote_and_queue_bodies(self):
+        constraints = {
+            "durations": ["17s", "auto"],
+            "resolutions": ["2K", "768P"],
+            "aspect_ratios": ["adaptive", "9:21"],
+        }
+        seen = {}
+
+        def fake(req, timeout=None):
+            if "type=video" in req.full_url:
+                return FakeResp(200, _video_catalog(constraints=constraints))
+            if req.full_url.endswith("/video/quote"):
+                seen["quote"] = json.loads(req.data.decode())
+                return FakeResp(200, b'{"quote": 0.5}')
+            if req.full_url.endswith("/video/queue"):
+                seen["queue"] = json.loads(req.data.decode())
+                return FakeResp(200, b'{"queue_id":"catalog123"}')
+            raise AssertionError(f"background must not poll: {req.full_url}")
+
+        with mock.patch("venice.client.urllib.request.urlopen", fake), self.stdout_guard():
+            res = _mcp.video_tool(
+                _client(), "animate", duration="17s", resolution="2K",
+                aspect_ratio="adaptive", confirm=True, background=True,
+            )
+        self.assertEqual(res["status"], "queued")
+        for field in ("duration", "resolution", "aspect_ratio"):
+            self.assertEqual(seen["quote"][field], seen["queue"][field])
+
+    def test_unsupported_catalog_value_stops_before_quote(self):
+        seen = []
+
+        def fake(req, timeout=None):
+            seen.append(req.full_url)
+            return FakeResp(200, _video_catalog())
+
+        with mock.patch("venice.client.urllib.request.urlopen", fake), self.stdout_guard():
+            res = _mcp.video_tool(_client(), "animate", duration="17s", confirm=True)
+        self.assertEqual(res["status"], "error")
+        self.assertIn("not supported", res["message"])
+        self.assertEqual(len(seen), 1)
+
+    def test_null_duration_is_rejected_before_quote(self):
+        seen = []
+
+        def fake(req, timeout=None):
+            seen.append(req.full_url)
+            return FakeResp(200, _video_catalog())
+
+        with mock.patch("venice.client.urllib.request.urlopen", fake), self.stdout_guard():
+            res = _mcp.video_tool(_client(), "animate", duration=None, confirm=True)
+        self.assertEqual(res["status"], "error")
+        self.assertIn("duration must be a non-empty string", res["message"])
+        self.assertEqual(len(seen), 1)
+
+    def test_catalog_outage_is_error_even_with_explicit_model(self):
+        with mock.patch.object(_mcp._models, "catalog", return_value=None), \
+             self.stdout_guard():
+            res = _mcp.video_tool(
+                _client(), "animate", model="seedance-2-0-text-to-video",
+                confirm=True,
+            )
+        self.assertEqual(res["status"], "error")
+        self.assertIn("cannot validate model-specific options", res["message"])
+
+    def test_reference_over_schema_max_stops_before_network(self):
+        def boom(*a, **kw):
+            raise AssertionError("invalid reference count must not reach the network")
+
+        refs = [
+            f"https://x.test/{i}.png"
+            for i in range(_mcp._video.REF_IMAGE_MAX + 1)
+        ]
+        with mock.patch("venice.client.urllib.request.urlopen", boom), self.stdout_guard():
+            res = _mcp.video_tool(
+                _client(), "animate", reference_image_urls=refs, confirm=True
+            )
+        self.assertEqual(res["status"], "error")
+
     def test_authorized_local_media_uses_signature_mime_before_catalog(self):
         frame = Path(self.td) / "frame.txt"
         frame.write_bytes(b"\x00\x00\x00\x18ftypisombody")

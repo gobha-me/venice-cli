@@ -50,6 +50,7 @@ from . import _compact
 from . import _openai
 from . import _shared
 from . import upscale as _upscale
+from . import video as _video
 from .models import MODEL_TYPES
 
 
@@ -2149,8 +2150,37 @@ _VIDEO_SCHEMA = _obj(
         "resolution": _p("string", "Output resolution tier, e.g. 720p/1080p."),
         "aspect_ratio": _p("string", "Output aspect ratio, e.g. 16:9."),
         "no_audio": _p("boolean", "Generate silent video (no soundtrack)."),
-        "image_url": _p("string", "URL of a start/reference image (image-to-video)."),
-        "end_image_url": _p("string", "URL of an end frame to interpolate toward."),
+        "image_url": _p("string", "Authorized local path or URL of a start image."),
+        "end_image_url": _p("string", "Authorized local path or URL of an end frame."),
+        "video_url": _p("string", "Authorized local path or URL of an input video."),
+        "audio_url": _p("string", "Authorized local path or URL of input audio."),
+        "reference_image_urls": {
+            "type": "array",
+            "items": {"type": "string"},
+            "maxItems": _video.REF_IMAGE_MAX,
+            "description": "Authorized local paths or URLs of reference images.",
+        },
+        "reference_video_urls": {
+            "type": "array",
+            "items": {"type": "string"},
+            "maxItems": _video.REF_VIDEO_MAX,
+            "description": "Authorized local paths or URLs of reference videos.",
+        },
+        "reference_audio_urls": {
+            "type": "array",
+            "items": {"type": "string"},
+            "maxItems": _video.REF_AUDIO_MAX,
+            "description": "Authorized local paths or URLs of reference audio clips.",
+        },
+        "scene_image_urls": {
+            "type": "array",
+            "items": {"type": "string"},
+            "maxItems": _video.SCENE_MAX,
+            "description": "Authorized local paths or URLs of scene images.",
+        },
+        "reference_video_duration": _p(
+            "number", "Aggregate reference-video duration used for the quote."
+        ),
         "background": _BACKGROUND_PARAM,
     },
     required=["prompt"],

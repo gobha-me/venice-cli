@@ -448,8 +448,9 @@ Text-to-video (and image-to-video, see below) on the same async queue as
 minutes, not seconds, so it polls less often and waits longer by default
 (`--poll-interval` 5s, `--max-wait` 900s -- both config-backable via
 `defaults.video.*`). `--model` defaults to the catalog's
-`default`-trait video model; available durations, resolutions, aspect ratios,
-and the media-input modes below all vary by model.
+`default`-trait video model. Duration, resolution, and aspect ratio are checked
+against that selected model's live catalog constraints before the quote;
+media-input support also varies by model.
 
 ```sh
 # Quote only -- no spend.
@@ -480,11 +481,11 @@ local files are read, size-checked, and encoded to a `data:` URL for you.
 venice video "slow zoom out from the figure" --image hero.png --yes
 venice video "morph A into B" --image a.png --end-image b.png --yes
 
-# Reference images for character/style consistency (repeatable, up to 9).
+# Reference images for character/style consistency (repeatable, up to 30).
 venice video "the same knight, new scene" \
   --reference-image knight1.png --reference-image knight2.png --yes
 
-# Video-to-video / upscale, and reference videos (repeatable, up to 3). The
+# Video-to-video / upscale, and reference videos (repeatable, up to 10). The
 # aggregate reference-video duration feeds the *quote* so R2V pricing is right.
 venice video "restyle this clip" --video source.mp4 \
   --reference-video ref.mp4 --reference-video-duration 5 --yes
@@ -498,8 +499,8 @@ venice video "@Element1 greets @Element2 at @Image1" \
 ```
 
 Full media flags: `--image`, `--end-image`, `--video`, `--audio` (background
-music, distinct from `--no-audio`), `--reference-image` (≤9),
-`--reference-video` (≤3), `--reference-audio` (≤3), `--scene-image` (≤4),
+music, distinct from `--no-audio`), `--reference-image` (≤30),
+`--reference-video` (≤10), `--reference-audio` (≤10), `--scene-image` (≤4),
 `--reference-video-duration`, and `--element` (JSON, ≤4). Image/reference
 inputs condition generation and are sent only on `/video/queue`; `--video` and
 `--reference-video-duration` also reach `/video/quote` because they change the
@@ -1935,14 +1936,17 @@ their sections apply only on the command line.
 
 **Any** config value whose flag has a fixed set of choices is validated against
 that set — `defaults.image.format`,
-`defaults.sfx.model`, `defaults.video.{duration,resolution,aspect_ratio}`,
+`defaults.sfx.model`,
 `defaults.image_edit.{aspect_ratio,output_format}`, `defaults.chat.web_search`,
 `defaults.bit_depth` and `defaults.contact_sheet.engine`.
 An unrecognized value is reported on stderr, naming the legal values exactly as
 `--flag` would, and skipped — so the command falls back to its built-in default
 rather than sending something the API will reject. This applies on the CLI and on
 the agent-tool path alike; config must never be able to set a value the command
-line would refuse.
+line would refuse. Video duration, resolution, and aspect ratio are different:
+their legal values vary by model, so
+`defaults.video.{duration,resolution,aspect_ratio}` are validated against the
+selected model's live catalog entry before any quote or paid request.
 
 The **API key is never stored here** — it stays in
 `~/.config/venice/credentials`. Unknown keys are preserved on write, so the
