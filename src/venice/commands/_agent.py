@@ -2782,6 +2782,7 @@ def supports_function_calling(models, model_id) -> Optional[bool]:
 # The loop
 # --------------------------------------------------------------------------- #
 _REASONING_FIELDS = ("reasoning_content", "reasoning_details", "reasoning")
+_THOUGHT_SIGNATURE_FIELD = "thought_signature"
 
 
 def _message_field(msg, name):
@@ -2816,8 +2817,10 @@ def _assistant_dict(msg) -> dict:
     Keep content and exact tool-call ids plus one deliberately allowlisted reasoning
     extension.  Compatible providers use three aliases; when a response unexpectedly
     carries more than one, preserve the first in ``_REASONING_FIELDS`` order rather
-    than sending conflicting thinking payloads back on the next request.  Do not use a
-    whole-message ``model_dump()``: response-only metadata can be rejected on replay.
+    than sending conflicting thinking payloads back on the next request.  A Gemini
+    ``thought_signature`` is independent of those aliases and must be passed back
+    exactly when present.  Do not use a whole-message ``model_dump()``: response-only
+    metadata can be rejected on replay.
     """
     d = {"role": "assistant", "content": (_message_field(msg, "content") or "")}
     for field in _REASONING_FIELDS:
@@ -2825,6 +2828,9 @@ def _assistant_dict(msg) -> dict:
         if value is not None:
             d[field] = _request_value(value)
             break
+    signature = _message_field(msg, _THOUGHT_SIGNATURE_FIELD)
+    if signature is not None:
+        d[_THOUGHT_SIGNATURE_FIELD] = _request_value(signature)
     tcs = _message_field(msg, "tool_calls")
     if tcs:
         d["tool_calls"] = [
