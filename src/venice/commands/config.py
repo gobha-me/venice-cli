@@ -12,7 +12,7 @@ exits 2 (the intermediate parser keeps its own default handler).
 import json
 import sys
 
-from .. import userconfig
+from .. import _numeric, userconfig
 
 
 def register(subparsers) -> None:
@@ -126,8 +126,12 @@ def _summary(entry) -> str:
 def _coerce_value(s: str):
     """JSON-parse a `set` value so numbers/bools/null get real types; fall back
     to the raw string for barewords like a model id."""
+    if s.strip().lower() in (
+        "nan", "infinity", "+infinity", "-infinity", "inf", "+inf", "-inf",
+    ):
+        raise ValueError("non-finite numbers are not permitted")
     try:
-        return json.loads(s)
+        return json.loads(s, parse_constant=_numeric.reject_json_constant)
     except ValueError:
         return s
 
@@ -176,7 +180,7 @@ def _run_add(args) -> int:
     userconfig.mcp_add(doc, args.name, entry)
     try:
         path = userconfig.save_config(doc)
-    except OSError as e:
+    except (OSError, ValueError) as e:
         print(f"config add: cannot write config: {e}", file=sys.stderr)
         return 9
     print(f"added MCP server {args.name!r} to {path}")
@@ -187,7 +191,7 @@ def _run_list(args) -> int:
     doc = userconfig.load_config()
     servers = userconfig.mcp_map(doc)
     if args.json:
-        print(json.dumps(servers, indent=2, sort_keys=True))
+        print(json.dumps(servers, indent=2, sort_keys=True, allow_nan=False))
         return 0
     if not servers:
         print("(no MCP servers registered)")
@@ -210,7 +214,7 @@ def _run_remove(args) -> int:
         return 2
     try:
         userconfig.save_config(doc)
-    except OSError as e:
+    except (OSError, ValueError) as e:
         print(f"config remove: cannot write config: {e}", file=sys.stderr)
         return 9
     print(f"removed MCP server {args.name!r}")
@@ -224,9 +228,9 @@ def _run_show(args) -> int:
         if entry is None:
             print(f"config show: no MCP server named {args.name!r}", file=sys.stderr)
             return 2
-        print(json.dumps(entry, indent=2, sort_keys=True))
+        print(json.dumps(entry, indent=2, sort_keys=True, allow_nan=False))
         return 0
-    print(json.dumps(doc, indent=2, sort_keys=True))
+    print(json.dumps(doc, indent=2, sort_keys=True, allow_nan=False))
     return 0
 
 
@@ -243,12 +247,16 @@ def _run_get(args) -> int:
     if isinstance(val, str):
         print(val)
     else:
-        print(json.dumps(val, indent=2, sort_keys=True))
+        print(json.dumps(val, indent=2, sort_keys=True, allow_nan=False))
     return 0
 
 
 def _run_set(args) -> int:
-    value = _coerce_value(args.value)
+    try:
+        value = _coerce_value(args.value)
+    except ValueError as e:
+        print(f"config set: {e}", file=sys.stderr)
+        return 2
     try:
         doc = userconfig.load_config_for_write()
         userconfig.set_value(doc, args.key, value)
@@ -257,10 +265,10 @@ def _run_set(args) -> int:
         return 2
     try:
         userconfig.save_config(doc)
-    except OSError as e:
+    except (OSError, ValueError) as e:
         print(f"config set: cannot write config: {e}", file=sys.stderr)
         return 9
-    print(f"set {args.key} = {json.dumps(value)}")
+    print(f"set {args.key} = {json.dumps(value, allow_nan=False)}")
     return 0
 
 
@@ -275,7 +283,7 @@ def _run_unset(args) -> int:
         return 2
     try:
         userconfig.save_config(doc)
-    except OSError as e:
+    except (OSError, ValueError) as e:
         print(f"config unset: cannot write config: {e}", file=sys.stderr)
         return 9
     print(f"unset {args.key}")

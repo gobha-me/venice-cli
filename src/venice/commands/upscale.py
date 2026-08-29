@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from .. import auth, userconfig
+from .. import _numeric, auth, userconfig
 from ..client import build_client_from_auth
 from ._shared import (
     add_balance_flag,
@@ -47,7 +47,7 @@ def register(subparsers) -> None:
     p.add_argument("input", type=Path, help="Image file to upscale.")
     p.add_argument(
         "--scale",
-        type=float,
+        type=_numeric.finite_float,
         default=None,
         metavar="N",
         help=f"Upscale factor 1-4 (default {DEFAULT_SCALE:g}). Scale 1 only runs "
@@ -64,7 +64,7 @@ def register(subparsers) -> None:
     )
     p.add_argument(
         "--enhance-creativity",
-        type=float,
+        type=_numeric.finite_float,
         default=None,
         metavar="F",
         help="0-1 (default 0.5); higher lets the enhancer change the image more.",
@@ -77,7 +77,7 @@ def register(subparsers) -> None:
     )
     p.add_argument(
         "--replication",
-        type=float,
+        type=_numeric.finite_float,
         default=None,
         metavar="R",
         help="0-1 (default 0.35); how strongly base-image lines/noise are kept.",
@@ -89,7 +89,7 @@ def register(subparsers) -> None:
                    help="Show the planned output and exit; don't call the API.")
     p.add_argument(
         "--max-spend",
-        type=float,
+        type=_numeric.non_negative_float,
         default=None,
         metavar="USD",
         help="Refuse if the estimated cost exceeds this cap. Note: upscale "
@@ -161,7 +161,11 @@ def _run(args) -> int:
     cost = None  # dynamic pricing -- no reliable upfront quote
     print_estimate(cost, f"×{_fmt_scale(args.scale)} upscale; dynamic $0.001-$10.00/call")
     print_balance_and_remaining(client, cost, show=not args.no_balance)
-    if over_budget(cost, args.max_spend):  # no-op while cost is unknown
+    if over_budget(cost, args.max_spend):
+        print(
+            "upscale: dynamic price cannot be bounded by --max-spend; aborting",
+            file=sys.stderr,
+        )
         return 1
 
     out_path = resolve_output(args.output, f"{args.input.stem}-upscaled.png")

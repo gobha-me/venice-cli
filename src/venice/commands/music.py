@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from .. import audio_post, billing, config, userconfig
+from .. import _numeric, audio_post, billing, config, userconfig
 from ..client import VeniceAPIError
 from . import _audio, _queue, _shared
 
@@ -53,7 +53,10 @@ def register(subparsers) -> None:
         "config-sourced value, and --instrumental/--no-instrumental still wins.",
     )
     p.add_argument("--lyrics", default=None, metavar="TXT", help="Lyrics prompt (lyric-capable models only).")
-    p.add_argument("--speed", type=float, default=None, help="Playback speed multiplier.")
+    p.add_argument(
+        "--speed", type=_numeric.finite_float, default=None,
+        help="Playback speed multiplier.",
+    )
     p.add_argument("--output", "-o", type=Path, default=None)
     play_grp = p.add_mutually_exclusive_group()
     play_grp.add_argument("--play", dest="play", action="store_true", default=None)
@@ -64,7 +67,7 @@ def register(subparsers) -> None:
     _shared.add_cleanup_flag(p, section="music", endpoint="/audio/complete")
     p.add_argument(
         "--max-spend",
-        type=float,
+        type=_numeric.non_negative_float,
         default=None,
         metavar="USD",
         help="Refuse to queue if the quote exceeds this USD cap.",
@@ -292,7 +295,11 @@ def _run_generate(args) -> int:
         print(f"quote rejected: {e}", file=sys.stderr)
         return _queue.status_to_exit(e)
 
-    quote_value = quote.get("quote", quote)
+    try:
+        quote_value = _shared.quote_cost(quote)
+    except ValueError as e:
+        print(f"music: {e}", file=sys.stderr)
+        return 2
     label = f"model={args.model}"
     if args.duration is not None:
         label += f", duration={args.duration}s"

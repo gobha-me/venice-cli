@@ -29,7 +29,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from .. import auth, billing, config, userconfig
+from .. import _numeric, auth, billing, config, userconfig
 from ..client import VeniceAPIError, build_client_from_auth
 from ._shared import (
     add_balance_flag as _add_balance_flag,
@@ -143,7 +143,7 @@ def register(subparsers) -> None:
                    help="What to exclude from the image.")
     p.add_argument("--seed", type=int, default=None,
                    help="Seed for reproducibility.")
-    p.add_argument("--cfg-scale", type=float, default=None, metavar="N",
+    p.add_argument("--cfg-scale", type=_numeric.finite_float, default=None, metavar="N",
                    help="Prompt adherence 0-20 (higher = stricter).")
     p.add_argument("--steps", type=int, default=None,
                    help="Inference steps (model-dependent).")
@@ -194,7 +194,7 @@ def register(subparsers) -> None:
                    help="Estimate cost and exit; don't call /image/generate.")
     p.add_argument(
         "--max-spend",
-        type=float,
+        type=_numeric.non_negative_float,
         default=None,
         metavar="USD",
         help="Refuse to generate if the estimated cost exceeds this USD cap.",
@@ -312,15 +312,15 @@ def _usd_from_pricing(pricing) -> Optional[float]:
             continue
         if isinstance(v, dict) and "usd" in v:
             try:
-                return float(v["usd"])
-            except (TypeError, ValueError):
-                return None
+                return _numeric.non_negative_float(v["usd"])
+            except ValueError:
+                raise ValueError("model catalog contains an invalid image price") from None
     # Fall back to a top-level "usd" key.
     if "usd" in pricing:
         try:
-            return float(pricing["usd"])
-        except (TypeError, ValueError):
-            return None
+            return _numeric.non_negative_float(pricing["usd"])
+        except ValueError:
+            raise ValueError("model catalog contains an invalid image price") from None
     return None
 
 
@@ -329,7 +329,7 @@ def _estimate_cost(
 ) -> Optional[float]:
     if price is None:
         return None
-    return price * variants * n_prompts
+    return _numeric.non_negative_float(price * variants * n_prompts)
 
 
 # ---- output paths ------------------------------------------------------------
@@ -417,7 +417,7 @@ def _write_sidecar(json_path: Path, params: dict) -> None:
     the image is already on disk; the sidecar is reproducibility metadata."""
     try:
         with json_path.open("w", encoding="utf-8") as fh:
-            json.dump(params, fh, indent=2, sort_keys=True)
+            json.dump(params, fh, indent=2, sort_keys=True, allow_nan=False)
             fh.write("\n")
     except OSError as e:
         print(f"warning: could not write sidecar {json_path}: {e}", file=sys.stderr)
@@ -617,15 +617,20 @@ def _run(args) -> int:
 
 def _run_single(client, args) -> int:
     prompt = args.prompt.strip()
-    price = _fetch_image_price(client, args.model)
+    try:
+        price = _fetch_image_price(client, args.model)
+    except ValueError as e:
+        print(f"image: {e}", file=sys.stderr)
+        return 2
     cost = _estimate_cost(price, args.variants)
     desc = f"{args.variants} image" + ("s" if args.variants != 1 else "")
     _print_estimate(cost, f"{desc}, model={args.model}")
     _print_balance_and_remaining(client, cost, show=not args.no_balance)
 
     if _over_budget(cost, args.max_spend):
+        shown = billing.format_usd(cost) if cost is not None else "unknown"
         print(
-            f"image: estimate {billing.format_usd(cost)} exceeds "
+            f"image: estimate {shown} cannot be kept within "
             f"--max-spend {billing.format_usd(args.max_spend)}; aborting",
             file=sys.stderr,
         )
@@ -650,15 +655,20 @@ def _run_batch(client, args) -> int:
         return rc
 
     n = len(items)
-    price = _fetch_image_price(client, args.model)
+    try:
+        price = _fetch_image_price(client, args.model)
+    except ValueError as e:
+        print(f"image: {e}", file=sys.stderr)
+        return 2
     cost = _estimate_cost(price, args.variants, n)
     desc = f"{n} prompt" + ("s" if n != 1 else "") + f" x {args.variants}"
     _print_estimate(cost, f"{desc}, model={args.model}")
     _print_balance_and_remaining(client, cost, show=not args.no_balance)
 
     if _over_budget(cost, args.max_spend):
+        shown = billing.format_usd(cost) if cost is not None else "unknown"
         print(
-            f"image: estimate {billing.format_usd(cost)} exceeds "
+            f"image: estimate {shown} cannot be kept within "
             f"--max-spend {billing.format_usd(args.max_spend)}; aborting",
             file=sys.stderr,
         )

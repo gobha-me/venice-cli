@@ -16,7 +16,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Optional, Tuple, Union
 
-from . import __version__, _egress, config
+from . import __version__, _egress, _numeric, config
 
 
 VIDEO_DOWNLOAD_MAX_BYTES = 512 * 1024 * 1024
@@ -87,7 +87,12 @@ class VeniceClient:
         }
         data: Optional[bytes] = None
         if json_body is not None:
-            data = json.dumps(json_body).encode("utf-8")
+            try:
+                data = json.dumps(json_body, allow_nan=False).encode("utf-8")
+            except (TypeError, ValueError) as e:
+                raise VeniceAPIError(
+                    0, path, f"request body is not valid strict JSON: {e}"
+                ) from None
             headers["Content-Type"] = "application/json"
 
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
@@ -169,6 +174,8 @@ class VeniceClient:
         Raises VeniceAPIError on terminal HTTP errors or an unexpected status.
         Raises TimeoutError if max_wait elapses while still PROCESSING.
         """
+        interval = _numeric.finite_float(interval)
+        max_wait = _numeric.finite_float(max_wait)
         deadline = time.monotonic() + max_wait
         while True:
             ctype, payload = self.post_for_bytes_or_json(path, body)

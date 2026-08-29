@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 from typing import Optional, Tuple, Union
 
-from .. import billing, config, userconfig
+from .. import _numeric, billing, config, userconfig
 from ..client import VeniceAPIError
 from . import _models, _queue, _shared, _video_jobs
 
@@ -147,7 +147,7 @@ def register(subparsers) -> None:
         help=f"Scene reference image (@Image1.., repeatable, up to {SCENE_MAX}).",
     )
     p.add_argument(
-        "--reference-video-duration", type=float, default=None,
+        "--reference-video-duration", type=_numeric.finite_float, default=None,
         dest="reference_video_duration", metavar="SECONDS",
         help="Aggregate reference-video duration (s); sent to the quote for R2V pricing.",
     )
@@ -164,7 +164,7 @@ def register(subparsers) -> None:
     _shared.add_cleanup_flag(p, section="video", endpoint="/video/complete")
     p.add_argument(
         "--max-spend",
-        type=float,
+        type=_numeric.non_negative_float,
         default=None,
         metavar="USD",
         help="Refuse to queue if the quote exceeds this USD cap.",
@@ -422,7 +422,11 @@ def _run_generate(args) -> int:
         print(f"quote rejected: {e}", file=sys.stderr)
         return _queue.status_to_exit(e)
 
-    quote_value = quote.get("quote", quote)
+    try:
+        quote_value = _shared.quote_cost(quote)
+    except ValueError as e:
+        print(f"video: {e}", file=sys.stderr)
+        return 2
     label = f"model={model}, duration={args.duration}"
     if args.resolution:
         label += f", {args.resolution}"

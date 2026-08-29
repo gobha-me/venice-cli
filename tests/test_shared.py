@@ -37,6 +37,41 @@ class TestEncodeBase64(unittest.TestCase):
             self.assertEqual(_shared.encode_base64(p), "")
 
 
+class TestNumericSpendRails(unittest.TestCase):
+
+    def test_quote_cost_accepts_only_finite_non_negative_numbers(self):
+        self.assertEqual(_shared.quote_cost({"quote": "0.125"}), 0.125)
+        for bad in (float("nan"), float("inf"), float("-inf"), -0.01, {}, None):
+            with self.subTest(value=bad):
+                with self.assertRaisesRegex(ValueError, "finite non-negative"):
+                    _shared.quote_cost({"quote": bad})
+
+    def test_budget_with_unknown_cost_fails_closed_when_a_cap_exists(self):
+        self.assertFalse(_shared.over_budget(None, None))
+        self.assertTrue(_shared.over_budget(None, 0.10))
+
+    def test_non_finite_budget_values_are_rejected(self):
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=bad):
+                with self.assertRaises(ValueError):
+                    _shared.over_budget(0.01, bad)
+
+    def test_resolve_poll_rejects_non_finite_but_keeps_zero(self):
+        self.assertEqual(
+            _shared.resolve_poll(
+                0.0, 0.0, label="test", interval=1.0, max_wait_default=10.0
+            ),
+            (0.0, 0.0),
+        )
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=bad):
+                with self.assertRaises(ValueError):
+                    _shared.resolve_poll(
+                        bad, 1.0, label="test", interval=1.0,
+                        max_wait_default=10.0,
+                    )
+
+
 class TestCheckImageFile(unittest.TestCase):
 
     def _check(self, path, *, label="upscale", max_bytes=_shared.MAX_IMAGE_BYTES):

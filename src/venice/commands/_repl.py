@@ -99,7 +99,8 @@ def _load_transcript(path: str) -> List[dict]:
 
 def _save_transcript(path: str, messages: List[dict]) -> None:
     Path(path).write_text(
-        json.dumps(messages, indent=2, default=str) + "\n", encoding="utf-8"
+        json.dumps(messages, indent=2, default=str, allow_nan=False) + "\n",
+        encoding="utf-8",
     )
 
 

@@ -206,5 +206,21 @@ class TestTtsFlow(unittest.TestCase):
         self.assertEqual(captured["body"]["speed"], 1.25)
 
 
+class TestTtsPricingValidation(unittest.TestCase):
+    def test_non_finite_catalog_price_is_rejected(self):
+        from venice.commands import tts
+
+        class Client:
+            @staticmethod
+            def get_json(*args, **kwargs):
+                return {"data": [{
+                    "id": "m",
+                    "model_spec": {"pricing": {"input": {"usd": float("nan")}}},
+                }]}
+
+        with self.assertRaisesRegex(ValueError, "invalid TTS price"):
+            tts._fetch_tts_price_per_million(Client(), "m")
+
+
 if __name__ == "__main__":
     unittest.main()

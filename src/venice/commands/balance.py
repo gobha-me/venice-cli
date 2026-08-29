@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import sys
 
-from .. import auth, userconfig
+from .. import _numeric, auth, userconfig
 from ..billing import SPEND_ORDER, fetch_balance, format_balance_breakdown, format_usd
 from ..client import VeniceAPIError
 
@@ -34,7 +34,7 @@ def register(subparsers) -> None:
     )
     p.add_argument(
         "--min",
-        type=float,
+        type=_numeric.finite_float,
         default=None,
         metavar="USD",
         help="Exit 1 if balance is below this USD threshold. Config-backable "
@@ -96,6 +96,7 @@ def _run(args) -> int:
             },
             sys.stdout,
             indent=2,
+            allow_nan=False,
         )
         sys.stdout.write("\n")
     elif args.verbose:

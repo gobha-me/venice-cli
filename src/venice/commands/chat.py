@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from .. import auth, userconfig
+from .. import _numeric, auth, userconfig
 from ..client import build_client_from_auth
 from . import (
     _agent, _browser, _compact, _mcp, _mcp_client, _models, _openai, _persona,
@@ -64,7 +64,7 @@ def register(subparsers) -> None:
         default=None,
         help="Text model id (default: the catalog's 'default'-trait model).",
     )
-    p.add_argument("--temperature", "-t", type=float, default=None)
+    p.add_argument("--temperature", "-t", type=_numeric.finite_float, default=None)
     p.add_argument("--max-tokens", type=int, default=None, dest="max_tokens")
 
     stream_grp = p.add_mutually_exclusive_group()
@@ -177,12 +177,12 @@ def register(subparsers) -> None:
         "(default: 8; 0 = unlimited, run until the model stops).",
     )
     ag.add_argument(
-        "--max-spend", type=float, default=None, metavar="USD",
+        "--max-spend", type=_numeric.non_negative_float, default=None, metavar="USD",
         help="Per-call auto-approve cap for paid tools (default: $0.10 / "
         "$VENICE_MCP_MAX_SPEND). Over-cap calls prompt on a TTY.",
     )
     ag.add_argument(
-        "--session-max-spend", type=float, default=None, metavar="USD",
+        "--session-max-spend", type=_numeric.finite_float, default=None, metavar="USD",
         dest="session_max_spend",
         help="Cap total chat-completion spend for this session (#66). Meters the "
         "model's own calls (not just paid tools) from server token usage; at the "
@@ -678,7 +678,9 @@ def _run_agent(args, oai, openai, client, models, model, kwargs) -> Optional[int
 def _run_once(oai, kwargs: dict, as_json: bool) -> int:
     resp = oai.chat.completions.create(**kwargs)
     if as_json:
-        json.dump(resp.model_dump(), sys.stdout, indent=2, default=str)
+        json.dump(
+            resp.model_dump(), sys.stdout, indent=2, default=str, allow_nan=False
+        )
         sys.stdout.write("\n")
         return 0
     content = ""

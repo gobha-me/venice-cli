@@ -109,6 +109,20 @@ class TestUserConfigIO(_Base):
         reloaded = json.loads(self.cfg_file.read_text())
         self.assertEqual(reloaded["future_thing"], {"k": 1})  # not dropped
 
+    def test_strict_json_rejects_non_finite_loads_and_saves(self):
+        self.cfg_dir.mkdir(parents=True)
+        self.cfg_file.write_text('{"defaults":{"max_spend":NaN}}')
+        _, _, err = _capture(uc.load_config)
+        self.assertIn("non-finite JSON number", err)
+        with self.assertRaises(uc.ConfigError):
+            uc.load_config_for_write()
+
+        self.cfg_file.unlink()
+        with self.assertRaises(ValueError):
+            uc.save_config({"defaults": {"max_spend": float("inf")}})
+        self.assertFalse(self.cfg_file.exists())
+        self.assertEqual(list(self.cfg_dir.glob("*.tmp")), [])
+
 
 # --------------------------------------------------------------------------- #
 # resolve_default / apply_defaults (#17)
@@ -161,6 +175,35 @@ class TestApplyDefaults(_Base):
         args2 = argparse.Namespace(spawn_max_spend=0.5, model=None, system=None)
         uc.apply_defaults(args2, "code", doc)
         self.assertEqual(args2.spawn_max_spend, 0.5)  # explicit wins
+
+    def test_non_finite_spend_defaults_are_warned_and_skipped(self):
+        for key, command, dest in (
+            ("max_spend", "sfx", "max_spend"),
+            ("session_max_spend", "chat", "session_max_spend"),
+            ("spawn_max_spend", "code", "spawn_max_spend"),
+        ):
+            for bad in (float("nan"), float("inf"), float("-inf")):
+                args = argparse.Namespace(**{dest: None})
+                doc = {"defaults": {command: {key: bad}}}
+                if key == "max_spend":
+                    doc = {"defaults": {key: bad}}
+                with self.subTest(key=key, value=bad):
+                    rc, _, err = _capture(uc.apply_defaults, args, command, doc)
+                    self.assertIsNone(rc)
+                    self.assertIsNone(getattr(args, dest))
+                    self.assertIn("must be finite", err)
+
+    def test_non_finite_spend_flags_are_rejected_by_argparse(self):
+        cases = (
+            (sfx, ["sfx", "p", "--max-spend"]),
+            (chat, ["chat", "p", "--session-max-spend"]),
+            (code, ["code", "p", "--spawn-max-spend"]),
+        )
+        for module, prefix in cases:
+            for spelling in ("nan", "inf", "-inf"):
+                with self.subTest(command=module.__name__, value=spelling):
+                    with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                        _build_parser(module).parse_args(prefix + [spelling])
 
     def test_code_parser_has_spawn_max_spend_dest_config_fills_it(self):
         # Guards the config key against the real argparser's dest: a wrong dest name
@@ -1259,6 +1302,23 @@ class TestPollCadenceParity(unittest.TestCase):
             got = uc.config_defaults_for("sfx", _mcp.sfx_tool, doc)
         self.assertNotIn("max_wait", got)
 
+    def test_non_finite_cadence_is_rejected_by_config_and_cli(self):
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            doc = {"defaults": {"sfx": {"poll_interval": bad, "max_wait": bad}}}
+            args = _build_parser(sfx).parse_args(["sfx", "p"])
+            err = io.StringIO()
+            with self.subTest(source="config", value=bad), contextlib.redirect_stderr(err):
+                uc.apply_defaults(args, "sfx", doc)
+            self.assertIsNone(args.poll_interval)
+            self.assertIsNone(args.max_wait)
+            self.assertIn("must be finite", err.getvalue())
+
+        for spelling in ("nan", "inf", "-inf"):
+            for flag in ("--poll-interval", "--max-wait"):
+                with self.subTest(source="cli", flag=flag, value=spelling):
+                    with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                        _build_parser(sfx).parse_args(["sfx", "p", flag, spelling])
+
     def test_negative_cadence_typed_on_the_cli_falls_back(self):
         """A value the user TYPED never passes through a coercer, so the handler
         still clamps it -- `time.sleep(-1)` is a ValueError traceback."""
@@ -1293,6 +1353,17 @@ class TestPollCadenceParity(unittest.TestCase):
 # config subcommands
 # --------------------------------------------------------------------------- #
 class TestConfigCommand(_Base):
+    def test_set_rejects_non_finite_numbers_without_writing(self):
+        for spelling in ("NaN", "Infinity", "-Infinity", "inf"):
+            with self.subTest(value=spelling):
+                rc, _, err = _capture(
+                    cfgcmd._run_set,
+                    argparse.Namespace(key="defaults.max_spend", value=spelling),
+                )
+                self.assertEqual(rc, 2)
+                self.assertIn("non-finite", err)
+                self.assertFalse(self.cfg_file.exists())
+
     def test_add_stdio_roundtrip(self):
         rc, _, _ = _capture(cfgcmd._run_add,
                             _add_args("venice", server_command="venice", arg=["mcp-serve"]))

@@ -27,7 +27,7 @@ import json
 import os
 import sys
 
-from .. import auth, config, userconfig
+from .. import _numeric, auth, config, userconfig
 from ..client import build_client_from_auth
 from . import _agent, _exec, _models, _openai, _review
 
@@ -73,7 +73,7 @@ def register(subparsers) -> None:
         "function-calling model from a DIFFERENT family than the catalog default, so "
         "the reviewer's blind spots are not the author's. Config: defaults.review.model.",
     )
-    p.add_argument("--temperature", "-t", type=float, default=None)
+    p.add_argument("--temperature", "-t", type=_numeric.finite_float, default=None)
     p.add_argument("--max-tokens", type=int, default=None, dest="max_tokens")
     p.add_argument(
         "--json", action="store_true",
@@ -204,7 +204,7 @@ def _run(args) -> int:
     if skip:
         env = _review.skipped_envelope(collected, reason=skip, fail_on=args.fail_on)
         if args.json:
-            json.dump(env, sys.stdout, indent=2, default=str)
+            json.dump(env, sys.stdout, indent=2, default=str, allow_nan=False)
             sys.stdout.write("\n")
         else:
             print(f"review: {skip} -- no review run", file=sys.stderr)
@@ -261,7 +261,7 @@ def _run(args) -> int:
     env = _review.envelope(collected, result, model=model,
                            decorrelated=decorrelated, fail_on=args.fail_on)
     if args.json:
-        json.dump(env, sys.stdout, indent=2, default=str)
+        json.dump(env, sys.stdout, indent=2, default=str, allow_nan=False)
         sys.stdout.write("\n")
     else:
         _print_report(env)

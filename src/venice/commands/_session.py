@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from .. import config
+from .. import _numeric, config
 from . import _index
 
 SESSION_VERSION = 1
@@ -162,7 +162,7 @@ def _read_json(path: str):
     except OSError as e:
         raise SessionError(f"cannot read session {path}: {e}")
     try:
-        return json.loads(raw)
+        return json.loads(raw, parse_constant=_numeric.reject_json_constant)
     except ValueError as e:
         raise SessionError(f"invalid session JSON in {path}: {e}")
 
@@ -244,15 +244,19 @@ def save(session: Session) -> Path:
     fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(session.to_envelope(), f, indent=2, default=str)
+            json.dump(
+                session.to_envelope(), f, indent=2, default=str, allow_nan=False
+            )
             f.write("\n")
             f.flush()
             os.fsync(f.fileno())
-    except Exception:
+    except Exception as e:
         try:
             os.unlink(tmp)
         except OSError:
             pass
+        if isinstance(e, ValueError):
+            raise OSError(f"session contains invalid non-finite JSON: {e}") from None
         raise
     os.replace(tmp, path)
     try:
@@ -270,7 +274,10 @@ def _iter_sessions():
         return
     for entry in entries:
         try:
-            data = json.loads(entry.read_text(encoding="utf-8"))
+            data = json.loads(
+                entry.read_text(encoding="utf-8"),
+                parse_constant=_numeric.reject_json_constant,
+            )
         except (OSError, ValueError):
             continue
         if not isinstance(data, dict):

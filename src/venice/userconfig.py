@@ -19,7 +19,7 @@ import os
 import sys
 from pathlib import Path
 
-from . import config
+from . import _numeric, config
 
 
 class ConfigError(Exception):
@@ -42,7 +42,10 @@ def load_config() -> dict:
     if not p.exists():
         return _default_doc()
     try:
-        doc = json.loads(p.read_text(encoding="utf-8"))
+        doc = json.loads(
+            p.read_text(encoding="utf-8"),
+            parse_constant=_numeric.reject_json_constant,
+        )
     except (OSError, ValueError) as e:
         print(f"warning: ignoring unreadable {p}: {e}", file=sys.stderr)
         return _default_doc()
@@ -59,7 +62,10 @@ def load_config_for_write() -> dict:
     if not p.exists():
         return _default_doc()
     try:
-        doc = json.loads(p.read_text(encoding="utf-8"))
+        doc = json.loads(
+            p.read_text(encoding="utf-8"),
+            parse_constant=_numeric.reject_json_constant,
+        )
     except (OSError, ValueError) as e:
         raise ConfigError(f"{p} is unreadable ({e}); fix or remove it first") from None
     if not isinstance(doc, dict):
@@ -80,7 +86,7 @@ def save_config(doc: dict) -> Path:
     fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(doc, f, indent=2, sort_keys=True)
+            json.dump(doc, f, indent=2, sort_keys=True, allow_nan=False)
             f.write("\n")
             f.flush()
             os.fsync(f.fileno())
@@ -372,7 +378,7 @@ def _one_of(module: str, attr: str, cast=str):
 # declares the flag; a per-command section overrides them.
 _GLOBAL_MAP = {
     "output_dir": ("output", _as_path),
-    "max_spend": ("max_spend", float),
+    "max_spend": ("max_spend", _numeric.non_negative_float),
     "yes": ("yes", _as_bool),
     # #57 Class B: `--no-balance`/`--balance` is tri-state (default None) on all
     # eight spend-incurring commands. A global rather than eight sections -- the
@@ -394,20 +400,20 @@ _GLOBAL_MAP = {
     # same post-spend path as the poll cadence -- `defaults.sample_rate = 0`
     # lands in the pass-2 argv as `-ar 0` only AFTER a sfx/music job has been
     # queued, charged and downloaded. (#57 Class C2)
-    "lufs": ("lufs", float),
-    "true_peak": ("true_peak", float),
+    "lufs": ("lufs", _numeric.finite_float),
+    "true_peak": ("true_peak", _numeric.finite_float),
     "sample_rate": ("sample_rate", _positive(_exact_int)),
     # `--bit-depth` is the only flag in the tree whose `choices=` are ints, hence
     # the cast -- see `_one_of`.
     "bit_depth": ("bit_depth", _one_of("venice.audio_post", "BIT_DEPTHS", _exact_int)),
-    "loop_crossfade": ("loop_crossfade", _non_negative(float)),
+    "loop_crossfade": ("loop_crossfade", _non_negative(_numeric.finite_float)),
 }
 _COMMAND_MAP = {
     "chat": {
         "model": ("model", str),
         "system": ("system", str),
         "persona": ("persona", str),
-        "temperature": ("temperature", float),
+        "temperature": ("temperature", _numeric.finite_float),
         "max_tokens": ("max_tokens", int),
         "web_search": ("web_search", _one_of("venice.commands.chat", "WEB_SEARCH_CHOICES")),
         "character": ("character", str),
@@ -417,7 +423,7 @@ _COMMAND_MAP = {
         "auto_compact": ("auto_compact", _as_bool),
         "compact_threshold": ("compact_threshold", int),
         "compact_keep_turns": ("compact_keep_turns", int),
-        "session_max_spend": ("session_max_spend", float),
+        "session_max_spend": ("session_max_spend", _numeric.finite_float),
     },
     "embed": {
         "model": ("model", str),
@@ -450,7 +456,7 @@ _COMMAND_MAP = {
         "assets": ("assets", _as_bool),
         "scout": ("scout", _as_bool),  # #52: opt-in read-only scout subagent
         "spawn": ("spawn", _as_bool),  # #52 slice 2: opt-in write-capable worker subagent
-        "spawn_max_spend": ("spawn_max_spend", float),  # #52: per-worker media USD cap
+        "spawn_max_spend": ("spawn_max_spend", _numeric.finite_float),  # #52: per-worker media USD cap
         "subagent_max_tokens": ("subagent_max_tokens", int),  # #52: per-subagent token cap
         "planner": ("planner", _as_bool),  # #52: planner harness (implies scout/spawn/memory)
         "parallel": ("parallel", _as_bool),  # #52: concurrent scout/spawn dispatch
@@ -461,7 +467,7 @@ _COMMAND_MAP = {
         "auto_compact": ("auto_compact", _as_bool),
         "compact_threshold": ("compact_threshold", int),
         "compact_keep_turns": ("compact_keep_turns", int),
-        "session_max_spend": ("session_max_spend", float),
+        "session_max_spend": ("session_max_spend", _numeric.finite_float),
         # #80 part 1a: the cold-context reviewer rail. `review_model` is the
         # decorrelation knob -- the reviewer should not be the model that authored.
         "review": ("review", _as_bool),
@@ -497,7 +503,7 @@ _COMMAND_MAP = {
         "preset": ("preset", str),
         "preset_file": ("preset_file", _as_path),
         "negative_prompt": ("negative_prompt", str),
-        "cfg_scale": ("cfg_scale", float),
+        "cfg_scale": ("cfg_scale", _numeric.finite_float),
         "steps": ("steps", int),
         "style_preset": ("style_preset", str),
         # #57 Class C: the valued generation knobs. Their argparse defaults moved
@@ -522,7 +528,7 @@ _COMMAND_MAP = {
         "model": ("model", _one_of("venice.commands.tts", "TTS_MODELS")),
         "format": ("format", _one_of("venice.commands.tts", "FORMATS")),
         "voice": ("voice", str),
-        "speed": ("speed", float),
+        "speed": ("speed", _numeric.finite_float),
         # `--play`/`--no-play` is a tri-stated store_true(None)/store_false pair.
         "play": ("play", _as_bool),
     },
@@ -547,8 +553,8 @@ _COMMAND_MAP = {
         # `_non_negative`, not bare float: these rows also feed the agent/MCP
         # tool impls via `config_defaults_for`, where a negative max_wait
         # abandons an already-charged job.
-        "poll_interval": ("poll_interval", _non_negative(float)),
-        "max_wait": ("max_wait", _non_negative(float)),
+        "poll_interval": ("poll_interval", _non_negative(_numeric.finite_float)),
+        "max_wait": ("max_wait", _non_negative(_numeric.finite_float)),
     },
     "music": {
         # #57 Class C: literal now lives in `music._run_generate`. Generate
@@ -558,7 +564,7 @@ _COMMAND_MAP = {
         # `lyrics` is deliberately CLI-only -- it's per-song content, not a
         # persistent preference.
         "duration": ("duration", int),
-        "speed": ("speed", float),
+        "speed": ("speed", _numeric.finite_float),
         "play": ("play", _as_bool),
         "no_cleanup": ("no_cleanup", _as_bool),  # #57 Class B
         "instrumental": ("instrumental", _as_bool),
@@ -573,8 +579,8 @@ _COMMAND_MAP = {
         # `_non_negative`, not bare float: these rows also feed the agent/MCP
         # tool impls via `config_defaults_for`, where a negative max_wait
         # abandons an already-charged job.
-        "poll_interval": ("poll_interval", _non_negative(float)),
-        "max_wait": ("max_wait", _non_negative(float)),
+        "poll_interval": ("poll_interval", _non_negative(_numeric.finite_float)),
+        "max_wait": ("max_wait", _non_negative(_numeric.finite_float)),
     },
     # #57 Class B: the standalone `venice master` command. Only `loop` -- the
     # valued knobs (--lufs/--true-peak/--sample-rate/--bit-depth/
@@ -610,8 +616,8 @@ _COMMAND_MAP = {
         # `_non_negative`, not bare float: these rows also feed the agent/MCP
         # tool impls via `config_defaults_for`, where a negative max_wait
         # abandons an already-charged job.
-        "poll_interval": ("poll_interval", _non_negative(float)),
-        "max_wait": ("max_wait", _non_negative(float)),
+        "poll_interval": ("poll_interval", _non_negative(_numeric.finite_float)),
+        "max_wait": ("max_wait", _non_negative(_numeric.finite_float)),
     },
     # #57 Class D: `venice balance`, which had no `apply_defaults` call. Only
     # `min` -- `--json`/`--verbose` are per-invocation OUTPUT MODES, not
@@ -621,7 +627,7 @@ _COMMAND_MAP = {
     # `defaults.min` does NOT reach this: globals are an explicit allow-list
     # (see `resolve_default`), and `min` is a per-command preference.
     "balance": {
-        "min": ("min", float),
+        "min": ("min", _numeric.finite_float),
     },
     # #57 Class D: `venice contact-sheet`, which had no `apply_defaults` call at
     # all until now. Section name uses an UNDERSCORE (the `image_edit`
@@ -643,11 +649,11 @@ _COMMAND_MAP = {
     },
     "upscale": {
         # #57 Class C: literal now lives in `upscale._run`.
-        "scale": ("scale", float),
+        "scale": ("scale", _numeric.finite_float),
         "enhance": ("enhance", _as_bool),  # #57 Class B: tri-stated --enhance
-        "enhance_creativity": ("enhance_creativity", float),
+        "enhance_creativity": ("enhance_creativity", _numeric.finite_float),
         "enhance_prompt": ("enhance_prompt", str),
-        "replication": ("replication", float),
+        "replication": ("replication", _numeric.finite_float),
     },
     # #71 compatibility-only browser defaults. The tools are security-disabled for
     # GHSA-mqjr-2vh8-6fvg, but these keys remain readable so existing configs survive and

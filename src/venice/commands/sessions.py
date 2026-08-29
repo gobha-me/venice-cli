@@ -90,7 +90,7 @@ def _run_ls(args) -> int:
             }
             for sid, command, updated, n_msgs, model in rows
         ]
-        json.dump(out, sys.stdout, indent=2)
+        json.dump(out, sys.stdout, indent=2, allow_nan=False)
         sys.stdout.write("\n")
         return 0
     if not rows:

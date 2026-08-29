@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
-from . import userconfig
+from . import _numeric, userconfig
 
 _CODECS = {16: "pcm_s16le", 24: "pcm_s24le", 32: "pcm_s32le"}
 
@@ -71,13 +71,17 @@ def add_master_flags(parser, *, include_toggle: bool) -> None:
     # them; the literals go back on in `apply_master_literals`. They are GLOBAL
     # config keys, not per-command ones, because this one chain is shared by
     # three commands -- `defaults.<cmd>.<knob>` still overrides (see _GLOBAL_MAP).
-    parser.add_argument("--lufs", type=float, default=None, metavar="LUFS",
-                        help=f"Integrated loudness target (default {DEFAULT_LUFS:g}). "
-                             "Config-backable via defaults.lufs.")
-    parser.add_argument("--true-peak", type=float, default=None, dest="true_peak",
-                        metavar="DBTP",
-                        help=f"True-peak ceiling in dBTP (default {DEFAULT_TRUE_PEAK:g}). "
-                             "Config-backable via defaults.true_peak.")
+    parser.add_argument(
+        "--lufs", type=_numeric.finite_float, default=None, metavar="LUFS",
+        help=f"Integrated loudness target (default {DEFAULT_LUFS:g}). "
+             "Config-backable via defaults.lufs.",
+    )
+    parser.add_argument(
+        "--true-peak", type=_numeric.finite_float, default=None, dest="true_peak",
+        metavar="DBTP",
+        help=f"True-peak ceiling in dBTP (default {DEFAULT_TRUE_PEAK:g}). "
+             "Config-backable via defaults.true_peak.",
+    )
     parser.add_argument("--sample-rate", type=int, default=None, dest="sample_rate",
                         metavar="HZ",
                         help=f"Output sample rate (default {DEFAULT_SAMPLE_RATE}). "
@@ -90,7 +94,7 @@ def add_master_flags(parser, *, include_toggle: bool) -> None:
                         help="Make it seamlessly loopable (crossfade tail into head). "
                              "Config-backable via defaults.{master,sfx,music}.loop; an "
                              "explicit --loop/--no-loop still wins.")
-    parser.add_argument("--loop-crossfade", type=float, default=None,
+    parser.add_argument("--loop-crossfade", type=_numeric.finite_float, default=None,
                         dest="loop_crossfade", metavar="SEC",
                         help="Loop crossfade length in seconds (default "
                              f"{DEFAULT_LOOP_CROSSFADE:g}). Config-backable via "
