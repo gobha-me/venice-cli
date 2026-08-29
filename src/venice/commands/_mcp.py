@@ -275,7 +275,7 @@ def tts_tool(
     *,
     model: str = _tts.DEFAULT_TTS_MODEL,
     voice: Optional[str] = None,
-    format: str = _tts.DEFAULT_FORMAT,
+    format: Optional[str] = None,
     speed: Optional[float] = None,
     output_dir: Optional[str] = None,
     confirm: bool = False,
@@ -284,39 +284,38 @@ def tts_tool(
     """Synthesize speech via /audio/speech; write an audio file, return its path."""
     if not text or not text.strip():
         return _err("tts: text is required")
-    if model not in _tts.TTS_MODELS:
-        return _err(f"tts: unknown model {model!r}")
-    if format not in _tts.FORMATS:
-        return _err(
-            f"tts: unknown format {format!r}; choose from {', '.join(_tts.FORMATS)}"
-        )
     if speed is not None and not (0.25 <= speed <= 4.0):
         return _err(f"tts: speed {speed} out of range (0.25-4.0)")
 
     text = text.strip()
     try:
-        price = _tts._fetch_tts_price_per_million(client, model)
-        cost = _tts._estimate_cost(len(text), price)
+        resolved = _tts._resolve_tts(client, model, format)
+        cost = _tts._estimate_cost(len(text), resolved.price_per_million)
     except ValueError as e:
         return _err(f"tts: {e}")
     gate = check_spend(cost, confirm=confirm, max_spend=max_spend, label="tts")
     if gate is not None:
         return gate
 
-    body: dict = {"input": text, "model": model, "response_format": format}
+    body: dict = {"input": text, "model": model}
+    if resolved.requested_format is not None:
+        body["response_format"] = resolved.requested_format
     if voice:
         body["voice"] = voice
     if speed is not None:
         body["speed"] = speed
     try:
-        _status, _ctype, audio = client.request("POST", "/audio/speech", json_body=body)
+        _status, ctype, audio = client.request("POST", "/audio/speech", json_body=body)
     except VeniceAPIError as e:
         return _err(f"tts failed: {e}")
     if not audio:
         return _err("tts: server returned empty body")
 
     short = _tts._short_id(text, model, voice)
-    out_path = _tts._resolve_output_path(resolve_output_dir(output_dir), short, format)
+    output_format = _tts._response_format(ctype, resolved.output_format)
+    out_path = _tts._resolve_output_path(
+        resolve_output_dir(output_dir), short, output_format
+    )
     werr = _write(out_path, audio)
     if werr:
         return _err(f"tts: could not write {out_path}: {werr}")
@@ -325,6 +324,7 @@ def tts_tool(
         "path": str(out_path.resolve()),
         "bytes": len(audio),
         "model": model,
+        "format": output_format,
         "cost_estimate_usd": cost,
     }
 
@@ -1449,8 +1449,8 @@ def model_details_tool(client, *, model: str) -> dict:
     `capabilities` (supportsVision/supportsFunctionCalling/... ) is populated only
     for text/LLM models. Image/media models expose their metadata under
     `constraints` (aspectRatios, resolutions, qualities, promptCharacterLimit).
-    `voices` lists the voice ids available for TTS models (null otherwise), so the
-    agent can pick a valid `voice` for venice_tts without guessing.
+    `voices`, `supported_formats`, and `default_format` expose the selection data
+    needed for TTS calls (null for models where they do not apply).
     The full `model_spec` is returned too so nothing is dropped. Read-only; not
     spend-gated. May scan the catalog by type to locate the id.
     """
@@ -1483,6 +1483,8 @@ def model_details_tool(client, *, model: str) -> dict:
         "traits": spec.get("traits"),
         # TTS voice-id list (flat list of strings); null for non-voice models.
         "voices": spec.get("voices"),
+        "supported_formats": spec.get("supported_formats"),
+        "default_format": spec.get("default_format"),
         # Full spec so nothing curated-away is lost (#59 / kimi-k3 feedback).
         "model_spec": spec,
     }

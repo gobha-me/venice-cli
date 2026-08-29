@@ -222,28 +222,18 @@ venice tts "Fast talker." --speed 1.4 --yes
 venice tts "How much will this cost?" --dry-run
 ```
 
-### TTS models and pricing (per 1M characters)
+### TTS models, formats, and pricing
 
-| slug | price | voices |
-|---|---|---|
-| `tts-kokoro` (default) | $3.50 | 54 |
-| `tts-inworld-1-5-max` | $12.50 | 14 |
-| `tts-xai-v1` | $18.75 | 5 |
-| `tts-chatterbox-hd` | $50.00 | 9 |
-| `tts-orpheus` | $62.50 | 8 |
-| `tts-elevenlabs-turbo-v2-5` | $62.50 | 21 |
-| `tts-qwen3-0-6b` | $87.50 | 9 |
-| `tts-qwen3-1-7b` | $112.50 | 9 |
-| `tts-minimax-speech-02-hd` | $125.00 | 15 |
-| `tts-gemini-3-1-flash` | $187.50 | 30 |
+Models, voices, formats, defaults, and prices are resolved from the live TTS
+catalog so newly added models do not require a CLI release. To inspect one model:
 
-To see the voice list for any TTS model:
 ```sh
-venice models tts-kokoro | jq '.model_spec.voices'
+venice models tts-kokoro | jq '.model_spec | {voices, supported_formats, default_format, pricing}'
 ```
 
 If `--voice` is omitted Venice uses each model's built-in default.
-Formats supported: `mp3` (default), `opus`, `aac`, `flac`, `wav`, `pcm`.
+If `--format` is omitted Venice uses that model's advertised `default_format`;
+an explicit format is validated against its `supported_formats` before confirmation.
 
 ## Image generation
 
@@ -1944,7 +1934,7 @@ CLI-only because the tool implementations fix their own polling cadence, and
 their sections apply only on the command line.
 
 **Any** config value whose flag has a fixed set of choices is validated against
-that set — `defaults.image.format`, `defaults.tts.{model,format}`,
+that set — `defaults.image.format`,
 `defaults.sfx.model`, `defaults.video.{duration,resolution,aspect_ratio}`,
 `defaults.image_edit.{aspect_ratio,output_format}`, `defaults.chat.web_search`,
 `defaults.bit_depth` and `defaults.contact_sheet.engine`.
@@ -1968,10 +1958,8 @@ venice models elevenlabs-sound-effects-v2   # full JSON for one model
 venice models --type all --json        # everything, raw
 ```
 
-At time of writing the catalog spans ~258 models across text (80),
-code (30), image (26), **video (92)**, music+sfx (10), tts (10),
-embedding (9), and upscale (1). The video models include Sora 2,
-Veo 3.1, Kling, Runway Gen4, LTX-2, Wan 2.7, Seedance 2.0, and more.
+The catalog is live and may add or retire models without a CLI release. Use
+`--type`, `--type all`, or a slug lookup instead of relying on a frozen count.
 
 ### Exit codes
 

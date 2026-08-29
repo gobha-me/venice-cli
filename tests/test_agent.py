@@ -2977,6 +2977,11 @@ class TestToolRegistry(unittest.TestCase):
         self.assertTrue(spec.paid)
         self.assertIsNone(_agent.get("venice_nope"))
 
+    def test_tts_schema_documents_live_format_default(self):
+        spec = _agent.get("venice_tts")
+        desc = spec.parameters["properties"]["format"]["description"]
+        self.assertIn("catalog default", desc)
+
     def test_every_registry_tool_has_a_category(self):
         # drift guard: a new tool with no/empty category fails here.
         for spec in _agent._REGISTRY:

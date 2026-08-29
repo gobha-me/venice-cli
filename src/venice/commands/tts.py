@@ -10,29 +10,13 @@ from __future__ import annotations
 import hashlib
 import sys
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import NamedTuple, Optional, Tuple
 
 from .. import _numeric, audio_player, auth, billing, config, userconfig
 from ..client import VeniceAPIError, build_client_from_auth
 from . import _shared
 
-# Slugs verified against /models?type=tts on 2026-05-22.
-TTS_MODELS = (
-    "tts-kokoro",
-    "tts-qwen3-0-6b",
-    "tts-qwen3-1-7b",
-    "tts-xai-v1",
-    "tts-inworld-1-5-max",
-    "tts-chatterbox-hd",
-    "tts-orpheus",
-    "tts-elevenlabs-turbo-v2-5",
-    "tts-minimax-speech-02-hd",
-    "tts-gemini-3-1-flash",
-)
-DEFAULT_TTS_MODEL = "tts-kokoro"  # cheapest ($3.50/1M chars), 54 voices
-
-FORMATS = ("mp3", "opus", "aac", "flac", "wav", "pcm")
-DEFAULT_FORMAT = "mp3"
+DEFAULT_TTS_MODEL = "tts-kokoro"
 
 EXT_BY_FORMAT = {
     "mp3": ".mp3",
@@ -42,6 +26,27 @@ EXT_BY_FORMAT = {
     "wav": ".wav",
     "pcm": ".pcm",
 }
+
+FORMAT_BY_CTYPE = {
+    "audio/mpeg": "mp3",
+    "audio/mp3": "mp3",
+    "audio/opus": "opus",
+    "audio/ogg": "opus",
+    "audio/aac": "aac",
+    "audio/flac": "flac",
+    "audio/wav": "wav",
+    "audio/wave": "wav",
+    "audio/x-wav": "wav",
+    "audio/pcm": "pcm",
+    "audio/l16": "pcm",
+}
+
+
+class ResolvedTTS(NamedTuple):
+    price_per_million: Optional[float]
+    supported_formats: Tuple[str, ...]
+    requested_format: Optional[str]
+    output_format: str
 
 
 def register(subparsers) -> None:
@@ -75,10 +80,10 @@ def register(subparsers) -> None:
     )
     p.add_argument(
         "--model",
-        choices=TTS_MODELS,
         default=None,
-        help=f"TTS model id (default {DEFAULT_TTS_MODEL}). Config-backable via "
-        "defaults.tts.model; an explicit --model still wins.",
+        help=f"TTS model id, validated against the live catalog (default "
+        f"{DEFAULT_TTS_MODEL}). Config-backable via defaults.tts.model; an "
+        "explicit --model still wins.",
     )
     p.add_argument(
         "--voice",
@@ -87,10 +92,10 @@ def register(subparsers) -> None:
     )
     p.add_argument(
         "--format",
-        choices=FORMATS,
         default=None,
-        help=f"Output audio format (default {DEFAULT_FORMAT}). Config-backable "
-        "via defaults.tts.format; an explicit --format still wins.",
+        help="Model-specific output audio format. If omitted, Venice uses the "
+        "selected model's live catalog default. Config-backable via "
+        "defaults.tts.format; an explicit --format still wins.",
     )
     p.add_argument(
         "--speed",
@@ -153,28 +158,73 @@ def _read_input(args) -> Tuple[Optional[str], int]:
     return text, 0
 
 
-# ---- pricing + cost estimation ----------------------------------------------
+# ---- live model resolution + cost estimation --------------------------------
 
-def _fetch_tts_price_per_million(client, model: str) -> Optional[float]:
-    """Look up `model_spec.pricing.input.usd` for the given TTS model. Best-effort."""
+def _resolve_tts(client, model: str, requested_format: Optional[str]) -> ResolvedTTS:
+    """Resolve one TTS model and its format before confirmation or spend."""
     try:
         doc = client.get_json("/models", params={"type": "tts"})
-    except VeniceAPIError:
-        return None
+    except VeniceAPIError as e:
+        raise ValueError(f"could not fetch live TTS catalog: {e}") from None
     data = doc.get("data") if isinstance(doc, dict) else None
     if not isinstance(data, list):
-        return None
+        raise ValueError("live TTS catalog has no data list")
+    found = None
     for m in data:
         if isinstance(m, dict) and m.get("id") == model:
-            try:
-                return _numeric.non_negative_float(
-                    m["model_spec"]["pricing"]["input"]["usd"]
-                )
-            except (KeyError, TypeError):
-                return None
-            except ValueError:
-                raise ValueError("model catalog contains an invalid TTS price") from None
-    return None
+            found = m
+            break
+    if found is None:
+        raise ValueError(f"model {model!r} is not in the live TTS catalog")
+
+    spec = found.get("model_spec")
+    if not isinstance(spec, dict):
+        raise ValueError(f"live TTS catalog entry for {model!r} has no model_spec")
+    raw_formats = spec.get("supported_formats")
+    if (
+        not isinstance(raw_formats, list)
+        or not raw_formats
+        or any(not isinstance(v, str) or not v.strip() for v in raw_formats)
+    ):
+        raise ValueError(
+            f"live TTS catalog entry for {model!r} has invalid supported_formats"
+        )
+    supported = tuple(v.strip() for v in raw_formats)
+
+    chosen = requested_format.strip() if isinstance(requested_format, str) else None
+    if requested_format is not None and not chosen:
+        raise ValueError("format must not be empty")
+    if chosen is not None:
+        if chosen not in supported:
+            raise ValueError(
+                f"format {chosen!r} is not supported by {model!r}; choose from "
+                f"{', '.join(supported)}"
+            )
+        output_format = chosen
+    else:
+        default_format = spec.get("default_format")
+        if not isinstance(default_format, str) or not default_format.strip():
+            raise ValueError(
+                f"live TTS catalog entry for {model!r} has no default_format"
+            )
+        output_format = default_format.strip()
+        if output_format not in supported:
+            raise ValueError(
+                f"live TTS catalog default_format {output_format!r} for {model!r} "
+                "is not in supported_formats"
+            )
+
+    price = None
+    try:
+        raw_price = spec["pricing"]["input"]["usd"]
+    except (KeyError, TypeError):
+        pass
+    else:
+        try:
+            price = _numeric.non_negative_float(raw_price)
+        except (TypeError, ValueError):
+            raise ValueError("model catalog contains an invalid TTS price") from None
+    return ResolvedTTS(price, supported, chosen, output_format)
 
 
 def _estimate_cost(char_count: int, price_per_million: Optional[float]) -> Optional[float]:
@@ -205,6 +255,11 @@ def _resolve_output_path(arg_output: Optional[Path], short: str, fmt: str) -> Pa
     if arg_output.is_dir():
         return arg_output / default_name
     return arg_output
+
+
+def _response_format(ctype: str, fallback: str) -> str:
+    base = (ctype or "").split(";", 1)[0].strip().lower()
+    return FORMAT_BY_CTYPE.get(base, fallback)
 
 
 # ---- main flow ---------------------------------------------------------------
@@ -288,8 +343,9 @@ def _validate_speed(speed: Optional[float]) -> Optional[int]:
 
 def _run(args) -> int:
     userconfig.apply_defaults(args, "tts")
-    # #57 Class C1: the built-in literals, after config has had its turn.
-    userconfig.apply_literals(args, model=DEFAULT_TTS_MODEL, format=DEFAULT_FORMAT)
+    # #57 Class C1: the built-in model literal, after config has had its turn.
+    # Format deliberately stays None so the API can apply the model-specific default.
+    userconfig.apply_literals(args, model=DEFAULT_TTS_MODEL)
     rc = _validate_speed(args.speed)
     if rc is not None:
         return rc
@@ -305,11 +361,11 @@ def _run(args) -> int:
         return 2
 
     try:
-        price = _fetch_tts_price_per_million(client, args.model)
+        resolved = _resolve_tts(client, args.model, args.format)
     except ValueError as e:
         print(f"tts: {e}", file=sys.stderr)
         return 2
-    cost = _estimate_cost(len(text), price)
+    cost = _estimate_cost(len(text), resolved.price_per_million)
     _print_estimate(cost, len(text), args.model)
     _print_balance_and_remaining(client, cost, show=not args.no_balance)
 
@@ -332,8 +388,9 @@ def _run(args) -> int:
     body: dict = {
         "input": text,
         "model": args.model,
-        "response_format": args.format,
     }
+    if resolved.requested_format is not None:
+        body["response_format"] = resolved.requested_format
     if args.voice:
         body["voice"] = args.voice
     if args.speed is not None:
@@ -352,7 +409,8 @@ def _run(args) -> int:
         return 5
 
     short = _short_id(text, args.model, args.voice)
-    out_path = _resolve_output_path(args.output, short, args.format)
+    output_format = _response_format(ctype, resolved.output_format)
+    out_path = _resolve_output_path(args.output, short, output_format)
 
     try:
         out_path.write_bytes(audio)
