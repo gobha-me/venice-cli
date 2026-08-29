@@ -163,7 +163,11 @@ After charge:   $32.69 USD
 Suppress with `--no-balance`, or set `defaults.no_balance` once to suppress it
 everywhere (`--show-balance` re-enables it for a single run). Hard-cap a single call
 with `--max-spend USD` (refuses to queue / synthesize if the estimate exceeds
-the cap).
+the cap). Caps and polling durations must be finite numbers; `NaN` and infinity
+are rejected before any paid request. When an endpoint has no reliable upfront
+estimate, supplying `--max-spend` fails closed instead of treating the cap as
+unmetered; use the ordinary confirmation prompt or `--yes` without a cap if you
+accept that endpoint's dynamic price.
 
 ## Sound effects
 

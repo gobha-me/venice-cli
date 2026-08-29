@@ -749,6 +749,29 @@ class TestSpawnTool(_ScoutBase):
         self.assertNotIn("spent_usd", out)
         self.assertNotIn("spend_cap_usd", out)
 
+    def test_non_finite_spawn_cap_is_an_error_not_uncapped(self):
+        tool, seen = _fake_paid_tool(cost=0.90)
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=bad):
+                out = _code.spawn_tool(
+                    None, "m", {}, [tool], max_spend=bad
+                ).invoke({"task": "x", "role": "asset"})
+                self.assertEqual(out["status"], "error")
+                self.assertIn("invalid max_spend", out["message"])
+        self.assertEqual(seen["calls"], 0)
+
+    def test_non_finite_paid_tool_cost_closes_worker_cap(self):
+        tool, seen = _fake_paid_tool(cost=float("nan"))
+        with mock.patch.object(
+            _agent, "run_spawn", self._spend_run("venice_image", 2)
+        ):
+            out = _code.spawn_tool(
+                None, "m", {}, [tool], max_spend=2.00
+            ).invoke({"task": "make art", "role": "asset"})
+        self.assertEqual(out["_statuses"], ["error", "blocked"])
+        self.assertEqual(seen["calls"], 1)
+        self.assertEqual(out["spent_usd"], 2.00)
+
 
 class TestSpawnWiring(_ScoutBase):
     """`venice code --spawn` folds the tool in and advertises it in the prompt."""

@@ -4,7 +4,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from .. import audio_post, billing, config, userconfig
+from .. import _numeric, audio_post, billing, config, userconfig
 from ..client import VeniceAPIError
 from . import _audio, _queue, _shared
 
@@ -50,7 +50,7 @@ def register(subparsers) -> None:
     _shared.add_cleanup_flag(p, section="sfx", endpoint="/audio/complete")
     p.add_argument(
         "--max-spend",
-        type=float,
+        type=_numeric.non_negative_float,
         default=None,
         metavar="USD",
         help="Refuse to queue if the quote exceeds this USD cap.",
@@ -157,7 +157,11 @@ def _run_generate(args) -> int:
         print(f"quote rejected: {e}", file=sys.stderr)
         return _queue.status_to_exit(e)
 
-    quote_value = quote.get("quote", quote)
+    try:
+        quote_value = _shared.quote_cost(quote)
+    except ValueError as e:
+        print(f"sfx: {e}", file=sys.stderr)
+        return 2
     _shared.print_estimate(quote_value, f"model={args.model}, duration={duration}s")
     _shared.print_balance_and_remaining(client, quote_value, show=not args.no_balance)
 

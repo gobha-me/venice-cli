@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 from typing import Callable, Iterable, List, Optional, Tuple, Union
 
-from .. import billing
+from .. import _numeric, billing
 from ..client import VeniceAPIError
 from . import _index
 
@@ -220,13 +220,13 @@ def add_poll_flags(parser, *, section: str, interval: float, max_wait: float) ->
     fixed by those impls and stays CLI-only (the `no_cleanup` precedent).
     """
     parser.add_argument(
-        "--poll-interval", type=float, default=None, metavar="SEC",
+        "--poll-interval", type=_numeric.finite_float, default=None, metavar="SEC",
         help=f"Seconds between status polls (default {interval:g}). "
              f"Config-backable via defaults.{section}.poll_interval (CLI only -- "
              "the agent/MCP tools fix their own cadence).",
     )
     parser.add_argument(
-        "--max-wait", type=float, default=None, metavar="SEC",
+        "--max-wait", type=_numeric.finite_float, default=None, metavar="SEC",
         help=f"Give up waiting after this many seconds (default {max_wait:g}). "
              f"Config-backable via defaults.{section}.max_wait, which the "
              f"venice_{section} agent/MCP tool honors too.",
@@ -257,6 +257,8 @@ def resolve_poll(poll_interval, max_wait, *, label: str,
         poll_interval = interval
     if max_wait is None:
         max_wait = max_wait_default
+    poll_interval = _numeric.finite_float(poll_interval)
+    max_wait = _numeric.finite_float(max_wait)
     if poll_interval < 0:
         print(f"{label}: --poll-interval must be >= 0; using {interval:g}",
               file=sys.stderr)
@@ -352,12 +354,25 @@ def print_balance_and_remaining(client, cost: Optional[float], *, show: bool) ->
 
 
 def over_budget(cost: Optional[float], max_spend: Optional[float]) -> bool:
-    if max_spend is None or cost is None:
+    if max_spend is None:
         return False
+    cap = _numeric.non_negative_float(max_spend)
+    if cost is None:
+        return True
+    return _numeric.non_negative_float(cost) > cap
+
+
+def quote_cost(payload) -> float:
+    """Extract a finite, non-negative cost from a quote response."""
+    raw = (
+        payload.get("quote")
+        if isinstance(payload, dict) and "quote" in payload
+        else payload
+    )
     try:
-        return float(cost) > float(max_spend)
-    except (TypeError, ValueError):
-        return False
+        return _numeric.non_negative_float(raw)
+    except ValueError:
+        raise ValueError("quote response did not contain a finite non-negative cost") from None
 
 
 def confirm_or_exit(yes: bool) -> Optional[int]:

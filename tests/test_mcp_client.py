@@ -165,6 +165,14 @@ class TestPureHelpers(unittest.TestCase):
             self.assertEqual(mc._resolve_timeout(None, "T_ENV", 30), 7.0)
         self.assertEqual(mc._resolve_timeout(None, "MISSING_ENV", 30), 30.0)
 
+    def test_resolve_timeout_rejects_non_finite_selected_value(self):
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(source="explicit", value=bad), self.assertRaises(ValueError):
+                mc._resolve_timeout(bad, "MISSING_ENV", 30)
+        with mock.patch.dict(os.environ, {"T_ENV": "nan"}):
+            with self.assertRaises(ValueError):
+                mc._resolve_timeout(None, "T_ENV", 30)
+
 
 class TestImportClean(unittest.TestCase):
     def test_imports_without_the_mcp_sdk(self):

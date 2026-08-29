@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 from typing import Optional, Tuple
 
-from .. import audio_player, auth, billing, config, userconfig
+from .. import _numeric, audio_player, auth, billing, config, userconfig
 from ..client import VeniceAPIError, build_client_from_auth
 from . import _shared
 
@@ -94,7 +94,7 @@ def register(subparsers) -> None:
     )
     p.add_argument(
         "--speed",
-        type=float,
+        type=_numeric.finite_float,
         default=None,
         metavar="N",
         help="Playback speed (0.25-4.0). Omit to use server default (1.0).",
@@ -108,7 +108,7 @@ def register(subparsers) -> None:
                    help="Estimate cost and exit; don't call /audio/speech.")
     p.add_argument(
         "--max-spend",
-        type=float,
+        type=_numeric.non_negative_float,
         default=None,
         metavar="USD",
         help="Refuse to synthesize if the estimated cost exceeds this USD cap.",
@@ -167,16 +167,22 @@ def _fetch_tts_price_per_million(client, model: str) -> Optional[float]:
     for m in data:
         if isinstance(m, dict) and m.get("id") == model:
             try:
-                return float(m["model_spec"]["pricing"]["input"]["usd"])
-            except (KeyError, TypeError, ValueError):
+                return _numeric.non_negative_float(
+                    m["model_spec"]["pricing"]["input"]["usd"]
+                )
+            except (KeyError, TypeError):
                 return None
+            except ValueError:
+                raise ValueError("model catalog contains an invalid TTS price") from None
     return None
 
 
 def _estimate_cost(char_count: int, price_per_million: Optional[float]) -> Optional[float]:
     if price_per_million is None:
         return None
-    return (char_count / 1_000_000.0) * price_per_million
+    return _numeric.non_negative_float(
+        (char_count / 1_000_000.0) * price_per_million
+    )
 
 
 # ---- output path -------------------------------------------------------------
@@ -298,22 +304,23 @@ def _run(args) -> int:
         print(str(e), file=sys.stderr)
         return 2
 
-    price = _fetch_tts_price_per_million(client, args.model)
+    try:
+        price = _fetch_tts_price_per_million(client, args.model)
+    except ValueError as e:
+        print(f"tts: {e}", file=sys.stderr)
+        return 2
     cost = _estimate_cost(len(text), price)
     _print_estimate(cost, len(text), args.model)
     _print_balance_and_remaining(client, cost, show=not args.no_balance)
 
-    if args.max_spend is not None and cost is not None:
-        try:
-            if float(cost) > float(args.max_spend):
-                print(
-                    f"tts: estimate {billing.format_usd(cost)} exceeds "
-                    f"--max-spend {billing.format_usd(args.max_spend)}; aborting",
-                    file=sys.stderr,
-                )
-                return 1
-        except (TypeError, ValueError):
-            pass
+    if _shared.over_budget(cost, args.max_spend):
+        shown = billing.format_usd(cost) if cost is not None else "unknown"
+        print(
+            f"tts: estimate {shown} cannot be kept within "
+            f"--max-spend {billing.format_usd(args.max_spend)}; aborting",
+            file=sys.stderr,
+        )
+        return 1
 
     if args.dry_run:
         return 0

@@ -42,7 +42,7 @@ import sys
 import threading
 from typing import Dict, List, Optional, Tuple
 
-from .. import auth
+from .. import _numeric, auth
 from .. import userconfig
 from . import _agent
 
@@ -213,17 +213,11 @@ def _safe_errlog():
 
 def _resolve_timeout(explicit, env_name: str, default: float) -> float:
     if explicit is not None:
-        try:
-            return float(explicit)
-        except (TypeError, ValueError):
-            pass
+        return _numeric.non_negative_float(explicit)
     env = os.environ.get(env_name)
     if env:
-        try:
-            return float(env)
-        except ValueError:
-            pass
-    return default
+        return _numeric.non_negative_float(env)
+    return _numeric.non_negative_float(default)
 
 
 # --------------------------------------------------------------------------- #

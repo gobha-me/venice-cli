@@ -406,6 +406,28 @@ class TestVeniceClient(unittest.TestCase):
                     interval=0, max_wait=10,
                 )
 
+    def test_request_rejects_non_finite_json_before_urlopen(self):
+        c = VeniceClient(api_key="k")
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=bad), mock.patch(
+                "venice.client.urllib.request.urlopen"
+            ) as opened:
+                with self.assertRaisesRegex(VeniceAPIError, "strict JSON"):
+                    c.post_json("/paid", {"cost": bad})
+                opened.assert_not_called()
+
+    def test_poll_retrieve_rejects_non_finite_controls_before_urlopen(self):
+        c = VeniceClient(api_key="k")
+        for field in ("interval", "max_wait"):
+            for bad in (float("nan"), float("inf"), float("-inf")):
+                kwargs = {"interval": 0.0, "max_wait": 1.0, field: bad}
+                with self.subTest(field=field, value=bad), mock.patch(
+                    "venice.client.urllib.request.urlopen"
+                ) as opened:
+                    with self.assertRaises(ValueError):
+                        c.poll_retrieve("/poll", {}, **kwargs)
+                    opened.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -39,7 +39,7 @@ import sys
 import time
 from typing import List, Optional
 
-from .. import auth, config, userconfig
+from .. import _numeric, auth, config, userconfig
 from ..client import build_client_from_auth
 from . import (_agent, _browser, _code, _compact, _mailbox, _models, _openai,
                _repl, _review, _session, _steer)
@@ -181,7 +181,7 @@ def register(subparsers) -> None:
         "--system", "-s", default=None,
         help="Extra project-specific instructions appended to the coding prompt.",
     )
-    p.add_argument("--temperature", "-t", type=float, default=None)
+    p.add_argument("--temperature", "-t", type=_numeric.finite_float, default=None)
     p.add_argument("--max-tokens", type=int, default=None, dest="max_tokens")
     p.add_argument(
         "--json", action="store_true",
@@ -302,7 +302,8 @@ def register(subparsers) -> None:
         "can't spawn further subagents or widen roots (#52).",
     )
     grp.add_argument(
-        "--spawn-max-spend", type=float, default=None, dest="spawn_max_spend",
+        "--spawn-max-spend", type=_numeric.finite_float, default=None,
+        dest="spawn_max_spend",
         metavar="USD",
         help="Per-worker USD cap on the cumulative estimated media spend of an 'asset' "
         "venice_spawn worker (default $2.00; <= 0 disables). A worker runs auto-approved, "
@@ -383,7 +384,7 @@ def register(subparsers) -> None:
         "runs stay within the context window (#48; costs a summarization call).",
     )
     grp.add_argument(
-        "--session-max-spend", type=float, default=None, metavar="USD",
+        "--session-max-spend", type=_numeric.finite_float, default=None, metavar="USD",
         dest="session_max_spend",
         help="Cap total chat-completion spend for this run (#66): meters the "
         "model's calls from server token usage and stops starting new turns at "
@@ -604,7 +605,7 @@ def _emit_plan_only(args, root, task, plan_text, *, usage=None) -> int:
         doc = {"root": root, "task": task, "plan": plan_text, "mode": "plan_only"}
         if usage is not None:
             doc["usage"] = usage  # #81: a plan turn is a real call and a real wait
-        json.dump(doc, sys.stdout, indent=2, default=str)
+        json.dump(doc, sys.stdout, indent=2, default=str, allow_nan=False)
         sys.stdout.write("\n")
     else:
         print(plan_text)  # the plan is the deliverable -> stdout
@@ -1076,7 +1077,7 @@ def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task
             envelope["planner"] = _code.merge_summary(dispatches)
         if unprocessed:  # #78: steers that arrived post-run (not fed to the model)
             envelope["unprocessed_steering"] = unprocessed
-        json.dump(envelope, sys.stdout, indent=2, default=str)
+        json.dump(envelope, sys.stdout, indent=2, default=str, allow_nan=False)
         sys.stdout.write("\n")
 
     return {None: 0, "pass": 0, "fail": 1, "unknown": 10}[verdict]

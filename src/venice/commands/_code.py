@@ -45,6 +45,7 @@ import threading
 from pathlib import Path
 from typing import List, Optional
 
+from .. import _numeric
 from . import _agent, _exec, _index, _mcp, _memory, _shared
 from ._exec import (  # shared exec rails (#33): one gate for `code` and chat --shell
     DEFAULT_EXEC_TIMEOUT,
@@ -1246,8 +1247,18 @@ def _meter(tool: _agent.Tool, cap: float, spent: list) -> _agent.Tool:
         result = inner(arguments, confirm=confirm)
         if isinstance(result, dict):
             c = result.get("cost_estimate_usd")
-            if isinstance(c, (int, float)) and not isinstance(c, bool) and c > 0:
-                spent[0] += float(c)
+            if c is not None:
+                try:
+                    spent[0] += _numeric.non_negative_float(c)
+                except ValueError:
+                    spent[0] = cap
+                    return {
+                        "status": "error",
+                        "message": (
+                            "spawn: paid tool returned an invalid cost estimate; "
+                            "the worker spend cap is closed"
+                        ),
+                    }
         return result
 
     return dataclasses.replace(tool, invoke=metered)
@@ -1350,6 +1361,10 @@ def spawn_tool(oai, model, base_kwargs, parent_tools, *,
         # Per-worker USD media cap: wrap each paid tool in a spend meter sharing one
         # accumulator. `<= 0` disables (identity pass-through == pre-slice behavior).
         raw = _SPAWN_MAX_SPEND if max_spend is None else max_spend
+        try:
+            raw = _numeric.finite_float(raw)
+        except ValueError as e:
+            return _err(f"spawn: invalid max_spend: {e}")
         cap = None if raw <= 0 else float(raw)
         spent = [0.0]
         if cap is not None:
@@ -1487,8 +1502,12 @@ def merge_summary(dispatches: List[dict]) -> dict:
         if tid is not None and str(tid) not in known:
             warnings.append(f"{tag} references unknown task_id {str(tid)!r}")
         c = d.get("spent_usd")
-        if isinstance(c, (int, float)) and not isinstance(c, bool):
-            spent += float(c)
+        if c is not None:
+            try:
+                spent += _numeric.non_negative_float(c)
+            except ValueError:
+                errors += 1
+                warnings.append(f"{tag} reported invalid non-finite spend")
         n = d.get("tokens")
         if isinstance(n, int) and not isinstance(n, bool):
             tok += n

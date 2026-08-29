@@ -94,6 +94,17 @@ def _image_models_payload():
     }).encode()
 
 
+def _unpriced_image_models_payload():
+    return json.dumps({
+        "object": "list",
+        "data": [{
+            "id": "venice-sd35",
+            "type": "image",
+            "model_spec": {"name": "Venice SD3.5", "pricing": {}},
+        }],
+    }).encode()
+
+
 def _gen_payload(n=1):
     b64 = base64.b64encode(FAKE_PNG).decode()
     return json.dumps({
@@ -222,6 +233,23 @@ class TestImageFlow(unittest.TestCase):
                         lambda *a, **kw: next(responses)):
             rc = image._run(_build_args(variants=4, max_spend=0.02))
         self.assertEqual(rc, 1)
+        self.assertEqual(list(Path(".").glob("*.png")), [])
+
+    def test_max_spend_with_unknown_price_fails_closed_before_generate(self):
+        from venice.commands import image
+
+        calls = []
+
+        def fake_urlopen(req, timeout=None):
+            calls.append(req.full_url)
+            return FakeResp(200, _unpriced_image_models_payload(), "application/json")
+
+        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch("venice.client.urllib.request.urlopen", fake_urlopen):
+            rc = image._run(_build_args(max_spend=0.02))
+        self.assertEqual(rc, 1)
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0].endswith("/models?type=image"))
         self.assertEqual(list(Path(".").glob("*.png")), [])
 
     def test_missing_prompt_returns_exit_2(self):
@@ -805,6 +833,17 @@ class TestSafeModeConfig(unittest.TestCase):
         args = self._parse()
         userconfig.apply_defaults(args, "image", doc)
         self.assertFalse(args.safe_mode)  # _as_bool coerces "false"
+
+
+class TestImagePricingValidation(unittest.TestCase):
+    def test_non_finite_catalog_price_is_rejected(self):
+        from venice.commands import image
+
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=bad), self.assertRaisesRegex(
+                ValueError, "invalid image price"
+            ):
+                image._usd_from_pricing({"image": {"usd": bad}})
 
 
 if __name__ == "__main__":

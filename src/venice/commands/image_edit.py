@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
-from .. import auth, userconfig
+from .. import _numeric, auth, userconfig
 from ..client import build_client_from_auth
 from ._shared import (
     add_balance_flag,
@@ -98,7 +98,7 @@ def register(subparsers) -> None:
                    help="Show the planned output and exit; don't call the API.")
     p.add_argument(
         "--max-spend",
-        type=float,
+        type=_numeric.non_negative_float,
         default=None,
         metavar="USD",
         help="Refuse if the estimated cost exceeds this cap. Note: image-edit "
@@ -181,7 +181,11 @@ def _run(args) -> int:
     cost = None  # dynamic pricing -- no reliable upfront quote
     print_estimate(cost, "image edit; dynamic $0.001-$10.00/call")
     print_balance_and_remaining(client, cost, show=not args.no_balance)
-    if over_budget(cost, args.max_spend):  # no-op while cost is unknown
+    if over_budget(cost, args.max_spend):
+        print(
+            "image-edit: dynamic price cannot be bounded by --max-spend; aborting",
+            file=sys.stderr,
+        )
         return 1
 
     ext = EXT_BY_FORMAT.get(args.output_format or "png", ".png")

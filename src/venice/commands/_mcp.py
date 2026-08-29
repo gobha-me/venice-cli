@@ -23,6 +23,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import List, Optional
 
+from .. import _numeric
 from ..client import VeniceAPIError
 from . import (
     _audio, _browser, _index, _memory, _models, _openai, _queue, _shared,
@@ -68,16 +69,10 @@ DEFAULT_MCP_MAX_SPEND = 0.10  # USD: auto-approve ceiling for a single tool call
 def resolve_max_spend(max_spend: Optional[float]) -> float:
     """Cap precedence: explicit arg -> $VENICE_MCP_MAX_SPEND -> DEFAULT."""
     if max_spend is not None:
-        try:
-            return float(max_spend)
-        except (TypeError, ValueError):
-            pass
+        return _numeric.non_negative_float(max_spend)
     env = os.environ.get("VENICE_MCP_MAX_SPEND")
     if env:
-        try:
-            return float(env)
-        except ValueError:
-            pass
+        return _numeric.non_negative_float(env)
     return DEFAULT_MCP_MAX_SPEND
 
 
@@ -90,9 +85,17 @@ def check_spend(
     cost is over the cap OR unknown (dynamic-priced upscale/bg-remove). Reuses
     `_shared.over_budget` for the comparison.
     """
+    try:
+        cap = resolve_max_spend(max_spend)
+    except ValueError as e:
+        return _err(f"{label}: invalid max_spend: {e}")
+    if cost is not None:
+        try:
+            cost = _numeric.non_negative_float(cost)
+        except ValueError as e:
+            return _err(f"{label}: invalid estimated cost: {e}")
     if confirm:
         return None
-    cap = resolve_max_spend(max_spend)
     if cost is None or _shared.over_budget(cost, cap):
         shown = f"${cost:.4f}" if cost is not None else "unknown"
         return {
@@ -211,8 +214,11 @@ def image_tool(
         )
 
     prompt = prompt.strip()
-    price = _image._fetch_image_price(client, model)
-    cost = _image._estimate_cost(price, variants)
+    try:
+        price = _image._fetch_image_price(client, model)
+        cost = _image._estimate_cost(price, variants)
+    except ValueError as e:
+        return _err(f"image: {e}")
     gate = check_spend(cost, confirm=confirm, max_spend=max_spend, label="image")
     if gate is not None:
         return gate
@@ -280,8 +286,11 @@ def tts_tool(
         return _err(f"tts: speed {speed} out of range (0.25-4.0)")
 
     text = text.strip()
-    price = _tts._fetch_tts_price_per_million(client, model)
-    cost = _tts._estimate_cost(len(text), price)
+    try:
+        price = _tts._fetch_tts_price_per_million(client, model)
+        cost = _tts._estimate_cost(len(text), price)
+    except ValueError as e:
+        return _err(f"tts: {e}")
     gate = check_spend(cost, confirm=confirm, max_spend=max_spend, label="tts")
     if gate is not None:
         return gate
@@ -341,6 +350,13 @@ def _queue_media(
     then return a `{"status": "queued", ...}` job handle *before* polling -- the
     caller fetches the file later via `venice_job_result`.
     """
+    try:
+        quote_value = _shared.quote_cost(quote_value)
+        max_wait = _numeric.non_negative_float(max_wait)
+        poll_interval = _numeric.non_negative_float(poll_interval)
+    except ValueError as e:
+        return _err(f"{label}: {e}")
+
     gate = check_spend(quote_value, confirm=confirm, max_spend=max_spend, label=label)
     if gate is not None:
         return gate
@@ -408,6 +424,10 @@ def sfx_tool(
     """
     if not prompt or not prompt.strip():
         return _err("sfx: prompt is required")
+    try:
+        max_wait = _numeric.non_negative_float(max_wait)
+    except ValueError as e:
+        return _err(f"sfx: invalid max_wait: {e}")
     if model not in _sfx.SFX_MODELS:
         return _err(f"sfx: unknown model {model!r}; choose from {', '.join(sorted(_sfx.SFX_MODELS))}")
 
@@ -459,6 +479,10 @@ def music_tool(
     """
     if not prompt or not prompt.strip():
         return _err("music: prompt is required")
+    try:
+        max_wait = _numeric.non_negative_float(max_wait)
+    except ValueError as e:
+        return _err(f"music: invalid max_wait: {e}")
 
     # NOTE: no `resolve_instrumental` here, deliberately. On this path a model's
     # explicit `instrumental=true` and an operator's defaults.music.instrumental
@@ -820,6 +844,10 @@ def video_tool(
     """
     if not prompt or not prompt.strip():
         return _err("video: prompt is required")
+    try:
+        max_wait = _numeric.non_negative_float(max_wait)
+    except ValueError as e:
+        return _err(f"video: invalid max_wait: {e}")
 
     ns = SimpleNamespace(
         image=image_url, end_image=end_image_url, video=video_url,
@@ -851,7 +879,10 @@ def video_tool(
         quote = client.post_json("/video/quote", quote_body)
     except VeniceAPIError as e:
         return _err(f"video quote rejected: {e}")
-    quote_value = quote.get("quote", quote)
+    try:
+        quote_value = _shared.quote_cost(quote)
+    except ValueError as e:
+        return _err(f"video: {e}")
 
     gate = check_spend(quote_value, confirm=confirm, max_spend=max_spend, label="video")
     if gate is not None:
@@ -1005,6 +1036,10 @@ def job_result_tool(
     """
     if not queue_id:
         return _err("job_result: queue_id is required")
+    try:
+        max_wait = _numeric.non_negative_float(max_wait)
+    except ValueError as e:
+        return _err(f"job_result: invalid max_wait: {e}")
     base = _job_route(type)
     if base is None:
         return _err(

@@ -447,6 +447,31 @@ class TestCostLedger(unittest.TestCase):
         L2.record({"prompt_tokens": 2000, "completion_tokens": 0})  # $0.002 > cap
         self.assertTrue(L2.over())
 
+    def test_non_finite_session_caps_are_rejected_not_uncapped(self):
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=bad), self.assertRaises(ValueError):
+                _agent.CostLedger(max_spend=bad)
+
+    def test_non_finite_catalog_pricing_trips_a_configured_cap(self):
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            ledger = _agent.CostLedger(max_spend=1.0)
+            ledger.bind_pricing({"input": {"usd": bad}})
+            with self.subTest(value=bad):
+                self.assertTrue(ledger.invalid_pricing)
+                self.assertTrue(ledger.over())
+
+    def test_non_finite_usage_and_restored_values_degrade_to_zero(self):
+        ledger = _agent.CostLedger()
+        ledger.bind_pricing({"input": {"usd": 1.0}, "output": {"usd": 1.0}})
+        ledger.record({
+            "prompt_tokens": float("inf"),
+            "completion_tokens": float("nan"),
+        })
+        ledger.restore({"total": float("inf"), "elapsed_seconds": float("nan")})
+        self.assertEqual(ledger.total, 0.0)
+        self.assertEqual(ledger.prompt_tokens, 0)
+        self.assertEqual(ledger.completion_tokens, 0)
+
     def test_unpriced_model_counts_tokens_without_charge(self):
         L = _agent.CostLedger(max_spend=0.0)
         # no bind_pricing -> unknown rate
@@ -2391,6 +2416,22 @@ class TestRunLoopSpendGate(unittest.TestCase):
             )
         self.assertEqual(rc, 0)
         self.assertEqual(len(calls), 1)  # no forced final despite huge usage
+
+    def test_invalid_catalog_pricing_aborts_without_a_model_call(self):
+        fake, calls = _fake_oai([])
+        ledger = _agent.CostLedger(max_spend=1.0)
+        ledger.bind_pricing({"input": {"usd": float("nan")}})
+        err = io.StringIO()
+        with mock.patch.object(sys, "stdout", io.StringIO()), \
+             mock.patch.object(sys, "stderr", err):
+            rc = _agent.run_loop(
+                fake, "m", [{"role": "user", "content": "go"}], {},
+                [self._tool()], max_tool_calls=0, yes=True, json_out=False,
+                ledger=ledger,
+            )
+        self.assertEqual(rc, 2)
+        self.assertEqual(calls, [])
+        self.assertIn("invalid non-finite pricing", err.getvalue())
 
     def test_unpriced_ledger_never_gates_but_counts(self):
         usage = {"prompt_tokens": 5000, "completion_tokens": 500}

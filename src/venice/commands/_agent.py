@@ -39,6 +39,7 @@ from typing import Callable, Dict, List, NamedTuple, Optional, Tuple
 
 # Aliased: a bare `config` would be shadowed by the `config=None` keyword argument
 # that `browser_tools` (and its callers) already take further down this module.
+from .. import _numeric
 from .. import config as _config
 from .. import userconfig
 from . import _exec
@@ -178,8 +179,11 @@ def _usd_per_token(pricing, key) -> Optional[float]:
     if not isinstance(pricing, dict):
         return None
     node = pricing.get(key)
-    if isinstance(node, dict) and isinstance(node.get("usd"), (int, float)):
-        return float(node["usd"]) / 1_000_000.0
+    if isinstance(node, dict) and "usd" in node:
+        try:
+            return _numeric.non_negative_float(node["usd"]) / 1_000_000.0
+        except ValueError:
+            raise ValueError(f"invalid catalog pricing for {key}") from None
     return None
 
 
@@ -191,7 +195,10 @@ def _as_int(v) -> int:
     if isinstance(v, bool):
         return 0
     if isinstance(v, (int, float)):
-        return int(v) if v > 0 else 0
+        try:
+            return int(_numeric.non_negative_float(v)) if v > 0 else 0
+        except (OverflowError, ValueError):
+            return 0
     return 0
 
 
@@ -204,7 +211,10 @@ def _as_float(v) -> float:
     if isinstance(v, bool):
         return 0.0
     if isinstance(v, (int, float)):
-        return float(v) if v > 0 else 0.0
+        try:
+            return _numeric.non_negative_float(v) if v > 0 else 0.0
+        except ValueError:
+            return 0.0
     return 0.0
 
 
@@ -295,9 +305,15 @@ def _dump_raw_usage(usage) -> None:
         return
     try:
         raw = usage.model_dump() if hasattr(usage, "model_dump") else usage
-        line = json.dumps(raw, sort_keys=True, default=str)
+        line = json.dumps(raw, sort_keys=True, default=str, allow_nan=False)
     except Exception:  # noqa: BLE001 - a diagnostic must never break the turn
-        line = repr(usage)
+        try:
+            normalized = (
+                {str(k): v for k, v in raw.items()} if isinstance(raw, dict) else raw
+            )
+            line = json.dumps(normalized, default=str, allow_nan=False)
+        except Exception:  # noqa: BLE001 - same diagnostic-only boundary
+            line = "<usage is not valid strict JSON>"
     print(f"usage-raw: {line}", file=sys.stderr)
 
 
@@ -341,7 +357,7 @@ class CostLedger:
     def __init__(self, max_spend: Optional[float] = None,
                  max_tokens: Optional[int] = None, *, mirror=None):
         # A non-positive cap means "uncapped" (mirrors --max-tool-calls 0).
-        cap = float(max_spend) if max_spend is not None else None
+        cap = _numeric.finite_float(max_spend) if max_spend is not None else None
         self.max_spend = cap if (cap is not None and cap > 0) else None
         # #52: an orthogonal cumulative *token* ceiling (prompt+completion), used by
         # per-subagent runs (`--subagent-max-tokens`). Same non-positive->None rule.
@@ -460,6 +476,7 @@ class CostLedger:
         self._out = None         # per-token output rate (USD)
         self._cache_in = None    # per-token cache-read rate (USD); None -> use _in
         self._cache_write = None  # per-token cache-write rate (USD); None -> use _in
+        self.invalid_pricing = False
 
     def bind_pricing(self, pricing) -> None:
         """Set the per-token rates from a catalog `model_spec.pricing` block.
@@ -467,10 +484,15 @@ class CostLedger:
         `cache_input`/`cache_write` are optional (present only for cache-capable
         models); left None they fall back to the plain input rate at cost time.
         """
-        self._in = _usd_per_token(pricing, "input")
-        self._out = _usd_per_token(pricing, "output")
-        self._cache_in = _usd_per_token(pricing, "cache_input")
-        self._cache_write = _usd_per_token(pricing, "cache_write")
+        self.invalid_pricing = False
+        try:
+            self._in = _usd_per_token(pricing, "input")
+            self._out = _usd_per_token(pricing, "output")
+            self._cache_in = _usd_per_token(pricing, "cache_input")
+            self._cache_write = _usd_per_token(pricing, "cache_write")
+        except ValueError:
+            self._in = self._out = self._cache_in = self._cache_write = None
+            self.invalid_pricing = True
 
     def to_dict(self) -> dict:
         """Serialize the running accumulators for cross-resume persistence (#47/#75).
@@ -790,7 +812,7 @@ class CostLedger:
             # sticky marker or `0 in  0 out  $0.0000` would read as a measurement.
             if unreported:
                 row["unreported"] = True
-            row["cost"] += cost
+            row["cost"] += _as_float(cost)
             row["prompt_tokens"] += _as_int(prompt_tokens)
             row["completion_tokens"] += _as_int(completion_tokens)
             # Rounded on the way in like `record_turn`'s; an unstamped window adds 0.
@@ -802,14 +824,14 @@ class CostLedger:
     def bucket_cost(self, name=None) -> float:
         """Off-loop spend (#101): one bucket's cost, or every bucket's when `name` is None."""
         if name is not None:
-            return float(self.buckets.get(name, {}).get("cost", 0.0))
+            return _as_float(self.buckets.get(name, {}).get("cost", 0.0))
         # #117: snapshot under the lock. A mirrored child adds a NEW KEY on a pool
         # worker, and iterating a dict while another thread inserts into it raises
         # outright. Reads happen on the main thread while workers are joined today, so
         # this is insurance rather than a live fix -- but it is two lines.
         with self._buckets_lock:
             rows = list(self.buckets.values())
-        return sum(float(b.get("cost", 0.0)) for b in rows)
+        return sum(_as_float(b.get("cost", 0.0)) for b in rows)
 
     def bucket_calls(self, name=None) -> int:
         """Off-loop API calls (#101) -- deliberately NOT part of `api_calls_total`."""
@@ -1069,7 +1091,9 @@ class CostLedger:
         (compaction today) and not just the main loop. Still monotonic -- both terms
         only grow -- so a gate that has tripped stays tripped.
         """
-        return self.max_spend is not None and self.billed_total() >= self.max_spend
+        return self.max_spend is not None and (
+            self.invalid_pricing or self.billed_total() >= self.max_spend
+        )
 
     def over_tokens(self) -> bool:
         """True when cumulative prompt+completion tokens reached/exceeded the cap.
@@ -3065,7 +3089,7 @@ def _dispatch_parallel(
                 "role": "tool",
                 "tool_call_id": tc.id,
                 "name": tc.function.name,
-                "content": json.dumps(results[i], default=str),
+                "content": json.dumps(results[i], default=str, allow_nan=False),
             }
         )
     return calls_made + min(slots, n)
@@ -3073,7 +3097,9 @@ def _dispatch_parallel(
 
 def _emit_final(resp, json_out: bool) -> int:
     if json_out:
-        json.dump(resp.model_dump(), sys.stdout, indent=2, default=str)
+        json.dump(
+            resp.model_dump(), sys.stdout, indent=2, default=str, allow_nan=False
+        )
         sys.stdout.write("\n")
         return 0
     content = ""
@@ -3183,6 +3209,13 @@ def run_loop(
                     "content": "[steering message received mid-run]\n" + _steer,
                 })
         # Spend gate (#66): don't start a new paid turn once the cap is hit.
+        if ledger is not None and ledger.invalid_pricing:
+            print(
+                "chat: model catalog contains invalid non-finite pricing; "
+                "refusing to start a paid turn",
+                file=sys.stderr,
+            )
+            return 2
         if ledger is not None and ledger.over():
             return _force_final(
                 f"chat: reached --max-spend ({ledger.summary()}); "
@@ -3258,7 +3291,7 @@ def run_loop(
                         "role": "tool",
                         "tool_call_id": tc.id,
                         "name": tc.function.name,
-                        "content": json.dumps(result, default=str),
+                        "content": json.dumps(result, default=str, allow_nan=False),
                     }
                 )
 

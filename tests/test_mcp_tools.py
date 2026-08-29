@@ -1053,6 +1053,59 @@ class TestSpendHelpers(unittest.TestCase):
         gate2 = _mcp.check_spend(None, confirm=False, max_spend=0.10, label="x")
         self.assertEqual(gate2["status"], "confirmation_required")  # unknown -> confirm
 
+    def test_non_finite_caps_are_errors_and_never_fall_through(self):
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=bad):
+                result = _mcp.check_spend(
+                    0.01, confirm=True, max_spend=bad, label="x"
+                )
+                self.assertEqual(result["status"], "error")
+                self.assertIn("invalid max_spend", result["message"])
+        with mock.patch.dict(
+            os.environ, {"VENICE_MCP_MAX_SPEND": "nan"}, clear=False
+        ):
+            with self.assertRaises(ValueError):
+                _mcp.resolve_max_spend(None)
+
+    def test_non_finite_cost_is_an_error_even_when_confirmed(self):
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=bad):
+                result = _mcp.check_spend(
+                    bad, confirm=True, max_spend=0.10, label="x"
+                )
+                self.assertEqual(result["status"], "error")
+                self.assertIn("invalid estimated cost", result["message"])
+
+    def test_non_finite_results_remain_strict_json_serializable(self):
+        result = _mcp.check_spend(
+            float("nan"), confirm=True, max_spend=0.10, label="x"
+        )
+        json.dumps(result, allow_nan=False)
+
+    def test_sfx_rejects_invalid_wait_before_requesting_a_quote(self):
+        client = mock.Mock()
+        result = _mcp.sfx_tool(client, "boom", max_wait=float("nan"))
+        self.assertEqual(result["status"], "error")
+        self.assertIn("invalid max_wait", result["message"])
+        client.post_json.assert_not_called()
+
+    def test_sfx_rejects_non_finite_quote_before_queue(self):
+        client = mock.Mock()
+        client.post_json.return_value = {"quote": float("inf")}
+        result = _mcp.sfx_tool(client, "boom", confirm=True)
+        self.assertEqual(result["status"], "error")
+        self.assertIn("quote response", result["message"])
+        self.assertEqual(client.post_json.call_count, 1)
+
+    def test_job_result_rejects_invalid_wait_before_retrieve(self):
+        client = mock.Mock()
+        result = _mcp.job_result_tool(
+            client, queue_id="q", type="sfx", model="m", max_wait=float("-inf")
+        )
+        self.assertEqual(result["status"], "error")
+        self.assertIn("invalid max_wait", result["message"])
+        client.post_json.assert_not_called()
+
     def test_output_dir_env_default(self):
         with mock.patch.dict(os.environ, {"VENICE_MCP_OUTPUT_DIR": "/tmp/venice-x"}):
             self.assertEqual(_mcp.resolve_output_dir(None), Path("/tmp/venice-x"))

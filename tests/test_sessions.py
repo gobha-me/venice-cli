@@ -62,6 +62,24 @@ class TestStore(_Base):
         self.assertEqual(r.usage["cache_read_tokens"], 4)
         self.assertEqual([m["content"] for m in r.messages], ["hi"])
 
+    def test_save_rejects_non_finite_usage_without_replacing_destination(self):
+        sess = self._mk()
+        path = S.save(sess)
+        original = path.read_bytes()
+        sess.usage = {"total": float("nan")}
+        with self.assertRaisesRegex(OSError, "non-finite JSON"):
+            S.save(sess)
+        self.assertEqual(path.read_bytes(), original)
+        self.assertFalse(path.with_suffix(".tmp").exists())
+
+    def test_load_rejects_non_standard_non_finite_json(self):
+        sess = self._mk()
+        self.zone.mkdir(parents=True)
+        path = self.zone / f"{sess.id}.json"
+        path.write_text('{"version":1,"usage":{"total":Infinity}}')
+        with self.assertRaisesRegex(S.SessionError, "non-finite JSON number"):
+            S.load(sess.id, "chat")
+
     def test_reasoning_extension_round_trips_without_schema_loss(self):
         sess = self._mk(messages=[
             {"role": "user", "content": "question"},
