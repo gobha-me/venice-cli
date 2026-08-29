@@ -69,6 +69,15 @@ def build_server(client, doc=None, root=None) -> FastMCP:
         cfg_scale: Optional[float] = None,
         steps: Optional[int] = None,
         style_preset: Optional[str] = None,
+        style_references: Optional[List[dict]] = None,
+        aspect_ratio: Optional[str] = None,
+        resolution: Optional[str] = None,
+        embed_exif_metadata: Optional[bool] = None,
+        lora_strength: Optional[int] = None,
+        quality: Optional[str] = None,
+        enable_web_search: Optional[bool] = None,
+        disable_prompt_optimization_thinking: Optional[bool] = None,
+        enhance_prompt: Optional[bool] = None,
         safe_mode: Optional[bool] = None,
         hide_watermark: Optional[bool] = None,
         output_dir: Optional[str] = None,
@@ -89,9 +98,18 @@ def build_server(client, doc=None, root=None) -> FastMCP:
                 model=model, variants=variants, format=format,
                 width=width, height=height, negative_prompt=negative_prompt,
                 seed=seed, cfg_scale=cfg_scale, steps=steps,
-                style_preset=style_preset, safe_mode=safe_mode,
+                style_preset=style_preset, style_references=style_references,
+                aspect_ratio=aspect_ratio, resolution=resolution,
+                embed_exif_metadata=embed_exif_metadata,
+                lora_strength=lora_strength, quality=quality,
+                enable_web_search=enable_web_search,
+                disable_prompt_optimization_thinking=(
+                    disable_prompt_optimization_thinking
+                ),
+                enhance_prompt=enhance_prompt, safe_mode=safe_mode,
                 hide_watermark=hide_watermark, output_dir=output_dir,
                 confirm=confirm, max_spend=max_spend,
+                path_authority=path_authority,
             )),
         )
 
@@ -301,14 +319,18 @@ def build_server(client, doc=None, root=None) -> FastMCP:
         aspect_ratio: Optional[str] = None,
         resolution: Optional[str] = None,
         output_format: Optional[str] = None,
+        quality: Optional[str] = None,
+        disable_prompt_optimization_thinking: Optional[bool] = None,
+        enhance_prompt: Optional[bool] = None,
         safe_mode: Optional[bool] = None,
         output_dir: Optional[str] = None,
         confirm: bool = False,
         max_spend: Optional[float] = None,
     ) -> dict:
         """Edit/inpaint an image via Venice /image/edit and return the file path. Base
-        image is a local input_path OR an image_url; one or two layer_paths (masks/
-        overlays) route to /image/multi-edit. Pricing is dynamic (no up-front estimate),
+        image is a local input_path OR an image_url; repeatable layer_paths (masks/
+        overlays) route to /image/multi-edit and use the model's live input limit.
+        Pricing is dynamic (no up-front estimate),
         so this ALWAYS requires confirm=true."""
         return _mcp.image_edit_tool(
             client, prompt,
@@ -316,7 +338,12 @@ def build_server(client, doc=None, root=None) -> FastMCP:
                 input_path=input_path, image_url=image_url,
                 layer_paths=layer_paths, model=model, aspect_ratio=aspect_ratio,
                 resolution=resolution, output_format=output_format,
-                safe_mode=safe_mode, output_dir=output_dir, confirm=confirm,
+                quality=quality,
+                disable_prompt_optimization_thinking=(
+                    disable_prompt_optimization_thinking
+                ),
+                enhance_prompt=enhance_prompt, safe_mode=safe_mode,
+                output_dir=output_dir, confirm=confirm,
                 max_spend=max_spend, path_authority=path_authority,
             )),
         )

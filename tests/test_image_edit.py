@@ -28,6 +28,9 @@ def _args(**ov):
         aspect_ratio=None,
         resolution=None,
         output_format=None,
+        quality=None,
+        disable_prompt_optimization_thinking=None,
+        enhance_prompt=None,
         safe_mode=None,
         output=None,
         yes=True,
@@ -71,17 +74,46 @@ class TestImageEditFlow(unittest.TestCase):
         Path("in.png").write_bytes(SOURCE_PNG)
         Path("mask.png").write_bytes(MASK_PNG)
         Path("layer2.png").write_bytes(LAYER2_PNG)
+        Path("layer3.png").write_bytes(b"LAYER3PNG")
 
     def tearDown(self):
         os.chdir(self.cwd)
         self.tmp.cleanup()
 
-    def _run(self, args, resp=None):
+    def _run(self, args, resp=None, *, max_inputs=3, qualities=None):
         from venice.commands import image_edit
 
         captured = {}
 
         def fake_urlopen(req, timeout=None):
+            if req.data is None:
+                catalog = {
+                    "data": [
+                        {
+                            "id": "firered-image-edit",
+                            "model_spec": {
+                                "traits": ["default"],
+                                "constraints": {
+                                    "combineImages": True,
+                                    "maxInputImages": max_inputs,
+                                    "qualities": qualities
+                                    or ["low", "medium", "high"],
+                                },
+                            },
+                        },
+                        {
+                            "id": "qwen-edit",
+                            "model_spec": {
+                                "constraints": {
+                                    "combineImages": True,
+                                    "maxInputImages": 3,
+                                    "qualities": ["low", "medium", "high"],
+                                }
+                            },
+                        },
+                    ]
+                }
+                return FakeResp(200, json.dumps(catalog).encode(), "application/json")
             captured["url"] = req.full_url
             captured["body"] = json.loads(req.data.decode("utf-8"))
             return resp if resp is not None else FakeResp(200, EDITED_PNG, "image/png")
@@ -151,6 +183,40 @@ class TestImageEditFlow(unittest.TestCase):
         self.assertEqual(cap["body"]["modelId"], "qwen-edit")
         self.assertNotIn("model", cap["body"])
 
+    def test_native_prompt_controls_apply_to_both_edit_routes(self):
+        for layers in (None, [Path("mask.png")]):
+            with self.subTest(multi=bool(layers)):
+                rc, cap = self._run(_args(
+                    layer=layers,
+                    disable_prompt_optimization_thinking=False,
+                    enhance_prompt=True,
+                ))
+                self.assertEqual(rc, 0)
+                self.assertIs(
+                    cap["body"]["disable_prompt_optimization_thinking"], False
+                )
+                self.assertIs(cap["body"]["enhance_prompt"], True)
+
+    def test_multi_edit_quality_is_validated_and_sent(self):
+        rc, cap = self._run(_args(
+            layer=[Path("mask.png")], quality="high"
+        ))
+        self.assertEqual(rc, 0)
+        self.assertEqual(cap["body"]["quality"], "high")
+
+        rc, cap = self._run(
+            _args(layer=[Path("mask.png")], quality="high"),
+            qualities=["low"],
+        )
+        self.assertEqual(rc, 2)
+        self.assertNotIn("body", cap)
+
+    def test_live_model_cap_can_allow_more_than_legacy_three_inputs(self):
+        layers = [Path("mask.png"), Path("layer2.png"), Path("layer3.png")]
+        rc, cap = self._run(_args(layer=layers), max_inputs=4)
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(cap["body"]["images"]), 4)
+
     def test_safe_mode_tristate_body(self):
         """#57 Class B: safe_mode is sent unconditionally now. Unset -> true
         (previously the key was omitted; the API schema defaults it to true, so
@@ -217,16 +283,21 @@ class TestImageEditFlow(unittest.TestCase):
             rc = image_edit._run(_args(prompt=None))
         self.assertEqual(rc, 2)
 
-    def test_too_many_layers_returns_2(self):
+    def test_model_specific_input_limit_returns_2_before_paid_request(self):
+        rc, captured = self._run(_args(
+            layer=[Path("mask.png"), Path("layer2.png"), Path("in.png")]))
+        self.assertEqual(rc, 2)
+        self.assertNotIn("body", captured)
+
+    def test_quality_without_layers_returns_2_before_network(self):
         from venice.commands import image_edit
 
         def explode(*a, **kw):
-            raise AssertionError("must not call the API on bad input")
+            raise AssertionError("single-edit quality must fail before network")
 
         with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
              mock.patch("venice.client.urllib.request.urlopen", explode):
-            rc = image_edit._run(_args(
-                layer=[Path("mask.png"), Path("layer2.png"), Path("in.png")]))
+            rc = image_edit._run(_args(quality="high"))
         self.assertEqual(rc, 2)
 
     def test_missing_input_file_returns_2(self):

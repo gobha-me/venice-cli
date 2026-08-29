@@ -53,6 +53,41 @@ def _video_catalog(model="seedance-2-0-text-to-video", constraints=None):
     ).encode()
 
 
+def _inpaint_catalog(model="firered-image-edit", *, max_inputs=3, qualities=None):
+    return json.dumps({
+        "data": [{
+            "id": model,
+            "model_spec": {
+                "traits": ["default"],
+                "constraints": {
+                    "combineImages": True,
+                    "maxInputImages": max_inputs,
+                    "qualities": qualities or ["low", "medium", "high"],
+                },
+            },
+        }]
+    }).encode()
+
+
+def _native_image_catalog(*, price=0.01, max_refs=2):
+    return json.dumps({
+        "data": [{
+            "id": "venice-sd35",
+            "model_spec": {
+                "supportsStyleReferences": True,
+                "constraints": {
+                    "maxStyleReferences": max_refs,
+                    "supportsStyleReferenceStrength": True,
+                    "qualities": ["low", "medium", "high"],
+                    "defaultQuality": "medium",
+                    "defaultResolution": "1K",
+                },
+                "pricing": {"image": {"usd": price}},
+            },
+        }]
+    }).encode()
+
+
 class _ToolTest(unittest.TestCase):
     """Base with a persistent temp output dir (survives until tearDown) and a
     stdout-empty guard usable around any tool call."""
@@ -156,6 +191,17 @@ class TestImageTool(_ToolTest):
         self.assertEqual(res["status"], "error")
         self.assertIn("variants", res["message"])
 
+    def test_boolean_lora_strength_is_rejected_without_http(self):
+        def boom(*a, **kw):
+            raise AssertionError("invalid lora strength must not hit the network")
+
+        with mock.patch("venice.client.urllib.request.urlopen", boom):
+            res = _mcp.image_tool(
+                _client(), "x", lora_strength=True, confirm=True
+            )
+        self.assertEqual(res["status"], "error")
+        self.assertIn("integer between 0 and 100", res["message"])
+
     def test_api_error_becomes_error_dict(self):
         from urllib.error import HTTPError
 
@@ -169,6 +215,64 @@ class TestImageTool(_ToolTest):
             res = _mcp.image_tool(_client(), "x", confirm=True)
         self.assertEqual(res["status"], "error")
         self.assertIn("image failed", res["message"])
+
+    def test_style_reference_path_fails_closed_without_host_authority(self):
+        outside_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, outside_dir, ignore_errors=True)
+        outside = Path(outside_dir) / "style.png"
+        outside.write_bytes(b"\x89PNG\r\n\x1a\nSTYLE")
+
+        def boom(*a, **kw):
+            raise AssertionError("denied style path must not reach the API")
+
+        with mock.patch("venice.client.urllib.request.urlopen", boom):
+            res = _mcp.image_tool(
+                _client(), "x", confirm=True,
+                style_references=[{"image": str(outside)}],
+            )
+        self.assertEqual(res["status"], "error")
+        self.assertIn("escapes", res["message"])
+
+    def test_allowed_style_reference_is_normalized_before_generate(self):
+        style = Path(self.td) / "style.png"
+        style.write_bytes(b"\x89PNG\r\n\x1a\nSTYLE")
+        gen = json.dumps({
+            "images": [base64.b64encode(b"IMG").decode()]
+        }).encode()
+        captured = {}
+
+        def fake(req, timeout=None):
+            if req.data is None:
+                return FakeResp(200, _native_image_catalog(), "application/json")
+            captured["body"] = json.loads(req.data.decode())
+            return FakeResp(200, gen)
+
+        with mock.patch("venice.client.urllib.request.urlopen", fake):
+            res = _mcp.image_tool(
+                _client(), "x", confirm=True, output_dir=self.td,
+                style_references=[{"image": str(style), "strength": 0.4}],
+                path_authority=self.media_authority(),
+            )
+        self.assertEqual(res["status"], "ok")
+        ref = captured["body"]["style_references"][0]
+        self.assertTrue(ref["image"].startswith("data:image/png;base64,"))
+        self.assertEqual(ref["strength"], 0.4)
+
+    def test_cost_addons_require_confirmation_even_with_high_cap(self):
+        calls = {"n": 0}
+
+        def fake(req, timeout=None):
+            calls["n"] += 1
+            return FakeResp(200, _native_image_catalog(), "application/json")
+
+        with mock.patch("venice.client.urllib.request.urlopen", fake):
+            res = _mcp.image_tool(
+                _client(), "x", enable_web_search=True,
+                confirm=False, max_spend=100.0,
+            )
+        self.assertEqual(res["status"], "confirmation_required")
+        self.assertIsNone(res["estimated_cost_usd"])
+        self.assertEqual(calls["n"], 1)
 
 
 class TestTtsTool(_ToolTest):
@@ -1153,6 +1257,8 @@ class TestImageEditTool(_ToolTest):
         captured = {}
 
         def fake(req, timeout=None):
+            if req.data is None:
+                return FakeResp(200, _inpaint_catalog(), "application/json")
             captured["url"] = req.full_url
             captured["body"] = json.loads(req.data.decode())
             return FakeResp(200, b"EDITED", "image/png")
@@ -1198,6 +1304,8 @@ class TestImageEditTool(_ToolTest):
         captured = {}
 
         def fake(req, timeout=None):
+            if req.data is None:
+                return FakeResp(200, _inpaint_catalog(), "application/json")
             captured["url"] = req.full_url
             captured["body"] = json.loads(req.data.decode())
             return FakeResp(200, b"MULTI", "image/png")
@@ -1211,6 +1319,33 @@ class TestImageEditTool(_ToolTest):
         self.assertEqual(res["status"], "ok")
         self.assertTrue(captured["url"].endswith("/image/multi-edit"))
         self.assertEqual(len(captured["body"]["images"]), 2)  # base + 1 layer
+
+    def test_multi_edit_native_controls_reach_request(self):
+        ip = self._png()
+        layer = Path(self.td) / "mask.png"
+        layer.write_bytes(b"\x89PNG\r\n\x1a\nMASK")
+        captured = {}
+
+        def fake(req, timeout=None):
+            if req.data is None:
+                return FakeResp(200, _inpaint_catalog(), "application/json")
+            captured["body"] = json.loads(req.data.decode())
+            return FakeResp(200, b"MULTI", "image/png")
+
+        with mock.patch("venice.client.urllib.request.urlopen", fake):
+            res = _mcp.image_edit_tool(
+                _client(), "composite", input_path=str(ip),
+                layer_paths=[str(layer)], quality="high",
+                disable_prompt_optimization_thinking=False,
+                enhance_prompt=True, output_dir=self.td, confirm=True,
+                path_authority=self.media_authority(),
+            )
+        self.assertEqual(res["status"], "ok")
+        self.assertEqual(captured["body"]["quality"], "high")
+        self.assertIs(
+            captured["body"]["disable_prompt_optimization_thinking"], False
+        )
+        self.assertIs(captured["body"]["enhance_prompt"], True)
 
     def test_denied_layer_stops_before_confirmation_and_api(self):
         ip = self._png()

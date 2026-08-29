@@ -261,6 +261,14 @@ def _as_list(v):
     return [str(v)]
 
 
+def _as_object_list(v):
+    """Preserve a JSON object array for structured repeatable API inputs."""
+    values = v if isinstance(v, list) else [v]
+    if any(not isinstance(item, dict) for item in values):
+        raise ValueError("expected a JSON object or array of objects")
+    return [dict(item) for item in values]
+
+
 def _exact_int(v):
     """int(), but refusing a value that would lose information.
 
@@ -506,6 +514,17 @@ _COMMAND_MAP = {
         "cfg_scale": ("cfg_scale", _numeric.finite_float),
         "steps": ("steps", int),
         "style_preset": ("style_preset", str),
+        "style_references": ("style_references", _as_object_list),
+        "embed_exif_metadata": ("embed_exif_metadata", _as_bool),
+        "lora_strength": ("lora_strength", _exact_int),
+        "quality": (
+            "quality", _one_of("venice.commands.image", "QUALITY_CHOICES")
+        ),
+        "enable_web_search": ("enable_web_search", _as_bool),
+        "disable_prompt_optimization_thinking": (
+            "disable_prompt_optimization_thinking", _as_bool
+        ),
+        "enhance_prompt": ("enhance_prompt", _as_bool),
         # #57 Class C: the valued generation knobs. Their argparse defaults moved
         # to None and the literals now live in `image._run`'s `apply_literals`
         # call, which runs AFTER the --from-json replay merge.
@@ -519,9 +538,20 @@ _COMMAND_MAP = {
         # the two image commands read alike here and on the tool surfaces).
         "safe_mode": ("safe_mode", _as_bool),
         "model": ("model", str),
-        "aspect_ratio": ("aspect_ratio", _one_of("venice.commands.image_edit", "ASPECT_RATIOS")),
+        "aspect_ratio": (
+            "aspect_ratio", _one_of("venice.commands.image_edit", "ASPECT_RATIOS")
+        ),
         "resolution": ("resolution", str),  # free-form tier, no argparse choices
-        "output_format": ("output_format", _one_of("venice.commands.image_edit", "OUTPUT_FORMATS")),
+        "output_format": (
+            "output_format", _one_of("venice.commands.image_edit", "OUTPUT_FORMATS")
+        ),
+        "quality": (
+            "quality", _one_of("venice.commands.image", "QUALITY_CHOICES")
+        ),
+        "disable_prompt_optimization_thinking": (
+            "disable_prompt_optimization_thinking", _as_bool
+        ),
+        "enhance_prompt": ("enhance_prompt", _as_bool),
     },
     "tts": {
         # Model and format are validated against the live TTS catalog before spend.

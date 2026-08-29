@@ -36,6 +36,13 @@ def _build_args(**ov):
         cfg_scale=None,
         steps=None,
         style_preset=None,
+        style_references=None,
+        embed_exif_metadata=None,
+        lora_strength=None,
+        quality=None,
+        enable_web_search=None,
+        disable_prompt_optimization_thinking=None,
+        enhance_prompt=None,
         variants=None,
         safe_mode=True,
         hide_watermark=False,
@@ -103,6 +110,33 @@ def _unpriced_image_models_payload():
             "model_spec": {"name": "Venice SD3.5", "pricing": {}},
         }],
     }).encode()
+
+
+def _native_image_entry(*, max_refs=2, strength=True):
+    return {
+        "id": "venice-sd35",
+        "type": "image",
+        "model_spec": {
+            "name": "Venice SD3.5",
+            "supportsStyleReferences": True,
+            "constraints": {
+                "maxStyleReferences": max_refs,
+                "supportsStyleReferenceStrength": strength,
+                "qualities": ["low", "medium", "high"],
+                "defaultQuality": "medium",
+                "defaultResolution": "1K",
+            },
+            "pricing": {
+                "quality": {
+                    "1K": {
+                        "low": {"usd": 0.01},
+                        "medium": {"usd": 0.02},
+                        "high": {"usd": 0.03},
+                    }
+                }
+            },
+        },
+    }
 
 
 def _gen_payload(n=1):
@@ -326,6 +360,27 @@ class TestImageFlow(unittest.TestCase):
         self.assertEqual(b["format"], "png")
         self.assertNotIn("variants", b)  # omitted when 1
 
+    def test_body_includes_native_generation_controls(self):
+        from venice.commands import image
+
+        refs = [{"image": "https://x.test/style.png", "strength": 0.75}]
+        body = image._build_body("p", _resolved_args(
+            style_references=refs,
+            embed_exif_metadata=False,
+            lora_strength=65,
+            quality="high",
+            enable_web_search=True,
+            disable_prompt_optimization_thinking=False,
+            enhance_prompt=True,
+        ))
+        self.assertEqual(body["style_references"], refs)
+        self.assertIs(body["embed_exif_metadata"], False)
+        self.assertEqual(body["lora_strength"], 65)
+        self.assertEqual(body["quality"], "high")
+        self.assertIs(body["enable_web_search"], True)
+        self.assertIs(body["disable_prompt_optimization_thinking"], False)
+        self.assertIs(body["enhance_prompt"], True)
+
     def test_style_prefix_prepended(self):
         from venice.commands import image
 
@@ -527,6 +582,7 @@ class TestImageFlow(unittest.TestCase):
         spec = json.loads(sidecars[0].read_text())
         self.assertEqual(spec["seed"], 998319)  # resolved seed captured
         self.assertNotIn("variants", spec)  # normalized to a single image
+        self.assertEqual(sidecars[0].stat().st_mode & 0o777, 0o600)
 
     def test_save_json_multivariant_writes_one_sidecar(self):
         from venice.commands import image
@@ -844,6 +900,136 @@ class TestImagePricingValidation(unittest.TestCase):
                 ValueError, "invalid image price"
             ):
                 image._usd_from_pricing({"image": {"usd": bad}})
+
+    def test_quality_matrix_uses_exact_resolution_and_quality(self):
+        from venice.commands import image
+
+        entry = _native_image_entry()
+        self.assertEqual(
+            image._price_from_entry(entry, resolution="1K", quality="high"),
+            0.03,
+        )
+        self.assertIsNone(
+            image._price_from_entry(entry, resolution="2K", quality="high")
+        )
+
+
+class TestNativeImageControls(unittest.TestCase):
+    def test_local_style_reference_becomes_bounded_data_url(self):
+        from venice.commands import image
+
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "style.png"
+            raw = b"\x89PNG\r\n\x1a\nSTYLE"
+            path.write_bytes(raw)
+            refs = image.resolve_style_references([
+                json.dumps({"image": str(path), "strength": 0.5})
+            ])
+        self.assertEqual(refs[0]["strength"], 0.5)
+        self.assertTrue(refs[0]["image"].startswith("data:image/png;base64,"))
+        self.assertEqual(
+            base64.b64decode(refs[0]["image"].split(",", 1)[1]), raw
+        )
+
+    def test_raw_base64_style_reference_is_preserved(self):
+        from venice.commands import image
+
+        raw = base64.b64encode(b"\x89PNG\r\n\x1a\nSTYLE").decode()
+        refs = image.resolve_style_references([{"image": raw}])
+        self.assertEqual(refs, [{"image": raw}])
+
+    def test_style_reference_rejects_unknown_fields_and_strength_range(self):
+        from venice.commands import image
+
+        with self.assertRaisesRegex(ValueError, "unknown field"):
+            image.resolve_style_references([
+                {"image": "https://x.test/a.png", "weight": 1}
+            ])
+        with self.assertRaisesRegex(ValueError, "between 0.1 and 1"):
+            image.resolve_style_references([
+                {"image": "https://x.test/a.png", "strength": 1.1}
+            ])
+        fake_data = (
+            "data:image/png;base64,"
+            + base64.b64encode(b"not an image").decode()
+        )
+        with self.assertRaisesRegex(ValueError, "recognized image"):
+            image.resolve_style_references([{"image": fake_data}])
+
+    def test_catalog_enforces_reference_count_and_strength_support(self):
+        from venice.commands import image
+
+        args = _resolved_args(style_references=[
+            {"image": "https://x.test/a.png"},
+            {"image": "https://x.test/b.png"},
+        ])
+        with self.assertRaisesRegex(ValueError, "at most 1"):
+            image._validate_model_controls(_native_image_entry(max_refs=1), args)
+
+        args.style_references = [
+            {"image": "https://x.test/a.png", "strength": 0.5}
+        ]
+        with self.assertRaisesRegex(ValueError, "does not support.*strength"):
+            image._validate_model_controls(
+                _native_image_entry(strength=False), args
+            )
+
+    def test_quality_and_unknown_addons_are_fail_closed_for_cost(self):
+        from venice.commands import image
+
+        args = _resolved_args(quality="high")
+        with mock.patch.object(image._models, "catalog", return_value=[
+            _native_image_entry()
+        ]):
+            self.assertEqual(image.prepare_request(object(), args), 0.03)
+            args.enable_web_search = True
+            self.assertIsNone(image.prepare_request(object(), args))
+            args.enable_web_search = False
+            args.enhance_prompt = True
+            self.assertIsNone(image.prepare_request(object(), args))
+
+    def test_native_controls_round_trip_through_replay(self):
+        from venice.commands import image
+
+        with tempfile.TemporaryDirectory() as td:
+            sidecar = Path(td) / "native.json"
+            refs = [{"image": "https://x.test/style.png", "strength": 0.6}]
+            sidecar.write_text(json.dumps({
+                "prompt": "saved prompt",
+                "style_references": refs,
+                "embed_exif_metadata": False,
+                "lora_strength": 40,
+                "quality": "high",
+                "enable_web_search": True,
+                "disable_prompt_optimization_thinking": False,
+                "enhance_prompt": True,
+            }), encoding="utf-8")
+            merged = image._apply_replay(_build_args(
+                prompt=None, from_json=sidecar
+            ))
+        self.assertEqual(merged.style_references, refs)
+        self.assertIs(merged.embed_exif_metadata, False)
+        self.assertEqual(merged.lora_strength, 40)
+        self.assertEqual(merged.quality, "high")
+        self.assertIs(merged.enable_web_search, True)
+        self.assertIs(merged.disable_prompt_optimization_thinking, False)
+        self.assertIs(merged.enhance_prompt, True)
+
+    def test_sidecar_keeps_native_fields_the_response_does_not_echo(self):
+        from venice.commands import image
+
+        body = image._build_body("p", _resolved_args(
+            quality="high",
+            embed_exif_metadata=False,
+            enhance_prompt=True,
+        ))
+        params = image._sidecar_params({
+            "request": {"data": {"seed": 1234}}
+        }, body)
+        self.assertEqual(params["seed"], 1234)
+        self.assertEqual(params["quality"], "high")
+        self.assertIs(params["embed_exif_metadata"], False)
+        self.assertIs(params["enhance_prompt"], True)
 
 
 if __name__ == "__main__":

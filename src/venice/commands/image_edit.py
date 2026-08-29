@@ -2,12 +2,13 @@
 
 Iterate on already-generated art without regenerating: tweak a color, change
 the sky, or composite a mask onto a base image. With no `--layer`, the base
-image + prompt go to `/image/edit`. With one or two `--layer` images, the base
-plus those layers/masks go to `/image/multi-edit` (max 3 images total, base
-first). The base image is a local file (sent as a base64 string in a JSON body)
-or an image URL; layers are local files. The endpoint returns raw image bytes
-(png/jpeg/webp), so we use the client's bytes-or-json path. Pricing is dynamic
-($0.001-$10.00/call); the balance is shown and you confirm before the charge.
+image + prompt go to `/image/edit`. One or more `--layer` images route the base
+plus those layers/masks to `/image/multi-edit`; the live model catalog supplies
+the input-image limit. The base image is a local file (sent as a base64 string
+in a JSON body) or an image URL; layers are local files. The endpoint returns
+raw image bytes (png/jpeg/webp), so we use the client's bytes-or-json path.
+Pricing is dynamic ($0.001-$10.00/call); the balance is shown and you confirm
+before the charge.
 """
 from __future__ import annotations
 
@@ -18,6 +19,8 @@ from typing import List, Optional
 
 from .. import _numeric, auth, userconfig
 from ..client import build_client_from_auth
+from . import _models
+from .image import QUALITY_CHOICES
 from ._shared import (
     add_balance_flag,
     check_image_file,
@@ -32,7 +35,8 @@ from ._shared import (
 
 EDIT_ENDPOINT = "/image/edit"
 MULTI_EDIT_ENDPOINT = "/image/multi-edit"
-MAX_LAYERS = 2  # /image/multi-edit takes up to 3 images (base + 2 layers)
+DEFAULT_EDIT_MODEL = "firered-image-edit"
+CONTRACT_DEFAULT_MAX_INPUT_IMAGES = 3
 MAX_PROMPT = 32768
 URL_DEFAULT_STEM = "venice-edit"
 
@@ -56,8 +60,9 @@ def register(subparsers) -> None:
         description=(
             "Edit an already-generated image from a text prompt without "
             "regenerating it, e.g. `venice image-edit card.png -p 'change the "
-            "sky to a sunrise'`. Pass one or two `--layer` images (masks/"
-            "overlays) to composite via /image/multi-edit. The base is a local "
+            "sky to a sunrise'`. Pass repeatable `--layer` images (masks/"
+            "overlays) to composite via /image/multi-edit; the selected model's "
+            "live maxInputImages limit is enforced. The base is a local "
             "file (positional) or --image-url. Pricing is dynamic; the balance "
             "is shown and you confirm before the charge."
         ),
@@ -72,7 +77,8 @@ def register(subparsers) -> None:
     p.add_argument("--layer", type=Path, action="append", default=None,
                    metavar="PATH",
                    help="Extra image (mask/overlay) layered onto the base; "
-                   "routes to /image/multi-edit. Repeatable, up to 2.")
+                   "routes to /image/multi-edit. Repeatable; the limit is "
+                   "model-specific.")
     p.add_argument("--model", default=None, metavar="ID",
                    help="Edit model id (default: server picks firered-image-edit).")
     p.add_argument("--aspect-ratio", default=None, choices=ASPECT_RATIOS,
@@ -82,6 +88,33 @@ def register(subparsers) -> None:
     p.add_argument("--output-format", default=None,
                    choices=OUTPUT_FORMATS,
                    help="Output image format (default inferred; PNG for 1K).")
+    p.add_argument(
+        "--quality",
+        choices=QUALITY_CHOICES,
+        default=None,
+        help="Output quality for supported multi-edit models; requires --layer.",
+    )
+    thinking = p.add_mutually_exclusive_group()
+    thinking.add_argument(
+        "--disable-prompt-optimization-thinking",
+        action="store_true",
+        dest="disable_prompt_optimization_thinking",
+        default=None,
+        help="Skip supported models' prompt-optimization thinking step.",
+    )
+    thinking.add_argument(
+        "--enable-prompt-optimization-thinking",
+        action="store_false",
+        dest="disable_prompt_optimization_thinking",
+        default=None,
+        help="Force supported models' prompt-optimization thinking step on.",
+    )
+    p.add_argument(
+        "--enhance-prompt",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Rewrite the edit prompt before generation (additional cost when applied).",
+    )
     p.add_argument(
         "--safe-mode",
         action=argparse.BooleanOptionalAction,
@@ -124,9 +157,8 @@ def _validate(args) -> Optional[int]:
         if rc is not None:
             return rc
     layers = args.layer or []
-    if len(layers) > MAX_LAYERS:
-        print(f"image-edit: at most {MAX_LAYERS} --layer images "
-              "(base + 2 = 3 total)", file=sys.stderr)
+    if getattr(args, "quality", None) is not None and not layers:
+        print("image-edit: --quality is supported only with --layer", file=sys.stderr)
         return 2
     for layer in layers:
         rc = check_image_file(layer, label="image-edit")
@@ -148,6 +180,12 @@ def _add_common(body: dict, args) -> None:
     # carries safe_mode=true rather than omitting the key, which the API
     # schema declares as the default anyway. (#57 Class B)
     body["safe_mode"] = args.safe_mode if args.safe_mode is not None else True
+    if getattr(args, "disable_prompt_optimization_thinking", None) is not None:
+        body["disable_prompt_optimization_thinking"] = (
+            args.disable_prompt_optimization_thinking
+        )
+    if getattr(args, "enhance_prompt", None) is not None:
+        body["enhance_prompt"] = args.enhance_prompt
 
 
 def _build_body(args, base_image: str, layers_b64: List[str]) -> tuple:
@@ -157,6 +195,8 @@ def _build_body(args, base_image: str, layers_b64: List[str]) -> tuple:
         body: dict = {"images": [base_image, *layers_b64], "prompt": args.prompt}
         if args.model is not None:
             body["modelId"] = args.model  # multi-edit uses modelId, not model
+        if getattr(args, "quality", None) is not None:
+            body["quality"] = args.quality
         _add_common(body, args)
         return MULTI_EDIT_ENDPOINT, body
     body = {"image": base_image, "prompt": args.prompt}
@@ -164,6 +204,61 @@ def _build_body(args, base_image: str, layers_b64: List[str]) -> tuple:
         body["model"] = args.model
     _add_common(body, args)
     return EDIT_ENDPOINT, body
+
+
+def resolve_multi_edit_model(
+    client, requested: Optional[str], image_count: int, quality: Optional[str] = None
+) -> str:
+    """Resolve and validate an inpaint model before a paid multi-edit request."""
+    models = _models.catalog(client, "inpaint")
+    if models is None:
+        raise ValueError("could not fetch the live inpaint model catalog")
+    model = requested or _models.default_model(models)
+    ids = [m.get("id") for m in models if isinstance(m, dict) and m.get("id")]
+    if model is None and DEFAULT_EDIT_MODEL in ids:
+        model = DEFAULT_EDIT_MODEL
+    if model is None:
+        raise ValueError(
+            "no default inpaint model is advertised; pass --model. available: "
+            + ", ".join(ids)
+        )
+    entry = next(
+        (m for m in models if isinstance(m, dict) and m.get("id") == model), None
+    )
+    if entry is None:
+        raise ValueError(
+            f"unknown inpaint model {model!r}; available: " + ", ".join(ids)
+        )
+    spec = entry.get("model_spec")
+    constraints = spec.get("constraints") if isinstance(spec, dict) else None
+    if not isinstance(constraints, dict):
+        raise ValueError(f"live inpaint catalog entry for {model!r} has no constraints")
+    combine = constraints.get("combineImages")
+    if combine is not True:
+        raise ValueError(f"model {model!r} does not support multi-image editing")
+    cap = constraints.get(
+        "maxInputImages", CONTRACT_DEFAULT_MAX_INPUT_IMAGES
+    )
+    if isinstance(cap, bool) or not isinstance(cap, int) or cap < 1:
+        raise ValueError(
+            f"live inpaint catalog entry for {model!r} has invalid maxInputImages"
+        )
+    if image_count > cap:
+        raise ValueError(f"model {model!r} accepts at most {cap} input images")
+    if quality is not None:
+        qualities = constraints.get("qualities")
+        if not isinstance(qualities, list) or any(
+            not isinstance(value, str) for value in qualities
+        ):
+            raise ValueError(
+                f"live inpaint catalog entry for {model!r} has no valid qualities"
+            )
+        if quality not in qualities:
+            raise ValueError(
+                f"quality {quality!r} is not supported by {model!r}; choose from "
+                + ", ".join(qualities)
+            )
+    return model
 
 
 def _run(args) -> int:
@@ -177,6 +272,15 @@ def _run(args) -> int:
     except auth.AuthError as e:
         print(str(e), file=sys.stderr)
         return 2
+
+    if args.layer:
+        try:
+            args.model = resolve_multi_edit_model(
+                client, args.model, 1 + len(args.layer), getattr(args, "quality", None)
+            )
+        except ValueError as e:
+            print(f"image-edit: {e}", file=sys.stderr)
+            return 2
 
     cost = None  # dynamic pricing -- no reliable upfront quote
     print_estimate(cost, "image edit; dynamic $0.001-$10.00/call")

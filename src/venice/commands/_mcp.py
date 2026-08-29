@@ -200,13 +200,21 @@ def image_tool(
     cfg_scale: Optional[float] = None,
     steps: Optional[int] = None,
     style_preset: Optional[str] = None,
+    style_references: Optional[List[dict]] = None,
     aspect_ratio: Optional[str] = None,
     resolution: Optional[str] = None,
+    embed_exif_metadata: Optional[bool] = None,
+    lora_strength: Optional[int] = None,
+    quality: Optional[str] = None,
+    enable_web_search: Optional[bool] = None,
+    disable_prompt_optimization_thinking: Optional[bool] = None,
+    enhance_prompt: Optional[bool] = None,
     safe_mode: bool = True,
     hide_watermark: bool = False,
     output_dir: Optional[str] = None,
     confirm: bool = False,
     max_spend: Optional[float] = None,
+    path_authority=None,
 ) -> dict:
     """Generate 1-4 image variants via /image/generate; write files, return paths."""
     if not prompt or not prompt.strip():
@@ -220,10 +228,27 @@ def image_tool(
         return _err(
             f"image: unknown format {format!r}; choose from {', '.join(_image.FORMATS)}"
         )
+    try:
+        _image.validate_lora_strength(lora_strength)
+    except ValueError as e:
+        return _err(f"image: {e}")
 
     prompt = prompt.strip()
+    ns = SimpleNamespace(
+        model=model, prompt=prompt, format=format, safe_mode=safe_mode,
+        hide_watermark=hide_watermark, variants=variants, width=width, height=height,
+        aspect_ratio=aspect_ratio, resolution=resolution, negative_prompt=negative_prompt,
+        seed=seed, cfg_scale=cfg_scale, steps=steps, style_preset=style_preset,
+        style_references=style_references, embed_exif_metadata=embed_exif_metadata,
+        lora_strength=lora_strength, quality=quality,
+        enable_web_search=enable_web_search,
+        disable_prompt_optimization_thinking=disable_prompt_optimization_thinking,
+        enhance_prompt=enhance_prompt, style_prefix=None,
+    )
     try:
-        price = _image._fetch_image_price(client, model)
+        price = _image.prepare_request(
+            client, ns, path_authority=media_path_authority(path_authority)
+        )
         cost = _image._estimate_cost(price, variants)
     except ValueError as e:
         return _err(f"image: {e}")
@@ -231,13 +256,6 @@ def image_tool(
     if gate is not None:
         return gate
 
-    ns = SimpleNamespace(
-        model=model, prompt=prompt, format=format, safe_mode=safe_mode,
-        hide_watermark=hide_watermark, variants=variants, width=width, height=height,
-        aspect_ratio=aspect_ratio, resolution=resolution, negative_prompt=negative_prompt,
-        seed=seed, cfg_scale=cfg_scale, steps=steps, style_preset=style_preset,
-        style_prefix=None,
-    )
     body = _image._build_body(prompt, ns)
     try:
         doc = client.post_json("/image/generate", body)
@@ -1202,6 +1220,9 @@ def image_edit_tool(
     aspect_ratio: Optional[str] = None,
     resolution: Optional[str] = None,
     output_format: Optional[str] = None,
+    quality: Optional[str] = None,
+    disable_prompt_optimization_thinking: Optional[bool] = None,
+    enhance_prompt: Optional[bool] = None,
     safe_mode: Optional[bool] = None,
     output_dir: Optional[str] = None,
     confirm: bool = False,
@@ -1210,7 +1231,7 @@ def image_edit_tool(
 ) -> dict:
     """Edit/inpaint an image via /image/edit (dynamic price -> needs confirm).
 
-    Base image is a local `input_path` or an `image_url`; one or two
+    Base image is a local `input_path` or an `image_url`; repeatable
     `layer_paths` (masks/overlays) route to /image/multi-edit. Writes the
     result and returns its path.
     """
@@ -1220,10 +1241,8 @@ def image_edit_tool(
         return _err("image-edit: prompt is required")
     if len(prompt) > _image_edit.MAX_PROMPT:
         return _err(f"image-edit: prompt exceeds {_image_edit.MAX_PROMPT} chars")
-    if len(layer_paths or []) > _image_edit.MAX_LAYERS:
-        return _err(
-            f"image-edit: at most {_image_edit.MAX_LAYERS} layer paths are allowed"
-        )
+    if quality is not None and not layer_paths:
+        return _err("image-edit: quality is supported only with layer_paths")
     inp = None
     if input_path:
         resolved = _model_media_path(
@@ -1243,10 +1262,19 @@ def image_edit_tool(
             return resolved
         layer, _mime = resolved
         layers.append(layer)
+    if layers:
+        try:
+            model = _image_edit.resolve_multi_edit_model(
+                client, model, 1 + len(layers), quality
+            )
+        except ValueError as e:
+            return _err(f"image-edit: {e}")
     ns = SimpleNamespace(
         input=inp, image_url=image_url, prompt=prompt, layer=layers or None,
         model=model, aspect_ratio=aspect_ratio, resolution=resolution,
-        output_format=output_format, safe_mode=safe_mode,
+        output_format=output_format, quality=quality, safe_mode=safe_mode,
+        disable_prompt_optimization_thinking=disable_prompt_optimization_thinking,
+        enhance_prompt=enhance_prompt,
     )
     rc = _image_edit._validate(ns)  # stderr warnings only
     if rc is not None:
@@ -1257,7 +1285,11 @@ def image_edit_tool(
     endpoint, body = _image_edit._build_body(ns, base_image, layers_b64)
 
     ext = _image_edit.EXT_BY_FORMAT.get(output_format or "png", ".png")
-    name = f"{inp.stem}-edit{ext}" if inp is not None else f"{_image_edit.URL_DEFAULT_STEM}{ext}"
+    name = (
+        f"{inp.stem}-edit{ext}"
+        if inp is not None
+        else f"{_image_edit.URL_DEFAULT_STEM}{ext}"
+    )
     out_path = resolve_output_dir(output_dir) / name
     return _binary_op_tool(
         client, endpoint=endpoint, body=body, out_path=out_path,
