@@ -11,12 +11,13 @@ input schema via typing.get_type_hints, so the annotations must stay concrete
 (`typing.Optional[int]`, not stringized `int | None`).
 """
 import os
-from typing import List, Optional
+from typing import Annotated, List, Literal, Optional
 
 from mcp.server.fastmcp import FastMCP
+from pydantic import Field
 
 from . import userconfig
-from .commands import _mcp, _shared
+from .commands import _mcp, _shared, upscale as _upscale
 
 
 def _merged(defaults: dict, host: dict) -> dict:
@@ -53,6 +54,7 @@ def build_server(client, doc=None, root=None) -> FastMCP:
         "image_edit": userconfig.config_defaults_for("image_edit", _mcp.image_edit_tool, doc),
         "chat": userconfig.config_defaults_for("chat", _mcp.chat_tool, doc),
     }
+    _retired_upscale_config = _upscale.retired_config_keys(doc)
 
     @server.tool()
     def venice_image(
@@ -166,25 +168,29 @@ def build_server(client, doc=None, root=None) -> FastMCP:
     @server.tool()
     def venice_upscale(
         input_path: str,
-        scale: Optional[float] = None,
-        enhance: Optional[bool] = None,
-        enhance_creativity: Optional[float] = None,
-        enhance_prompt: Optional[str] = None,
-        replication: Optional[float] = None,
+        scale: Optional[Literal[2, 4]] = None,
+        creativity: Optional[
+            Annotated[float, Field(ge=_upscale.MIN_CREATIVITY,
+                                   le=_upscale.MAX_CREATIVITY)]
+        ] = None,
         output_dir: Optional[str] = None,
         confirm: bool = False,
         max_spend: Optional[float] = None,
     ) -> dict:
-        """Upscale/enhance a local image (factor 1-4) via Venice /image/upscale. Writes
+        """Upscale a local image (factor 2 or 4) via Venice /image/upscale. Writes
         the result and returns its path. Pricing is dynamic (no up-front estimate), so
         this ALWAYS requires confirm=true. An omitted scale falls back to
         defaults.upscale.scale, then to 2.0."""
+        if _retired_upscale_config:
+            return {
+                "status": "error",
+                "message": _upscale.retired_config_message(_retired_upscale_config),
+            }
         return _mcp.upscale_tool(
             client, input_path,
             **_merged(_defaults["upscale"], dict(
-                scale=scale, enhance=enhance,
-                enhance_creativity=enhance_creativity, enhance_prompt=enhance_prompt,
-                replication=replication, output_dir=output_dir, confirm=confirm,
+                scale=scale, creativity=creativity,
+                output_dir=output_dir, confirm=confirm,
                 max_spend=max_spend, path_authority=path_authority,
             )),
         )

@@ -81,6 +81,42 @@ class TestServerWiring(unittest.TestCase):
                     denied, kind="image", max_bytes=1024
                 )
 
+    def test_upscale_schema_matches_current_contract(self):
+        from venice.mcp_server import build_server
+
+        class FakeClient:
+            api_key = "fake"
+            base_url = "https://api.venice.ai/api/v1"
+
+        server = build_server(FakeClient(), doc={})
+        props = server._tool_manager.get_tool("venice_upscale").parameters["properties"]
+        self.assertEqual(
+            set(props),
+            {"input_path", "scale", "creativity", "output_dir", "confirm", "max_spend"},
+        )
+        self.assertEqual(props["scale"]["anyOf"][0]["enum"], [2, 4])
+        creativity = props["creativity"]["anyOf"][0]
+        self.assertEqual(creativity["minimum"], 0.0)
+        self.assertEqual(creativity["maximum"], 0.02)
+
+    def test_retired_upscale_config_returns_error_without_delegating(self):
+        from venice.mcp_server import build_server
+        from venice.commands import _mcp
+
+        class FakeClient:
+            api_key = "fake"
+            base_url = "https://api.venice.ai/api/v1"
+
+        doc = {"defaults": {"upscale": {"enhance_creativity": 0.5}}}
+        with mock.patch.object(_mcp, "upscale_tool") as impl:
+            server = build_server(FakeClient(), doc=doc)
+            result = server._tool_manager.get_tool("venice_upscale").fn(
+                input_path="frame.png"
+            )
+        self.assertEqual(result["status"], "error")
+        self.assertIn("defaults.upscale.enhance_creativity", result["message"])
+        impl.assert_not_called()
+
 
 @unittest.skipUnless(_HAS_MCP, "mcp SDK not installed (expected on Python 3.9)")
 class TestConfigDefaultsWiring(unittest.TestCase):
@@ -141,8 +177,6 @@ class TestConfigDefaultsWiring(unittest.TestCase):
     _CLASS_B_TOOLS = [
         ("music", "venice_music", "music_tool", "instrumental", dict(prompt="p")),
         ("video", "venice_video", "video_tool", "no_audio", dict(prompt="p")),
-        ("upscale", "venice_upscale", "upscale_tool", "enhance",
-         dict(input_path="in.png")),
         ("image_edit", "venice_image_edit", "image_edit_tool", "safe_mode",
          dict(prompt="p")),
     ]

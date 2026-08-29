@@ -650,10 +650,7 @@ _COMMAND_MAP = {
     "upscale": {
         # #57 Class C: literal now lives in `upscale._run`.
         "scale": ("scale", _numeric.finite_float),
-        "enhance": ("enhance", _as_bool),  # #57 Class B: tri-stated --enhance
-        "enhance_creativity": ("enhance_creativity", _numeric.finite_float),
-        "enhance_prompt": ("enhance_prompt", str),
-        "replication": ("replication", _numeric.finite_float),
+        "creativity": ("creativity", _numeric.finite_float),
     },
     # #71 compatibility-only browser defaults. The tools are security-disabled for
     # GHSA-mqjr-2vh8-6fvg, but these keys remain readable so existing configs survive and

@@ -49,6 +49,7 @@ from . import _models
 from . import _compact
 from . import _openai
 from . import _shared
+from . import upscale as _upscale
 from .models import MODEL_TYPES
 
 
@@ -1964,11 +1965,17 @@ _JOB_RESULT_SCHEMA = _obj(
 _UPSCALE_SCHEMA = _obj(
     {
         "input_path": _p("string", "Path to a local image file to upscale."),
-        "scale": _p("number", "Upscale factor, 1-4."),
-        "enhance": _p("boolean"),
-        "enhance_creativity": _p("number"),
-        "enhance_prompt": _p("string"),
-        "replication": _p("number"),
+        "scale": {
+            "type": "number",
+            "enum": list(_upscale.SCALES),
+            "description": "Upscale factor: 2 or 4.",
+        },
+        "creativity": {
+            "type": "number",
+            "minimum": _upscale.MIN_CREATIVITY,
+            "maximum": _upscale.MAX_CREATIVITY,
+            "description": "Detail/texture creativity (server default 0.01).",
+        },
     },
     required=["input_path"],
 )
@@ -2244,7 +2251,7 @@ _BUILTINS = [
     ToolSpec(
         "venice_upscale",
         "upscale_tool",
-        "Upscale/enhance a local image (factor 1-4) via Venice /image/upscale. Writes "
+        "Upscale a local image (factor 2 or 4) via Venice /image/upscale. Writes "
         "the result and returns its path. Dynamic pricing, so it always needs "
         "confirmation.",
         _UPSCALE_SCHEMA,
@@ -2641,8 +2648,26 @@ def builtin_tools(
 
     def _make_paid(impl, section, impl_name):
         defaults = _config_defaults(section, impl)
+        retired_config = (
+            _upscale.retired_config_keys(config) if section == "upscale" else ()
+        )
 
         def invoke(arguments, *, confirm: bool = False):
+            if section == "upscale":
+                retired_args = tuple(
+                    key for key in _upscale.RETIRED_CONFIG_KEYS if key in arguments
+                )
+                if retired_args:
+                    names = ", ".join(retired_args)
+                    return {
+                        "status": "error",
+                        "message": f"upscale: retired argument(s): {names}",
+                    }
+                if retired_config:
+                    return {
+                        "status": "error",
+                        "message": _upscale.retired_config_message(retired_config),
+                    }
             controlled = {
                 "confirm": confirm,
                 "max_spend": max_spend,

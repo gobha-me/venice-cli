@@ -2719,6 +2719,43 @@ class TestMediaPathAuthorityWiring(unittest.TestCase):
         self.assertIs(vision.call_args.kwargs["path_authority"], authority)
         self.assertIs(upscale.call_args.kwargs["path_authority"], authority)
 
+    def test_upscale_schema_matches_current_contract(self):
+        tool = next(t for t in _agent.builtin_tools(
+            object(), only={"venice_upscale"}
+        ) if t.name == "venice_upscale")
+        props = tool.parameters["properties"]
+        self.assertEqual(set(props), {"input_path", "scale", "creativity"})
+        self.assertEqual(props["scale"]["enum"], [2.0, 4.0])
+        self.assertEqual(props["creativity"]["minimum"], 0.0)
+        self.assertEqual(props["creativity"]["maximum"], 0.02)
+
+    def test_replayed_retired_upscale_argument_fails_before_impl(self):
+        with mock.patch.object(_agent._mcp, "upscale_tool") as impl:
+            tool = next(t for t in _agent.builtin_tools(
+                object(), only={"venice_upscale"}
+            ) if t.name == "venice_upscale")
+            result = tool.invoke({"input_path": "frame.png", "enhance": True})
+        self.assertEqual(result["status"], "error")
+        self.assertIn("retired argument", result["message"])
+        impl.assert_not_called()
+
+    def test_retired_upscale_config_blocks_only_upscale(self):
+        doc = {"defaults": {"upscale": {"replication": 0.3}}}
+        with mock.patch.object(_agent._mcp, "upscale_tool") as upscale_impl, \
+             mock.patch.object(
+                 _agent._mcp, "bg_remove_tool", return_value={"status": "ok"}
+             ) as bg_impl:
+            tools = {t.name: t for t in _agent.builtin_tools(
+                object(), only={"venice_upscale", "venice_bg_remove"}, config=doc
+            )}
+            blocked = tools["venice_upscale"].invoke({"input_path": "frame.png"})
+            allowed = tools["venice_bg_remove"].invoke({"image_url": "https://x/y"})
+        self.assertEqual(blocked["status"], "error")
+        self.assertIn("defaults.upscale.replication", blocked["message"])
+        self.assertEqual(allowed["status"], "ok")
+        upscale_impl.assert_not_called()
+        bg_impl.assert_called_once()
+
 
 class TestReindexBuiltin(unittest.TestCase):
     """#44: reindex is a paid, no-arg builtin advertised by chat's default set."""

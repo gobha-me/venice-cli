@@ -1,4 +1,4 @@
-"""`venice upscale` -- upscale/enhance an image via /image/upscale (sync).
+"""`venice upscale` -- upscale an image via /image/upscale (sync).
 
 `/image/generate` caps width/height at 1280, so large environment art is made
 ≤1280 then upscaled here (e.g. ×2: 960×540 -> 1920×1080). The input image is
@@ -9,7 +9,6 @@ so there is no reliable upfront quote -- we show the balance and confirm.
 """
 from __future__ import annotations
 
-import argparse
 import sys
 from pathlib import Path
 from typing import Optional
@@ -29,17 +28,57 @@ from ._shared import (
 )
 
 ENDPOINT = "/image/upscale"
-MAX_ENHANCE_PROMPT = 1500
 DEFAULT_SCALE = 2.0
+SCALES = (2.0, 4.0)
+MIN_CREATIVITY = 0.0
+MAX_CREATIVITY = 0.02
+SERVER_DEFAULT_CREATIVITY = 0.01
+RETIRED_CONFIG_KEYS = (
+    "enhance",
+    "enhance_creativity",
+    "enhance_prompt",
+    "replication",
+)
+
+
+def retired_config_keys(doc) -> tuple[str, ...]:
+    """Retired ``defaults.upscale`` keys present in a config document.
+
+    Unknown config keys deliberately survive normal config round-trips.  These
+    four cannot merely become unknown: silently ignoring an old paid-operation
+    preference would make a request whose output no longer matches the user's
+    stated intent.  Callers therefore fail the upscale operation closed while
+    leaving unrelated commands/tools usable.
+    """
+    if not isinstance(doc, dict):
+        return ()
+    defaults = doc.get("defaults")
+    if not isinstance(defaults, dict):
+        return ()
+    section = defaults.get("upscale")
+    if not isinstance(section, dict):
+        return ()
+    return tuple(key for key in RETIRED_CONFIG_KEYS if key in section)
+
+
+def retired_config_message(keys) -> str:
+    joined = ", ".join(f"defaults.upscale.{key}" for key in keys)
+    commands = "; ".join(
+        f"venice config unset defaults.upscale.{key}" for key in keys
+    )
+    return (
+        f"upscale: retired config setting(s): {joined}; Venice no longer accepts "
+        f"the enhancer controls. Remove them with: {commands}"
+    )
 
 
 def register(subparsers) -> None:
     p = subparsers.add_parser(
         "upscale",
-        help="Upscale/enhance an image via /image/upscale (sync).",
+        help="Upscale an image via /image/upscale (sync).",
         description=(
-            "Upscales an image by a factor of 1-4 (default 2), optionally running "
-            "Venice's enhancer. Use this to take generated art above the 1280px "
+            "Upscales an image by a factor of 2 or 4 (default 2). Use this to "
+            "take generated art above the 1280px "
             "generate cap, e.g. `venice upscale env.png --scale 2` -> 2x. Pricing "
             "is dynamic; the balance is shown and you confirm before the charge."
         ),
@@ -50,37 +89,18 @@ def register(subparsers) -> None:
         type=_numeric.finite_float,
         default=None,
         metavar="N",
-        help=f"Upscale factor 1-4 (default {DEFAULT_SCALE:g}). Scale 1 only runs "
-        "the enhancer and requires --enhance. Config-backable via "
-        "defaults.upscale.scale; an explicit --scale still wins.",
+        help=f"Upscale factor: 2 or 4 (default {DEFAULT_SCALE:g}). "
+        "Config-backable via defaults.upscale.scale; an explicit --scale still wins.",
     )
     p.add_argument(
-        "--enhance",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="Run Venice's enhancer during upscaling (required when --scale 1). "
-        "Config-backable via defaults.upscale.enhance; an explicit "
-        "--enhance/--no-enhance still wins.",
-    )
-    p.add_argument(
-        "--enhance-creativity",
+        "--creativity",
         type=_numeric.finite_float,
         default=None,
         metavar="F",
-        help="0-1 (default 0.5); higher lets the enhancer change the image more.",
-    )
-    p.add_argument(
-        "--enhance-prompt",
-        default=None,
-        metavar="TEXT",
-        help="Short style to steer enhancement, e.g. 'gold' (<=1500 chars).",
-    )
-    p.add_argument(
-        "--replication",
-        type=_numeric.finite_float,
-        default=None,
-        metavar="R",
-        help="0-1 (default 0.35); how strongly base-image lines/noise are kept.",
+        help=f"Detail/texture creativity from {MIN_CREATIVITY:g} to "
+        f"{MAX_CREATIVITY:g} (server default {SERVER_DEFAULT_CREATIVITY:g}). "
+        "Config-backable via defaults.upscale.creativity; omitted values are "
+        "left to the server.",
     )
     p.add_argument("--output", "-o", type=Path, default=None,
                    help="Output file or directory. Default: cwd/<input>-upscaled.png.")
@@ -103,22 +123,17 @@ def _validate(args) -> Optional[int]:
     rc = check_image_file(args.input, label="upscale")
     if rc is not None:
         return rc
-    if not (1 <= args.scale <= 4):
-        print(f"upscale: --scale {args.scale} out of range (1-4)", file=sys.stderr)
+    if args.scale not in SCALES:
+        print(f"upscale: --scale must be 2 or 4 (got {args.scale})", file=sys.stderr)
         return 2
-    if args.scale == 1 and not args.enhance:
-        print("upscale: --scale 1 only runs the enhancer; pass --enhance "
-              "(or use --scale >1)", file=sys.stderr)
-        return 2
-    if args.enhance_creativity is not None and not (0 <= args.enhance_creativity <= 1):
-        print("upscale: --enhance-creativity must be between 0 and 1", file=sys.stderr)
-        return 2
-    if args.replication is not None and not (0 <= args.replication <= 1):
-        print("upscale: --replication must be between 0 and 1", file=sys.stderr)
-        return 2
-    if args.enhance_prompt is not None and len(args.enhance_prompt) > MAX_ENHANCE_PROMPT:
-        print(f"upscale: --enhance-prompt exceeds {MAX_ENHANCE_PROMPT} chars",
-              file=sys.stderr)
+    if args.creativity is not None and not (
+        MIN_CREATIVITY <= args.creativity <= MAX_CREATIVITY
+    ):
+        print(
+            f"upscale: --creativity must be between {MIN_CREATIVITY:g} and "
+            f"{MAX_CREATIVITY:g}",
+            file=sys.stderr,
+        )
         return 2
     return None
 
@@ -127,14 +142,9 @@ def _build_body(args, image_b64: str) -> dict:
     body: dict = {
         "image": image_b64,
         "scale": args.scale,
-        "enhance": bool(args.enhance),
     }
-    if args.enhance_creativity is not None:
-        body["enhanceCreativity"] = args.enhance_creativity
-    if args.enhance_prompt is not None:
-        body["enhancePrompt"] = args.enhance_prompt
-    if args.replication is not None:
-        body["replication"] = args.replication
+    if args.creativity is not None:
+        body["creativity"] = args.creativity
     return body
 
 
@@ -143,7 +153,12 @@ def _fmt_scale(scale: float) -> str:
 
 
 def _run(args) -> int:
-    userconfig.apply_defaults(args, "upscale")
+    doc = userconfig.load_config()
+    retired = retired_config_keys(doc)
+    if retired:
+        print(retired_config_message(retired), file=sys.stderr)
+        return 2
+    userconfig.apply_defaults(args, "upscale", doc)
     # #57 Class C1: built-in literal last, before `_validate`'s range check,
     # which cannot compare None. A config-set `scale: 0` deliberately survives
     # this to reach that check's own out-of-range message.

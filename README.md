@@ -334,25 +334,26 @@ forces it back on for a single call.
 ## Upscale images
 
 `venice image` caps output at 1280px, so take art larger by upscaling it
-(1-4x, default 2x) via `/image/upscale`:
+(2x or 4x, default 2x) via `/image/upscale`:
 
 ```sh
 # 2x upscale -> ./env-upscaled.png (960x540 -> 1920x1080).
 venice upscale env.png --scale 2 --yes
 
-# Enhance-only pass (scale 1 requires --enhance) with a style hint.
-venice upscale portrait.png --scale 1 --enhance --enhance-prompt gold --yes
-# ...or set `defaults.upscale.enhance true` once and --scale 1 works bare.
-
-# Custom output, tune how much the enhancer may change the image.
-venice upscale card.png --scale 4 --enhance --enhance-creativity 0.3 \
+# Custom output; creativity controls added detail/texture (0-0.02).
+venice upscale card.png --scale 4 --creativity 0.01 \
     -o card-4k.png --yes
 
 # Dry-run: show the planned output + balance, spend nothing.
 venice upscale env.png --dry-run
 ```
 
-Input is a PNG/JPEG file under 25 MB. Pricing is **dynamic** (Venice bills
+Input is a PNG/JPEG file under 25 MB. Venice's retired enhancer controls are no
+longer accepted; the current request contains only the image, scale, and optional
+creativity. The upstream contract changed after the original #1 workflow. Older
+configs containing `defaults.upscale.enhance`, `enhance_creativity`,
+`enhance_prompt`, or `replication` fail closed with `venice config unset` cleanup
+guidance instead of silently changing a paid request. Pricing is **dynamic** (Venice bills
 $0.001-$10.00 per call by input size and scale), so there's no reliable
 pre-charge estimate; the balance is shown and you confirm (or `--yes`).
 
@@ -1774,7 +1775,7 @@ The server exposes nine tools:
 | `venice_sfx` | sound effect (async queue) → audio file | yes (quoted) |
 | `venice_music` | long-form music/ambience (async queue) → audio file | yes (quoted) |
 | `venice_video` | text/image-to-video (async queue, long-running) → video file | yes (quoted) |
-| `venice_upscale` | upscale/enhance a local image → image file | yes (dynamic) |
+| `venice_upscale` | upscale a local image → image file | yes (dynamic) |
 | `venice_bg_remove` | remove a background → transparent PNG | yes (dynamic) |
 | `venice_image_edit` | edit/inpaint an image (+ optional mask layers) → image file | yes (dynamic) |
 | `venice_chat` | one-shot chat completion → reply text | no |
@@ -1901,8 +1902,7 @@ safety), it should be settable in config." Currently config-backable:
   `defaults.sfx.master` / `defaults.music.master`, not this table
 - `defaults.video.*` — `model`, `duration`, `resolution`, `aspect_ratio`,
   `negative_prompt`, `no_audio`, `no_cleanup`, `poll_interval`, `max_wait`
-- `defaults.upscale.*` — `scale`, `enhance`, `enhance_creativity`,
-  `enhance_prompt`, `replication`
+- `defaults.upscale.*` — `scale`, `creativity`
 - `defaults.contact_sheet.*` — `cols`, `cell`, `label`, `background`, `padding`,
   `engine`. Note the **underscore**: the command is `contact-sheet`, but config
   keys are addressed with dots, so the section is `contact_sheet` (as with

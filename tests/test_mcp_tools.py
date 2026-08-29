@@ -349,17 +349,42 @@ class TestBinaryTools(_ToolTest):
 
     def test_upscale_ok_with_confirm(self):
         ip = self._png()
-        with mock.patch(
-            "venice.client.urllib.request.urlopen",
-            _seq(FakeResp(200, b"UPSCALED", "image/png")),
-        ), self.stdout_guard():
+        captured = {}
+
+        def fake(req, timeout=None):
+            captured["body"] = json.loads(req.data.decode())
+            return FakeResp(200, b"UPSCALED", "image/png")
+
+        with mock.patch("venice.client.urllib.request.urlopen", fake), \
+             self.stdout_guard():
             res = _mcp.upscale_tool(
-                _client(), str(ip), output_dir=self.td, confirm=True,
+                _client(), str(ip), creativity=0.02,
+                output_dir=self.td, confirm=True,
                 path_authority=self.media_authority(),
             )
         self.assertEqual(res["status"], "ok")
         self.assertEqual(Path(res["path"]).read_bytes(), b"UPSCALED")
         self.assertTrue(res["path"].endswith("-upscaled.png"))
+        self.assertEqual(set(captured["body"]), {"image", "scale", "creativity"})
+        self.assertEqual(captured["body"]["scale"], 2.0)
+        self.assertEqual(captured["body"]["creativity"], 0.02)
+        self.assertEqual(base64.b64decode(captured["body"]["image"]), ip.read_bytes())
+
+    def test_upscale_invalid_contract_values_stop_before_http(self):
+        ip = self._png()
+
+        def boom(*a, **kw):
+            raise AssertionError("invalid upscale input must not hit the network")
+
+        for kwargs in ({"scale": 3.0}, {"creativity": 0.021}):
+            with self.subTest(kwargs=kwargs), \
+                 mock.patch("venice.client.urllib.request.urlopen", boom), \
+                 self.stdout_guard():
+                res = _mcp.upscale_tool(
+                    _client(), str(ip), output_dir=self.td, confirm=True,
+                    path_authority=self.media_authority(), **kwargs,
+                )
+            self.assertEqual(res["status"], "error")
 
     def test_bg_remove_from_url_ok(self):
         with mock.patch(
