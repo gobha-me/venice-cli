@@ -584,16 +584,13 @@ def upscale_tool(
     input_path: str,
     *,
     scale: float = _upscale.DEFAULT_SCALE,
-    enhance: Optional[bool] = None,
-    enhance_creativity: Optional[float] = None,
-    enhance_prompt: Optional[str] = None,
-    replication: Optional[float] = None,
+    creativity: Optional[float] = None,
     output_dir: Optional[str] = None,
     confirm: bool = False,
     max_spend: Optional[float] = None,
     path_authority=None,
 ) -> dict:
-    """Upscale/enhance an image via /image/upscale (dynamic price -> needs confirm)."""
+    """Upscale an image via /image/upscale (dynamic price -> needs confirm)."""
     resolved = _model_media_path(
         path_authority, input_path, kind="image",
         max_bytes=_shared.MAX_IMAGE_BYTES, label="upscale",
@@ -601,11 +598,7 @@ def upscale_tool(
     if isinstance(resolved, dict):
         return resolved
     inp, _mime = resolved
-    ns = SimpleNamespace(
-        input=inp, scale=scale, enhance=enhance,
-        enhance_creativity=enhance_creativity, enhance_prompt=enhance_prompt,
-        replication=replication,
-    )
+    ns = SimpleNamespace(input=inp, scale=scale, creativity=creativity)
     rc = _upscale._validate(ns)  # stderr warnings only
     if rc is not None:
         return _err(f"upscale: invalid arguments (exit {rc})")

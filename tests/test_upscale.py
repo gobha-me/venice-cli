@@ -21,10 +21,7 @@ def _args(**ov):
         input=Path("in.png"),
         # #57 Class C1: None on the parser now; `_run` resolves it.
         scale=None,
-        enhance=False,
-        enhance_creativity=None,
-        enhance_prompt=None,
-        replication=None,
+        creativity=None,
         output=None,
         yes=True,
         dry_run=False,
@@ -102,13 +99,16 @@ class TestUpscaleFlow(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertTrue(captured["url"].endswith("/image/upscale"))
         self.assertEqual(base64.b64decode(captured["body"]["image"]), SOURCE_PNG)
+        self.assertEqual(
+            set(captured["body"]), {"image", "scale"},
+            "default request must match the current API contract exactly",
+        )
         self.assertEqual(captured["body"]["scale"], 2.0)
-        self.assertEqual(captured["body"]["enhance"], False)
         out = Path("in-upscaled.png")
         self.assertTrue(out.exists())
         self.assertEqual(out.read_bytes(), UPSCALED_PNG)
 
-    def test_optional_params_included_when_set(self):
+    def test_creativity_included_when_set(self):
         from venice.commands import upscale
 
         captured = {}
@@ -119,17 +119,12 @@ class TestUpscaleFlow(unittest.TestCase):
 
         with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
              mock.patch("venice.client.urllib.request.urlopen", fake_urlopen):
-            rc = upscale._run(_args(
-                enhance=True, enhance_creativity=0.7,
-                enhance_prompt="gold", replication=0.2,
-            ))
+            rc = upscale._run(_args(creativity=0.01))
 
         self.assertEqual(rc, 0)
         b = captured["body"]
-        self.assertEqual(b["enhance"], True)
-        self.assertEqual(b["enhanceCreativity"], 0.7)
-        self.assertEqual(b["enhancePrompt"], "gold")
-        self.assertEqual(b["replication"], 0.2)
+        self.assertEqual(set(b), {"image", "scale", "creativity"})
+        self.assertEqual(b["creativity"], 0.01)
 
     def test_output_flag_names_file(self):
         from venice.commands import upscale
@@ -168,63 +163,99 @@ class TestUpscaleFlow(unittest.TestCase):
 
         self.assertEqual(rc, 2)
 
-    def test_scale_out_of_range_returns_2(self):
+    def test_unsupported_scales_return_2_before_network(self):
         from venice.commands import upscale
 
-        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}):
-            rc = upscale._run(_args(scale=5.0))
-        self.assertEqual(rc, 2)
+        def explode(*a, **kw):
+            raise AssertionError("invalid scale must not hit the network")
 
-    def test_scale_one_without_enhance_returns_2(self):
+        for value in (1.0, 2.5, 3.0, 5.0):
+            with self.subTest(scale=value), \
+                 mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+                 mock.patch("venice.client.urllib.request.urlopen", explode):
+                rc = upscale._run(_args(scale=value))
+            self.assertEqual(rc, 2)
+
+    def test_stale_enhancer_config_fails_closed_with_cleanup_guidance(self):
         from venice.commands import upscale
 
-        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}):
-            rc = upscale._run(_args(scale=1.0, enhance=False))
-        self.assertEqual(rc, 2)
+        doc = {"version": 1, "mcpServers": {}, "defaults": {"upscale": {
+            "enhance": True,
+            "enhance_prompt": "gold",
+        }}}
+        err = io.StringIO()
 
-    def test_config_enhance_unlocks_scale_one(self):
-        """#57 Class B: apply_defaults runs before _validate, so setting
-        defaults.upscale.enhance once makes --scale 1 usable with no inline flag
-        -- previously an unavoidable exit 2."""
-        from venice.commands import upscale
+        def explode(*a, **kw):
+            raise AssertionError("retired config must not hit the network")
 
-        doc = {"version": 1, "mcpServers": {},
-               "defaults": {"upscale": {"enhance": True}}}
         with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
-             mock.patch("venice.userconfig.load_config", lambda *a, **k: doc), \
-             mock.patch("venice.client.urllib.request.urlopen",
-                        lambda *a, **kw: FakeResp(200, UPSCALED_PNG, "image/png")):
-            rc = upscale._run(_args(scale=1.0, enhance=None))
-        self.assertEqual(rc, 0)
+             mock.patch("venice.userconfig.load_config", return_value=doc), \
+             mock.patch("venice.client.urllib.request.urlopen", explode), \
+             mock.patch("sys.stderr", err):
+            rc = upscale._run(_args())
+        self.assertEqual(rc, 2)
+        self.assertIn("defaults.upscale.enhance", err.getvalue())
+        self.assertIn(
+            "venice config unset defaults.upscale.enhance_prompt", err.getvalue()
+        )
 
-    def test_explicit_no_enhance_beats_config_and_still_gates(self):
+    def test_retired_cli_flags_are_not_parsed(self):
+        from venice.cli import build_parser
+
+        for flag in (
+            "--enhance",
+            "--no-enhance",
+            "--enhance-creativity",
+            "--enhance-prompt",
+            "--replication",
+        ):
+            with self.subTest(flag=flag), mock.patch("sys.stderr", io.StringIO()):
+                with self.assertRaises(SystemExit) as raised:
+                    build_parser().parse_args(["upscale", "in.png", flag])
+            self.assertEqual(raised.exception.code, 2)
+
+    def test_unset_creativity_is_omitted(self):
         from venice.commands import upscale
-
-        doc = {"version": 1, "mcpServers": {},
-               "defaults": {"upscale": {"enhance": True}}}
-        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
-             mock.patch("venice.userconfig.load_config", lambda *a, **k: doc):
-            rc = upscale._run(_args(scale=1.0, enhance=False))
-        self.assertEqual(rc, 2)  # explicit --no-enhance wins, gate still fires
-
-    def test_unset_enhance_sends_false_not_none(self):
-        from venice.commands import upscale
-        body = upscale._build_body(_resolved_args(enhance=None), "b64")
+        body = upscale._build_body(_resolved_args(creativity=None), "b64")
         # `_build_body` reads args.scale raw, with no fallback of its own -- so a
         # namespace that never went through `_run` must be resolved here or this
         # silently builds {"scale": null}. (#57 Class C1)
         self.assertEqual(body["scale"], upscale.DEFAULT_SCALE)
-        self.assertIs(body["enhance"], False)
+        self.assertNotIn("creativity", body)
 
-    def test_scale_one_with_enhance_ok(self):
+    def test_scale_four_ok(self):
         from venice.commands import upscale
 
         with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
              mock.patch("venice.client.urllib.request.urlopen",
                         lambda *a, **kw: FakeResp(200, UPSCALED_PNG, "image/png")):
-            rc = upscale._run(_args(scale=1.0, enhance=True))
+            rc = upscale._run(_args(scale=4.0))
         self.assertEqual(rc, 0)
         self.assertTrue(Path("in-upscaled.png").exists())
+
+    def test_creativity_boundaries_are_accepted(self):
+        from venice.commands import upscale
+
+        for value in (0.0, 0.02):
+            with self.subTest(creativity=value), \
+                 mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+                 mock.patch("venice.client.urllib.request.urlopen",
+                            lambda *a, **kw: FakeResp(200, UPSCALED_PNG, "image/png")):
+                rc = upscale._run(_args(creativity=value))
+            self.assertEqual(rc, 0)
+
+    def test_out_of_range_creativity_returns_2_before_network(self):
+        from venice.commands import upscale
+
+        def explode(*a, **kw):
+            raise AssertionError("invalid creativity must not hit the network")
+
+        for value in (-0.001, 0.021, float("inf"), float("nan")):
+            with self.subTest(creativity=value), \
+                 mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+                 mock.patch("venice.client.urllib.request.urlopen", explode):
+                rc = upscale._run(_args(creativity=value))
+            self.assertEqual(rc, 2)
 
     def test_402_maps_to_1(self):
         from venice.commands import upscale

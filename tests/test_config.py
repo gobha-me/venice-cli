@@ -420,12 +420,10 @@ _CLASS_A_CASES = [
     ),
     dict(
         mod=upscale, argv=["upscale", "in.png"], key="upscale",
-        config={"enhance_creativity": "0.5", "enhance_prompt": "gold",
-                "replication": "0.3"},
-        expected={"enhance_creativity": 0.5, "enhance_prompt": "gold",
-                  "replication": 0.3},
-        explicit=["upscale", "in.png", "--replication", "0.9"],
-        edest="replication", eval=0.9,
+        config={"creativity": "0.01"},
+        expected={"creativity": 0.01},
+        explicit=["upscale", "in.png", "--creativity", "0.02"],
+        edest="creativity", eval=0.02,
     ),
     dict(
         mod=index, argv=["index"], key="index",
@@ -554,7 +552,7 @@ class TestClassAParity(unittest.TestCase):
 # collides with an existing flag -- fails here rather than at runtime.
 #
 # `on`/`off` are the two spellings that must produce True/False. Positive-sense
-# flags use BooleanOptionalAction (--enhance/--no-enhance); negative-sense dests
+# flags use BooleanOptionalAction; negative-sense dests
 # keep their name and gain a positive counterpart (--no-audio/--with-audio), so
 # the config key stays honest and no tool-argument name changes.
 # --------------------------------------------------------------------------- #
@@ -562,9 +560,6 @@ _CLASS_B_CASES = [
     dict(key="image_edit", mod=image_edit, argv=["image-edit", "p"],
          dest="safe_mode", on="--safe-mode", off="--no-safe-mode",
          cfg=False, want=False, explicit="--safe-mode", eval=True),
-    dict(key="upscale", mod=upscale, argv=["upscale", "in.png"],
-         dest="enhance", on="--enhance", off="--no-enhance",
-         cfg="yes", want=True, explicit="--no-enhance", eval=False),
     dict(key="video", mod=video, argv=["video", "p"],
          dest="no_audio", on="--no-audio", off="--with-audio",
          cfg=True, want=True, explicit="--with-audio", eval=False),
