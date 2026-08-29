@@ -5,6 +5,7 @@ to resolve the default model (mirrors test_chat.py's catalog mock).
 """
 import argparse
 import base64
+import contextlib
 import io
 import json
 import os
@@ -219,6 +220,34 @@ class TestVideoFlow(unittest.TestCase):
         self.assertEqual(rc, 0)
         writes = "".join(c.args[0] for c in out.write.call_args_list)
         self.assertIn("BGVID99999", writes)
+
+    def test_malformed_retrieve_keeps_queue_recovery_hint(self):
+        from venice.commands import video
+
+        responses = iter([
+            _catalog(DEFAULT_MODEL),
+            FakeResp(200, b'{"quote": 0.5}', "application/json"),
+            FakeResp(
+                200,
+                b'{"queue_id":"vid12345678"}',
+                "application/json",
+            ),
+            FakeResp(200, b"{broken", "application/json"),
+        ])
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
+             mock.patch(
+                 "venice.client.urllib.request.urlopen",
+                 lambda *a, **kw: next(responses),
+             ), contextlib.redirect_stderr(err):
+            rc = video._run_generate(_build_args())
+
+        self.assertEqual(rc, 2)
+        self.assertIn(
+            f"venice video-status vid12345678 --model {DEFAULT_MODEL}",
+            err.getvalue(),
+        )
+        self.assertNotIn("Traceback", err.getvalue())
 
     def test_background_vps_url_is_stored_but_never_printed(self):
         from venice.commands import _video_jobs, video

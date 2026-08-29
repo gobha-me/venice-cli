@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import socket
 import tempfile
 import time
 import urllib.error
@@ -52,6 +53,17 @@ class VeniceAPIError(Exception):
 
 
 ResponseType = Union[dict, bytes]
+
+
+def _content_type_base(content_type: str) -> str:
+    """Return a normalized MIME type without parameters."""
+    return (content_type or "").split(";", 1)[0].strip().lower()
+
+
+def _is_json_content_type(content_type: str) -> bool:
+    """Recognize JSON and RFC structured-suffix JSON media types."""
+    base = _content_type_base(content_type)
+    return base == "application/json" or base.endswith("+json")
 
 
 class VeniceClient:
@@ -121,7 +133,15 @@ class VeniceClient:
                 pass
             self._raise_api_error(e.code, url, err_body, err_ctype)
         except urllib.error.URLError as e:
-            raise VeniceAPIError(0, url, f"connection error: {e.reason}") from None
+            if isinstance(e.reason, (TimeoutError, socket.timeout)):
+                detail = "request timed out"
+            else:
+                detail = f"connection error: {e.reason}"
+            raise VeniceAPIError(0, url, detail) from None
+        except (TimeoutError, socket.timeout):
+            raise VeniceAPIError(0, url, "request timed out") from None
+        except OSError as e:
+            raise VeniceAPIError(0, url, f"connection error: {e}") from None
 
     def post_json(self, path: str, body: dict) -> dict:
         status, ctype, raw = self.request("POST", path, json_body=body)
@@ -141,16 +161,33 @@ class VeniceClient:
           - ("application/json", {...}) while still processing
         """
         status, ctype, raw = self.request("POST", path, json_body=body)
-        ct_low = (ctype or "").lower()
-        if ct_low.startswith("application/json"):
-            return ctype, (json.loads(raw.decode("utf-8")) if raw else {})
+        if not raw:
+            raise VeniceAPIError(
+                status,
+                path,
+                f"empty async response ({ctype or 'missing Content-Type'})",
+            )
+        if _is_json_content_type(ctype):
+            return ctype, self._decode_json(status, path, ctype, raw)
+        ct_base = _content_type_base(ctype)
         if (
-            ct_low.startswith("audio/")
-            or ct_low.startswith("image/")
-            or ct_low.startswith("video/")
+            ct_base.startswith("audio/")
+            or ct_base.startswith("image/")
+            or ct_base.startswith("video/")
         ):
             return ctype, raw
-        return ctype, raw
+
+        # A proxy or origin may omit or misstate Content-Type.  JSON is safe to
+        # recognize by actually decoding it; arbitrary bytes are not safe to
+        # bless as paid media without a declared media family.
+        try:
+            return ctype, self._decode_json(status, path, ctype, raw)
+        except VeniceAPIError:
+            raise VeniceAPIError(
+                status,
+                path,
+                f"unexpected async content type: {ctype or '(missing)'}",
+            ) from None
 
     def poll_retrieve(
         self,
@@ -309,12 +346,16 @@ class VeniceClient:
         except urllib.error.URLError as e:
             if isinstance(e.reason, _egress.EgressPolicyError):
                 detail = str(e.reason)
+            elif isinstance(e.reason, (TimeoutError, socket.timeout)):
+                detail = "video download timed out"
             else:
                 detail = "video download connection failed"
             raise VeniceAPIError(0, url, detail) from None
         except _egress.EgressPolicyError as e:
             raise VeniceAPIError(0, url, str(e)) from None
-        except (TimeoutError, OSError):
+        except (TimeoutError, socket.timeout):
+            raise VeniceAPIError(0, url, "video download timed out") from None
+        except OSError:
             raise VeniceAPIError(0, url, "video download connection failed") from None
 
     @staticmethod
@@ -349,7 +390,7 @@ class VeniceClient:
         try:
             text = body.decode("utf-8", errors="replace")
             excerpt = text[:2048]
-            if (ctype or "").lower().startswith("application/json"):
+            if _is_json_content_type(ctype):
                 doc: Any = json.loads(text)
                 if isinstance(doc, dict):
                     code = doc.get("code")

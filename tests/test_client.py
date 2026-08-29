@@ -1,13 +1,15 @@
 """Unit tests for VeniceClient. Mocks urllib.request.urlopen."""
 import io
 import json
+import socket
 import tempfile
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 from venice import __version__
 from venice.client import VeniceAPIError, VeniceClient
@@ -172,6 +174,52 @@ class TestVeniceClient(unittest.TestCase):
             self.assertIn("timed out", str(cm.exception))
             self.assertEqual(list(Path(td).iterdir()), [])
 
+    def test_download_open_timeout_and_oserror_become_api_errors(self):
+        c = VeniceClient(api_key="test-fake-key")
+
+        class Opener:
+            def __init__(self, error):
+                self.error = error
+
+            def open(self, req, timeout=None):
+                raise self.error
+
+        with tempfile.TemporaryDirectory() as td:
+            for error, text in (
+                (socket.timeout("slow"), "timed out"),
+                (ConnectionResetError("reset"), "connection failed"),
+            ):
+                with self.subTest(error=type(error).__name__), mock.patch(
+                    "venice.client._egress.build_https_opener",
+                    return_value=Opener(error),
+                ), self.assertRaises(VeniceAPIError) as cm:
+                    c.download_url_to_temp(
+                        "https://example.test/video", Path(td)
+                    )
+                self.assertEqual(cm.exception.status, 0)
+                self.assertIn(text, str(cm.exception))
+                self.assertEqual(list(Path(td).iterdir()), [])
+
+    def test_download_read_timeout_cleans_partial_file(self):
+        c = VeniceClient(api_key="test-fake-key")
+
+        class SlowResp(FakeResp):
+            def read(self, n=-1):
+                raise socket.timeout("slow body")
+
+        class Opener:
+            def open(self, req, timeout=None):
+                return SlowResp(200, b"", "video/mp4")
+
+        with tempfile.TemporaryDirectory() as td, mock.patch(
+            "venice.client._egress.build_https_opener", return_value=Opener()
+        ):
+            with self.assertRaisesRegex(VeniceAPIError, "timed out"):
+                c.download_url_to_temp(
+                    "https://example.test/video", Path(td)
+                )
+            self.assertEqual(list(Path(td).iterdir()), [])
+
     def test_download_error_redacts_userinfo_query_and_fragment(self):
         c = VeniceClient(api_key="test-fake-key")
         url = "https://user:pass@example.test/video?signature=secret#fragment"
@@ -328,6 +376,56 @@ class TestVeniceClient(unittest.TestCase):
         self.assertTrue(ct.startswith("application/json"))
         self.assertEqual(payload, {"status": "PROCESSING"})
 
+    def test_post_for_bytes_or_json_accepts_structured_json_type(self):
+        c = VeniceClient(api_key="k")
+        body = b'{"status":"PROCESSING"}'
+        with mock.patch(
+            "venice.client.urllib.request.urlopen",
+            lambda *a, **kw: FakeResp(
+                200, body, "application/vnd.venice.status+json; charset=utf-8"
+            ),
+        ):
+            _ct, payload = c.post_for_bytes_or_json("/audio/retrieve", {})
+        self.assertEqual(payload, {"status": "PROCESSING"})
+
+    def test_async_malformed_and_empty_bodies_become_api_errors(self):
+        c = VeniceClient(api_key="k")
+        cases = (
+            (b"{broken", "application/json", "non-JSON response"),
+            (b"", "application/json", "empty async response"),
+            (b"", "audio/mpeg", "empty async response"),
+        )
+        for body, ctype, message in cases:
+            with self.subTest(body=body, ctype=ctype), mock.patch(
+                "venice.client.urllib.request.urlopen",
+                lambda *a, _body=body, _ctype=ctype, **kw: FakeResp(
+                    200, _body, _ctype
+                ),
+            ), self.assertRaisesRegex(VeniceAPIError, message) as cm:
+                c.post_for_bytes_or_json("/audio/retrieve", {})
+            self.assertEqual(cm.exception.status, 200)
+
+    def test_async_missing_or_misdeclared_json_is_decoded_conservatively(self):
+        c = VeniceClient(api_key="k")
+        body = b'{"status":"PROCESSING"}'
+        for ctype in ("", "text/plain"):
+            with self.subTest(ctype=ctype), mock.patch(
+                "venice.client.urllib.request.urlopen",
+                lambda *a, _ctype=ctype, **kw: FakeResp(200, body, _ctype),
+            ):
+                _ct, payload = c.post_for_bytes_or_json(
+                    "/audio/retrieve", {}
+                )
+            self.assertEqual(payload, {"status": "PROCESSING"})
+
+    def test_async_unknown_binary_type_fails_closed(self):
+        c = VeniceClient(api_key="k")
+        with mock.patch(
+            "venice.client.urllib.request.urlopen",
+            lambda *a, **kw: FakeResp(200, b"binary", "application/octet-stream"),
+        ), self.assertRaisesRegex(VeniceAPIError, "unexpected async content type"):
+            c.post_for_bytes_or_json("/audio/retrieve", {})
+
     def test_http_error_becomes_venice_api_error_with_code(self):
         c = VeniceClient(api_key="k")
         err_body = json.dumps({"code": "INSUFFICIENT_BALANCE", "message": "broke"}).encode()
@@ -347,9 +445,24 @@ class TestVeniceClient(unittest.TestCase):
         self.assertEqual(cm.exception.status, 402)
         self.assertEqual(cm.exception.code, "INSUFFICIENT_BALANCE")
 
-    def test_url_error_becomes_venice_api_error_status_zero(self):
-        from urllib.error import URLError
+    def test_structured_json_http_error_extracts_code(self):
+        c = VeniceClient(api_key="k")
 
+        def boom(*a, **kw):
+            raise HTTPError(
+                url="https://api.venice.ai/api/v1/audio/queue",
+                code=409,
+                msg="Conflict",
+                hdrs={"Content-Type": "application/problem+json"},  # type: ignore[arg-type]
+                fp=io.BytesIO(b'{"code":"JOB_CONFLICT"}'),
+            )
+
+        with mock.patch("venice.client.urllib.request.urlopen", boom), \
+             self.assertRaises(VeniceAPIError) as cm:
+            c.post_json("/audio/queue", {})
+        self.assertEqual(cm.exception.code, "JOB_CONFLICT")
+
+    def test_url_error_becomes_venice_api_error_status_zero(self):
         c = VeniceClient(api_key="k")
 
         def boom(*a, **kw):
@@ -359,6 +472,71 @@ class TestVeniceClient(unittest.TestCase):
             with self.assertRaises(VeniceAPIError) as cm:
                 c.post_json("/whatever", {})
         self.assertEqual(cm.exception.status, 0)
+
+    def test_direct_timeout_and_oserror_become_api_errors_status_zero(self):
+        c = VeniceClient(api_key="k")
+        for error, message in (
+            (socket.timeout("slow"), "request timed out"),
+            (ConnectionResetError("reset"), "connection error"),
+        ):
+            with self.subTest(error=type(error).__name__), mock.patch(
+                "venice.client.urllib.request.urlopen", side_effect=error
+            ), self.assertRaisesRegex(VeniceAPIError, message) as cm:
+                c.post_json("/whatever", {})
+            self.assertEqual(cm.exception.status, 0)
+
+    def test_urlerror_wrapped_timeout_becomes_api_error_status_zero(self):
+        c = VeniceClient(api_key="k")
+        with mock.patch(
+            "venice.client.urllib.request.urlopen",
+            side_effect=URLError(socket.timeout("slow")),
+        ), self.assertRaisesRegex(VeniceAPIError, "request timed out") as cm:
+            c.post_json("/whatever", {})
+        self.assertEqual(cm.exception.status, 0)
+
+    def test_loopback_timeouts_before_headers_and_during_body_are_normalized(self):
+        stages = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path == "/headers":
+                    time.sleep(0.1)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.flush()
+                time.sleep(0.1)
+                try:
+                    self.wfile.write(b'{"ok":true}')
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+
+            def log_message(self, format, *args):
+                pass
+
+        with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+            thread = threading.Thread(target=server.serve_forever)
+            thread.start()
+            try:
+                client = VeniceClient(
+                    api_key="test-fake-key",
+                    base_url=f"http://127.0.0.1:{server.server_port}",
+                    timeout=0.02,
+                )
+                for path in ("/headers", "/body"):
+                    with self.subTest(path=path), self.assertRaises(
+                        VeniceAPIError
+                    ) as cm:
+                        client.get_json(path)
+                    stages.append((path, cm.exception.status, str(cm.exception)))
+            finally:
+                server.shutdown()
+                thread.join()
+
+        self.assertEqual([status for _path, status, _text in stages], [0, 0])
+        for _path, _status, text in stages:
+            self.assertIn("timed out", text)
 
     def test_poll_retrieve_returns_audio_after_processing_then_done(self):
         c = VeniceClient(api_key="k")

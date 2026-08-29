@@ -176,6 +176,14 @@ def _job_handle(queue_id: str, *, type: str, model: str, quote_value) -> dict:
     return handle
 
 
+def _job_retry_hint(queue_id: str, *, type: str, model: str) -> str:
+    """Return model-facing recovery guidance without exposing private URLs."""
+    return (
+        "retry venice_job_result with "
+        f"queue_id={queue_id!r}, type={type!r}, and model={model!r}"
+    )
+
+
 # ---- tools -------------------------------------------------------------------
 
 def image_tool(
@@ -378,9 +386,15 @@ def _queue_media(
             poll_interval=poll_interval, max_wait=max_wait,
         )
     except VeniceAPIError as e:
-        return _err(f"{label} retrieve failed: {e}")
+        return _err(
+            f"{label} retrieve failed: {e}; "
+            f"{_job_retry_hint(queue_id, type=label, model=model)}"
+        )
     except TimeoutError as e:
-        return _err(f"{label}: {e}; the job {queue_id} may still finish server-side")
+        return _err(
+            f"{label}: {e}; the job may still finish server-side; "
+            f"{_job_retry_hint(queue_id, type=label, model=model)}"
+        )
 
     ext, _unknown = _audio.ext_for(ctype)
     out_path = _queue.resolve_output_path(
@@ -388,7 +402,10 @@ def _queue_media(
     )
     werr = _write(out_path, audio)
     if werr:
-        return _err(f"{label}: could not write {out_path}: {werr}")
+        return _err(
+            f"{label}: could not write {out_path}: {werr}; "
+            f"{_job_retry_hint(queue_id, type=label, model=model)}"
+        )
 
     try:  # best-effort cleanup; the file is already saved
         client.post_json("/audio/complete", {"model": model, "queue_id": queue_id})
@@ -909,7 +926,8 @@ def video_tool(
             except _video_jobs.VideoJobStoreError as e:
                 return _err(
                     f"video: queued as {queue_id}, but could not save private "
-                    f"retrieval metadata: {e}"
+                    f"retrieval metadata: {e}; "
+                    f"{_job_retry_hint(queue_id, type='video', model=model)}"
                 )
         return _job_handle(queue_id, type="video", model=model, quote_value=quote_value)
 
@@ -917,7 +935,10 @@ def video_tool(
     try:
         output_root.mkdir(parents=True, exist_ok=True)
     except OSError as e:
-        return _err(f"video: could not create output directory {output_root}: {e}")
+        return _err(
+            f"video: could not create output directory {output_root}: {e}; "
+            f"{_job_retry_hint(queue_id, type='video', model=model)}"
+        )
     try:
         ctype, payload, byte_count = _video.retrieve_bytes(
             client, model, queue_id,
@@ -926,11 +947,20 @@ def video_tool(
             download_dir=output_root,
         )
     except VeniceAPIError as e:
-        return _err(f"video retrieve failed: {e}")
+        return _err(
+            f"video retrieve failed: {e}; "
+            f"{_job_retry_hint(queue_id, type='video', model=model)}"
+        )
     except TimeoutError as e:
-        return _err(f"video: {e}; the job {queue_id} may still finish server-side")
+        return _err(
+            f"video: {e}; the job may still finish server-side; "
+            f"{_job_retry_hint(queue_id, type='video', model=model)}"
+        )
     except _video.NoVideoStream:
-        return _err(f"video: job {queue_id} completed but returned no video stream")
+        return _err(
+            f"video: job {queue_id} completed but returned no video stream; "
+            f"{_job_retry_hint(queue_id, type='video', model=model)}"
+        )
 
     ext, _unknown = _queue.ext_for(ctype, _video.VIDEO_EXT_BY_CTYPE, default=".mp4")
     out_path = _queue.resolve_output_path(
@@ -944,11 +974,17 @@ def video_tool(
                 payload.unlink()
             except OSError:
                 pass
-            return _err(f"video: could not write {out_path}: {e}")
+            return _err(
+                f"video: could not write {out_path}: {e}; "
+                f"{_job_retry_hint(queue_id, type='video', model=model)}"
+            )
     else:
         werr = _write(out_path, payload)
         if werr:
-            return _err(f"video: could not write {out_path}: {werr}")
+            return _err(
+                f"video: could not write {out_path}: {werr}; "
+                f"{_job_retry_hint(queue_id, type='video', model=model)}"
+            )
 
     try:  # best-effort cleanup; the file is already saved
         client.post_json("/video/complete", {"model": model, "queue_id": queue_id})
@@ -999,7 +1035,10 @@ def job_status_tool(client, *, queue_id: str, type: str, model: str) -> dict:
                 "queue_id": queue_id,
                 "message": f"job {queue_id} not found (expired, wrong type, or bad id)",
             }
-        return _err(f"job_status: {e}")
+        return _err(
+            f"job_status: {e}; "
+            f"{_job_retry_hint(queue_id, type=type, model=model)}"
+        )
 
     if isinstance(payload, (bytes, bytearray)):
         return {"status": "done", "ready": True, "queue_id": queue_id,
@@ -1063,12 +1102,18 @@ def job_result_tool(
             try:
                 download_url = _video_jobs.lookup(queue_id, model)
             except _video_jobs.VideoJobStoreError as e:
-                return _err(f"job_result: cannot read private retrieval metadata: {e}")
+                return _err(
+                    f"job_result: cannot read private retrieval metadata: {e}; "
+                    f"{_job_retry_hint(queue_id, type=type, model=model)}"
+                )
             output_root = resolve_output_dir(None)
             try:
                 output_root.mkdir(parents=True, exist_ok=True)
             except OSError as e:
-                return _err(f"job_result: could not create output directory: {e}")
+                return _err(
+                    f"job_result: could not create output directory: {e}; "
+                    f"{_job_retry_hint(queue_id, type=type, model=model)}"
+                )
             ctype, data, byte_count = _video.retrieve_bytes(
                 client, model, queue_id,
                 poll_interval=_video.config.VIDEO_POLL_INTERVAL_SEC,
@@ -1086,10 +1131,14 @@ def job_result_tool(
     except _video.NoVideoStream:
         return _err(
             f"job_result: video job {queue_id} completed but returned no stream; "
-            "no private download metadata is available"
+            "no private download metadata is available; "
+            f"{_job_retry_hint(queue_id, type=type, model=model)}"
         )
     except VeniceAPIError as e:
-        return _err(f"job_result: retrieve failed: {e}")
+        return _err(
+            f"job_result: retrieve failed: {e}; "
+            f"{_job_retry_hint(queue_id, type=type, model=model)}"
+        )
 
     out_path = _queue.resolve_output_path(
         resolve_output_dir(None), queue_id, ext, prefix=name_prefix
@@ -1102,11 +1151,17 @@ def job_result_tool(
                 data.unlink()
             except OSError:
                 pass
-            return _err(f"job_result: could not write {out_path}: {e}")
+            return _err(
+                f"job_result: could not write {out_path}: {e}; "
+                f"{_job_retry_hint(queue_id, type=type, model=model)}"
+            )
     else:
         werr = _write(out_path, data)
         if werr:
-            return _err(f"job_result: could not write {out_path}: {werr}")
+            return _err(
+                f"job_result: could not write {out_path}: {werr}; "
+                f"{_job_retry_hint(queue_id, type=type, model=model)}"
+            )
 
     try:  # best-effort cleanup; the file is already saved
         client.post_json(f"/{base}/complete", {"model": model, "queue_id": queue_id})
