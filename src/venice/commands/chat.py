@@ -723,6 +723,7 @@ def _consume_stream_message_full(stream):
     usage = None
     parts: list = []
     reasoning_parts = {field: [] for field in _agent._REASONING_FIELDS}
+    thought_signature_parts: list = []
     for chunk in stream:
         vp = getattr(chunk, "venice_parameters", None)
         if vp is not None and citations is None:
@@ -740,6 +741,9 @@ def _consume_stream_message_full(stream):
                 value = getattr(delta, field, None)
                 if value is not None:
                     reasoning_parts[field].append(_agent._request_value(value))
+            signature = getattr(delta, _agent._THOUGHT_SIGNATURE_FIELD, None)
+            if signature is not None:
+                thought_signature_parts.append(_agent._request_value(signature))
     if parts:
         sys.stdout.write("\n")
     _print_citations(citations)
@@ -756,6 +760,17 @@ def _consume_stream_message_full(stream):
         else:
             message[field] = values[0] if len(values) == 1 else values
         break
+    if thought_signature_parts:
+        if all(isinstance(value, str) for value in thought_signature_parts):
+            message[_agent._THOUGHT_SIGNATURE_FIELD] = "".join(
+                thought_signature_parts
+            )
+        else:
+            message[_agent._THOUGHT_SIGNATURE_FIELD] = (
+                thought_signature_parts[0]
+                if len(thought_signature_parts) == 1
+                else thought_signature_parts
+            )
     return message, usage
 
 

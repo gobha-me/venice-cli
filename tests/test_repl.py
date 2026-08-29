@@ -371,12 +371,19 @@ class TestRepl(unittest.TestCase):
             env2 = json.loads((Path(d) / (sid + ".json")).read_text())
             self.assertEqual(len(env2["messages"]), 4)
 
-    def test_streamed_reasoning_replays_and_is_saved(self):
+    def test_streamed_reasoning_and_signature_replay_save_and_resume(self):
         with tempfile.TemporaryDirectory() as d:
             results = [
                 [
-                    FakeChunk(reasoning_content="think "),
-                    FakeChunk("answer", reasoning_content="carefully"),
+                    FakeChunk(
+                        reasoning_content="think ",
+                        thought_signature="sig-",
+                    ),
+                    FakeChunk(
+                        "answer",
+                        reasoning_content="carefully",
+                        thought_signature="exact",
+                    ),
                 ],
                 [FakeChunk("follow-up")],
             ]
@@ -390,11 +397,29 @@ class TestRepl(unittest.TestCase):
             replayed = calls[1]["messages"][1]
             self.assertEqual(replayed["content"], "answer")
             self.assertEqual(replayed["reasoning_content"], "think carefully")
+            self.assertEqual(replayed["thought_signature"], "sig-exact")
 
-            saved = json.loads(list(Path(d).glob("*.json"))[0].read_text())
+            session_path = list(Path(d).glob("*.json"))[0]
+            saved = json.loads(session_path.read_text())
             self.assertEqual(
                 saved["messages"][1]["reasoning_content"],
                 "think carefully",
+            )
+            self.assertEqual(
+                saved["messages"][1]["thought_signature"],
+                "sig-exact",
+            )
+
+            rc2, _fake2, calls2 = _run_repl(
+                _args(interactive=True, resume=saved["id"]),
+                [[FakeChunk("resumed")]],
+                ["third", "/exit"],
+                sessions_dir=d,
+            )
+            self.assertEqual(rc2, 0)
+            self.assertEqual(
+                calls2[0]["messages"][1]["thought_signature"],
+                "sig-exact",
             )
 
     def test_ephemeral_writes_no_file(self):

@@ -48,7 +48,7 @@ def _free_tool():
 
 
 class TestAssistantReplay(unittest.TestCase):
-    """#129: compatible reasoning fields survive every buffered history seam."""
+    """#129/#146: reasoning and thought signatures survive buffered history."""
 
     def test_synthetic_sdk_message_replays_reasoning_and_exact_tool_call(self):
         from openai.types.chat import ChatCompletion
@@ -65,6 +65,7 @@ class TestAssistantReplay(unittest.TestCase):
                     "role": "assistant",
                     "content": "I will inspect it.",
                     "reasoning_content": "reasoning bytes: \u2603",
+                    "thought_signature": "sig-exact",
                     "tool_calls": [{
                         "id": "call-123",
                         "type": "function",
@@ -78,6 +79,7 @@ class TestAssistantReplay(unittest.TestCase):
             "role": "assistant",
             "content": "I will inspect it.",
             "reasoning_content": "reasoning bytes: \u2603",
+            "thought_signature": "sig-exact",
             "tool_calls": [{
                 "id": "call-123",
                 "type": "function",
@@ -92,12 +94,14 @@ class TestAssistantReplay(unittest.TestCase):
             reasoning_content="preferred",
             reasoning_details=[{"type": "summary", "text": "other"}],
             reasoning="last",
+            thought_signature="sig-independent",
             refusal="response-only",
         )
         self.assertEqual(_agent._assistant_dict(msg), {
             "role": "assistant",
             "content": "visible",
             "reasoning_content": "preferred",
+            "thought_signature": "sig-independent",
         })
 
     def test_non_reasoning_message_shape_is_unchanged(self):
@@ -110,6 +114,7 @@ class TestAssistantReplay(unittest.TestCase):
         first = FakeToolCompletion(
             tool_calls=[_FnCall("c1", "t", "{}")],
             reasoning_content="keep this exactly \u2603",
+            thought_signature="sig-exact",
         )
         fake, calls = _fake_oai([first, FakeToolCompletion("done")])
         messages = [{"role": "user", "content": "go"}]
@@ -123,11 +128,19 @@ class TestAssistantReplay(unittest.TestCase):
             calls[1]["messages"][1]["reasoning_content"],
             "keep this exactly \u2603",
         )
+        self.assertEqual(
+            calls[1]["messages"][1]["thought_signature"],
+            "sig-exact",
+        )
 
     def test_forced_final_response_keeps_reasoning_in_history(self):
         seq = [
             FakeToolCompletion(tool_calls=[_FnCall("c1", "t", "{}")]),
-            FakeToolCompletion("wrapped", reasoning_content="final thought"),
+            FakeToolCompletion(
+                "wrapped",
+                reasoning_content="final thought",
+                thought_signature="final-sig",
+            ),
         ]
         fake, _calls = _fake_oai(seq)
         messages = [{"role": "user", "content": "go"}]
@@ -138,6 +151,7 @@ class TestAssistantReplay(unittest.TestCase):
                 max_tool_calls=1, yes=True, json_out=False,
             )
         self.assertEqual(messages[-1]["reasoning_content"], "final thought")
+        self.assertEqual(messages[-1]["thought_signature"], "final-sig")
 
 
 def _tty(value=True):
