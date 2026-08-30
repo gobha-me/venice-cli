@@ -4,8 +4,31 @@
 
 set -eu
 
-SCRIPT="$(readlink -f "$0")"
-REPO="$(cd "$(dirname "$SCRIPT")" && pwd)"
+# This bootstrap is intentionally kept in sync with uninstall.sh.  It cannot
+# live in a sourced helper: finding that helper safely already requires
+# resolving this script through any symlinks used to invoke it.
+resolve_script() {
+    self="$1"
+    hops=0
+    while [ -L "$self" ]; do
+        hops=$((hops + 1))
+        if [ "$hops" -gt 40 ]; then
+            echo "unable to resolve script path: too many symlinks" >&2
+            return 1
+        fi
+        self_dir="$(CDPATH= cd -P "$(dirname "$self")" && pwd)" || return 1
+        target="$(readlink "$self")" || return 1
+        case "$target" in
+            /*) self="$target" ;;
+            *) self="$self_dir/$target" ;;
+        esac
+    done
+    self_dir="$(CDPATH= cd -P "$(dirname "$self")" && pwd)" || return 1
+    printf '%s/%s\n' "$self_dir" "$(basename "$self")"
+}
+
+SCRIPT="$(resolve_script "$0")"
+REPO="$(CDPATH= cd -P "$(dirname "$SCRIPT")" && pwd)"
 
 BIN_SRC="$REPO/bin/venice"
 PKG_SRC="$REPO/src/venice"
