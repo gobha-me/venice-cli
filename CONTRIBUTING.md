@@ -33,6 +33,7 @@ make test    # unittest, no network, no API key required
 make lint    # compileall syntax check
 make scan    # invisible-character scan over every tracked file
 make drive   # the drive suite + its fake-API fixture (a subset of `make test`)
+make openapi-check  # offline implemented-operation inventory check
 ```
 
 `make test`, `make lint` and `make scan` must be green. Tests are hermetic: `urlopen` is
@@ -40,6 +41,32 @@ mocked, `subprocess` and `shutil.which` are patched, `HOME` is redirected to a
 tmpdir, and the OpenAI SDK is mocked. **No test should ever make a real API call
 or need a real key.** If you find yourself wanting to hit the live API in a test,
 that's a sign the seam is in the wrong place.
+
+### OpenAPI contract inventory
+
+`contracts/openapi/venice.lock.json` is the deterministic subset of the
+official Venice Swagger that this curated CLI actually implements. It records
+the upstream version and raw SHA-256 plus the normalized request schemas for
+those operations; `implementation.json` records each CLI/MCP/agent consumer,
+implemented request fields, deliberate omissions, and model-catalog-backed
+constraints. The full third-party Swagger remains untracked.
+
+Ordinary tests run `make openapi-check` offline. To compare the lock with the
+current official schema, install the script-only parser and run:
+
+```sh
+python3 -m pip install -r scripts/openapi-requirements.txt
+make openapi-live
+```
+
+The live check fails for any change to an implemented operation and labels the
+change breaking or review-required. New or removed operations outside the
+curated surface are informational. After reviewing and implementing relevant
+drift, refresh the lock explicitly with `make openapi-refresh`, review the
+generated diff, then rerun the offline check. A scheduled/manual GitHub Actions
+workflow performs the same live comparison without making PR CI depend on
+upstream availability; it writes the actionable report to the job summary and
+an artifact, but does not open issues automatically.
 
 ### The invisible-character scan
 

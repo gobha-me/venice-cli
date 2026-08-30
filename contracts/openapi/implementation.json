@@ -1,0 +1,579 @@
+{
+  "format": 1,
+  "operations": {
+    "GET /api_keys/rate_limits": {
+      "consumers": [
+        "cli:balance",
+        "internal:spend_display"
+      ],
+      "model_catalog_constraints": {},
+      "parameters": {
+        "implemented": [],
+        "intentional_omissions": {}
+      },
+      "request_bodies": {}
+    },
+    "GET /models": {
+      "consumers": [
+        "cli:models",
+        "internal:model_validation",
+        "mcp:model_backed_tools",
+        "agent:model_backed_tools"
+      ],
+      "model_catalog_constraints": {},
+      "parameters": {
+        "implemented": [
+          "query:type"
+        ],
+        "intentional_omissions": {}
+      },
+      "request_bodies": {}
+    },
+    "POST /audio/complete": {
+      "consumers": [
+        "cli:sfx_status",
+        "cli:music_status",
+        "mcp:job_result",
+        "agent:job_result"
+      ],
+      "model_catalog_constraints": {},
+      "parameters": {
+        "implemented": [],
+        "intentional_omissions": {}
+      },
+      "request_bodies": {
+        "application/json": {
+          "implemented": [
+            "model",
+            "queue_id"
+          ],
+          "intentional_omissions": {}
+        }
+      }
+    },
+    "POST /audio/queue": {
+      "consumers": [
+        "cli:sfx",
+        "cli:music",
+        "mcp:sfx_music",
+        "agent:sfx_music"
+      ],
+      "model_catalog_constraints": {
+        "duration_seconds": "/models:model_spec.duration_options|min_duration|max_duration",
+        "force_instrumental": "/models:model_spec.supports_force_instrumental",
+        "lyrics_prompt": "/models:model_spec.supports_lyrics",
+        "prompt": "/models:model_spec.min_prompt_length|prompt_character_limit",
+        "speed": "/models:model_spec.supports_speed|min_speed|max_speed"
+      },
+      "parameters": {
+        "implemented": [],
+        "intentional_omissions": {}
+      },
+      "request_bodies": {
+        "application/json": {
+          "implemented": [
+            "duration_seconds",
+            "force_instrumental",
+            "lyrics_prompt",
+            "model",
+            "prompt",
+            "speed"
+          ],
+          "intentional_omissions": {
+            "language_code": "The curated music surface does not expose language selection.",
+            "loop": "Loop generation is not exposed by the current audio tools.",
+            "lyrics_optimizer": "Lyrics optimization is not exposed by the current audio tools.",
+            "voice": "Voice selection is not exposed for queued audio generation."
+          }
+        }
+      }
+    },
+    "POST /audio/quote": {
+      "consumers": [
+        "cli:sfx",
+        "cli:music",
+        "mcp:sfx_music",
+        "agent:sfx_music"
+      ],
+      "model_catalog_constraints": {
+        "duration_seconds": "/models:model_spec.duration_options|min_duration|max_duration"
+      },
+      "parameters": {
+        "implemented": [],
+        "intentional_omissions": {}
+      },
+      "request_bodies": {
+        "application/json": {
+          "implemented": [
+            "duration_seconds",
+            "model"
+          ],
+          "intentional_omissions": {
+            "character_count": "TTS uses catalog pricing locally and does not call the quote endpoint."
+          }
+        }
+      }
+    },
+    "POST /audio/retrieve": {
+      "consumers": [
+        "cli:sfx_status",
+        "cli:music_status",
+        "mcp:job_status_result",
+        "agent:job_status_result"
+      ],
+      "model_catalog_constraints": {},
+      "parameters": {
+        "implemented": [],
+        "intentional_omissions": {}
+      },
+      "request_bodies": {
+        "application/json": {
+          "implemented": [
+            "model",
+            "queue_id"
+          ],
+          "intentional_omissions": {
+            "delete_media_on_completion": "Cleanup is a separate explicit complete call after local persistence succeeds."
+          }
+        }
+      }
+    },
+    "POST /audio/speech": {
+      "consumers": [
+        "cli:tts",
+        "mcp:tts",
+        "agent:tts"
+      ],
+      "model_catalog_constraints": {
+        "response_format": "/models:model_spec.supported_formats|default_format",
+        "speed": "/models:model_spec.supports_speed|min_speed|max_speed",
+        "voice": "/models:model_spec.voices"
+      },
+      "parameters": {
+        "implemented": [],
+        "intentional_omissions": {}
+      },
+      "request_bodies": {
+        "application/json": {
+          "implemented": [
+            "input",
+            "model",
+            "response_format",
+            "speed",
+            "voice"
+          ],
+          "intentional_omissions": {
+            "language": "Language hints are not exposed by the current TTS surface.",
+            "prompt": "Voice-conditioning prompts are not exposed by the current TTS surface.",
+            "streaming": "The CLI requests one bounded response and persists it atomically.",
+            "temperature": "Sampling controls are intentionally omitted from the curated TTS surface.",
+            "top_p": "Sampling controls are intentionally omitted from the curated TTS surface."
+          }
+        }
+      }
+    },
+    "POST /chat/completions": {
+      "consumers": [
+        "cli:chat",
+        "cli:code",
+        "cli:review",
+        "mcp:chat_vision",
+        "agent:completion_loop"
+      ],
+      "model_catalog_constraints": {},
+      "parameters": {
+        "implemented": [],
+        "intentional_omissions": {
+          "header:Accept-Encoding": "Compression negotiation is owned by the OpenAI SDK transport."
+        }
+      },
+      "request_bodies": {
+        "application/json": {
+          "implemented": [
+            "max_tokens",
+            "messages",
+            "model",
+            "stream",
+            "stream_options",
+            "temperature",
+            "tool_choice",
+            "tools",
+            "venice_parameters"
+          ],
+          "intentional_omissions": {
+            "fallbacks": "Fallback routing is not exposed by the curated completion surfaces.",
+            "frequency_penalty": "Advanced sampling controls are not exposed.",
+            "include": "Responses-style include controls are not used by chat completions.",
+            "logprobs": "Log-probability output is not exposed.",
+            "max_completion_tokens": "The compatibility surface currently uses max_tokens.",
+            "max_temp": "Dynamic-temperature controls are not exposed.",
+            "metadata": "Server-side request metadata is not exposed.",
+            "min_p": "Advanced sampling controls are not exposed.",
+            "min_temp": "Dynamic-temperature controls are not exposed.",
+            "n": "The CLI requests one completion per turn.",
+            "parallel_tool_calls": "Tool concurrency is controlled by the local dispatcher, not the upstream flag.",
+            "presence_penalty": "Advanced sampling controls are not exposed.",
+            "prompt_cache_key": "Prompt-cache affinity is server-managed for the current surface.",
+            "prompt_cache_retention": "Prompt-cache retention is not exposed.",
+            "reasoning": "Responses-style reasoning configuration is not exposed here.",
+            "reasoning_effort": "Reasoning effort is not exposed by the current CLI.",
+            "repetition_penalty": "Advanced sampling controls are not exposed.",
+            "response_format": "Structured response formatting is not exposed.",
+            "seed": "Completion seeding is not exposed.",
+            "stop": "Stop sequences are not exposed.",
+            "stop_token_ids": "Provider-specific stop token IDs are not exposed.",
+            "store": "Server-side completion storage is not enabled by the CLI.",
+            "text": "Responses-style text configuration is not used by chat completions.",
+            "top_k": "Advanced sampling controls are not exposed.",
+            "top_logprobs": "Log-probability output is not exposed.",
+            "top_p": "Advanced sampling controls are not exposed.",
+            "user": "End-user tracking identifiers are not collected or sent.",
+            "verbosity": "Verbosity controls are not exposed."
+          }
+        }
+      }
+    },
+    "POST /embeddings": {
+      "consumers": [
+        "cli:embed",
+        "cli:index",
+        "mcp:semantic_search",
+        "agent:semantic_search"
+      ],
+      "model_catalog_constraints": {},
+      "parameters": {
+        "implemented": [],
+        "intentional_omissions": {
+          "header:Accept-Encoding": "Compression negotiation is owned by the OpenAI SDK transport."
+        }
+      },
+      "request_bodies": {
+        "application/json": {
+          "implemented": [
+            "dimensions",
+            "encoding_format",
+            "input",
+            "model"
+          ],
+          "intentional_omissions": {
+            "user": "End-user tracking identifiers are not collected or sent."
+          }
+        }
+      }
+    },
+    "POST /image/background-remove": {
+      "consumers": [
+        "cli:bg_remove",
+        "mcp:bg_remove",
+        "agent:bg_remove"
+      ],
+      "model_catalog_constraints": {},
+      "parameters": {
+        "implemented": [],
+        "intentional_omissions": {}
+      },
+      "request_bodies": {
+        "application/json": {
+          "implemented": [
+            "image",
+            "image_url"
+          ],
+          "intentional_omissions": {}
+        },
+        "multipart/form-data": {
+          "unsupported": "The stdlib client uses bounded JSON base64 or URL input."
+        }
+      }
+    },
+    "POST /image/edit": {
+      "consumers": [
+        "cli:image_edit",
+        "mcp:image_edit",
+        "agent:image_edit"
+      ],
+      "model_catalog_constraints": {
+        "aspect_ratio": "/models:model_spec.constraints.aspectRatios",
+        "prompt": "/models:model_spec.constraints.promptCharacterLimit",
+        "resolution": "/models:model_spec.constraints.resolutions"
+      },
+      "parameters": {
+        "implemented": [],
+        "intentional_omissions": {}
+      },
+      "request_bodies": {
+        "application/json": {
+          "implemented": [
+            "aspect_ratio",
+            "disable_prompt_optimization_thinking",
+            "enhance_prompt",
+            "image",
+            "model",
+            "output_format",
+            "prompt",
+            "resolution",
+            "safe_mode"
+          ],
+          "intentional_omissions": {
+            "modelId": "The deprecated modelId alias is intentionally not emitted for single-image edit."
+          }
+        },
+        "multipart/form-data": {
+          "unsupported": "The stdlib client uses bounded JSON base64 or URL input."
+        }
+      }
+    },
+    "POST /image/generate": {
+      "consumers": [
+        "cli:image",
+        "mcp:image",
+        "agent:image"
+      ],
+      "model_catalog_constraints": {
+        "aspect_ratio": "/models:model_spec.constraints.aspectRatios",
+        "prompt": "/models:model_spec.constraints.promptCharacterLimit",
+        "quality": "/models:model_spec.constraints.qualities",
+        "resolution": "/models:model_spec.constraints.resolutions",
+        "style_references": "/models:model_spec.supportsStyleReferences|constraints.maxStyleReferences|supportsStyleReferenceStrength"
+      },
+      "parameters": {
+        "implemented": [],
+        "intentional_omissions": {
+          "header:Accept-Encoding": "Compression negotiation is owned by the stdlib HTTP transport."
+        }
+      },
+      "request_bodies": {
+        "application/json": {
+          "implemented": [
+            "aspect_ratio",
+            "cfg_scale",
+            "disable_prompt_optimization_thinking",
+            "embed_exif_metadata",
+            "enable_web_search",
+            "enhance_prompt",
+            "format",
+            "height",
+            "hide_watermark",
+            "lora_strength",
+            "model",
+            "negative_prompt",
+            "prompt",
+            "quality",
+            "resolution",
+            "safe_mode",
+            "seed",
+            "steps",
+            "style_preset",
+            "style_references",
+            "variants",
+            "width"
+          ],
+          "intentional_omissions": {
+            "inpaint": "Image editing is exposed through the dedicated edit operations.",
+            "return_binary": "The existing image decoder consumes the documented JSON image envelope."
+          }
+        }
+      }
+    },
+    "POST /image/multi-edit": {
+      "consumers": [
+        "cli:image_edit_layers",
+        "mcp:image_edit_layers",
+        "agent:image_edit_layers"
+      ],
+      "model_catalog_constraints": {
+        "aspect_ratio": "/models:model_spec.constraints.aspectRatios",
+        "images": "/models:model_spec.constraints.combineImages|maxInputImages",
+        "prompt": "/models:model_spec.constraints.promptCharacterLimit",
+        "quality": "/models:model_spec.constraints.qualities",
+        "resolution": "/models:model_spec.constraints.resolutions"
+      },
+      "parameters": {
+        "implemented": [],
+        "intentional_omissions": {}
+      },
+      "request_bodies": {
+        "application/json": {
+          "implemented": [
+            "aspect_ratio",
+            "disable_prompt_optimization_thinking",
+            "enhance_prompt",
+            "images",
+            "modelId",
+            "output_format",
+            "prompt",
+            "quality",
+            "resolution",
+            "safe_mode"
+          ],
+          "intentional_omissions": {}
+        },
+        "multipart/form-data": {
+          "unsupported": "The stdlib client uses bounded JSON base64 inputs."
+        }
+      }
+    },
+    "POST /image/upscale": {
+      "consumers": [
+        "cli:upscale",
+        "mcp:upscale",
+        "agent:upscale"
+      ],
+      "model_catalog_constraints": {},
+      "parameters": {
+        "implemented": [],
+        "intentional_omissions": {}
+      },
+      "request_bodies": {
+        "application/json": {
+          "implemented": [
+            "creativity",
+            "image",
+            "scale"
+          ],
+          "intentional_omissions": {}
+        },
+        "multipart/form-data": {
+          "unsupported": "The stdlib client uses bounded JSON base64 input."
+        }
+      }
+    },
+    "POST /video/complete": {
+      "consumers": [
+        "cli:video_status",
+        "mcp:job_result",
+        "agent:job_result"
+      ],
+      "model_catalog_constraints": {},
+      "parameters": {
+        "implemented": [],
+        "intentional_omissions": {}
+      },
+      "request_bodies": {
+        "application/json": {
+          "implemented": [
+            "model",
+            "queue_id"
+          ],
+          "intentional_omissions": {}
+        }
+      }
+    },
+    "POST /video/queue": {
+      "consumers": [
+        "cli:video",
+        "mcp:video",
+        "agent:video"
+      ],
+      "model_catalog_constraints": {
+        "aspect_ratio": "/models:model_spec.constraints.aspect_ratios",
+        "duration": "/models:model_spec.constraints.durations",
+        "resolution": "/models:model_spec.constraints.resolutions"
+      },
+      "parameters": {
+        "implemented": [],
+        "intentional_omissions": {}
+      },
+      "request_bodies": {
+        "application/json": {
+          "implemented": [
+            "aspect_ratio",
+            "audio",
+            "audio_url",
+            "duration",
+            "elements",
+            "end_image_url",
+            "image_url",
+            "model",
+            "negative_prompt",
+            "prompt",
+            "reference_audio_urls",
+            "reference_document_urls",
+            "reference_image_urls",
+            "reference_video_urls",
+            "resolution",
+            "scene_image_urls",
+            "video_url"
+          ],
+          "intentional_omissions": {
+            "compression": "Enhancement-only controls are outside the curated video surface.",
+            "consents": "Provider-specific consent envelopes are not exposed.",
+            "creativity": "Enhancement-only controls are outside the curated video surface.",
+            "enhancement_model": "Enhancement-only controls are outside the curated video surface.",
+            "grain": "Enhancement-only controls are outside the curated video surface.",
+            "h264_output": "Enhancement-only controls are outside the curated video surface.",
+            "halo": "Enhancement-only controls are outside the curated video surface.",
+            "keyframes": "Advanced keyframe control is not exposed.",
+            "noise": "Enhancement-only controls are outside the curated video surface.",
+            "omni_reference_task_type": "Provider-specific Omni reference modes are not exposed.",
+            "output_format": "The current surface persists the server-selected video format.",
+            "realism": "Enhancement-only controls are outside the curated video surface.",
+            "recover_detail": "Enhancement-only controls are outside the curated video surface.",
+            "sharp": "Enhancement-only controls are outside the curated video surface.",
+            "slowdown_factor": "Enhancement-only controls are outside the curated video surface.",
+            "softness": "Enhancement-only controls are outside the curated video surface.",
+            "target_fps": "Enhancement-only controls are outside the curated video surface.",
+            "upscale_factor": "Enhancement-only controls are outside the curated video surface."
+          }
+        }
+      }
+    },
+    "POST /video/quote": {
+      "consumers": [
+        "cli:video",
+        "mcp:video",
+        "agent:video"
+      ],
+      "model_catalog_constraints": {
+        "aspect_ratio": "/models:model_spec.constraints.aspect_ratios",
+        "duration": "/models:model_spec.constraints.durations",
+        "resolution": "/models:model_spec.constraints.resolutions"
+      },
+      "parameters": {
+        "implemented": [],
+        "intentional_omissions": {}
+      },
+      "request_bodies": {
+        "application/json": {
+          "implemented": [
+            "aspect_ratio",
+            "audio",
+            "duration",
+            "model",
+            "reference_video_total_duration",
+            "resolution",
+            "video_url"
+          ],
+          "intentional_omissions": {
+            "enhancement_model": "Enhancement-only controls are outside the curated video surface.",
+            "slowdown_factor": "Enhancement-only controls are outside the curated video surface.",
+            "target_fps": "Enhancement-only controls are outside the curated video surface.",
+            "upscale_factor": "Enhancement-only controls are outside the curated video surface."
+          }
+        }
+      }
+    },
+    "POST /video/retrieve": {
+      "consumers": [
+        "cli:video_status",
+        "mcp:job_status_result",
+        "agent:job_status_result"
+      ],
+      "model_catalog_constraints": {},
+      "parameters": {
+        "implemented": [],
+        "intentional_omissions": {}
+      },
+      "request_bodies": {
+        "application/json": {
+          "implemented": [
+            "model",
+            "queue_id"
+          ],
+          "intentional_omissions": {
+            "delete_media_on_completion": "Cleanup is a separate explicit complete call after local persistence succeeds."
+          }
+        }
+      }
+    }
+  }
+}

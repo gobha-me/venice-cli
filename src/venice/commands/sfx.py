@@ -119,6 +119,14 @@ def _clamp_duration(model: str, duration: int) -> int:
     return duration
 
 
+def quote_body(model: str, duration: int) -> dict:
+    return {"model": model, "duration_seconds": duration}
+
+
+def queue_body(model: str, prompt: str, duration: int) -> dict:
+    return {"model": model, "prompt": prompt, "duration_seconds": duration}
+
+
 def _run_generate(args) -> int:
     userconfig.apply_defaults(args, "sfx")
     # #57 Class C1: built-in literals last, and before `_clamp_duration` below,
@@ -151,7 +159,7 @@ def _run_generate(args) -> int:
     try:
         quote = client.post_json(
             "/audio/quote",
-            {"model": args.model, "duration_seconds": duration},
+            quote_body(args.model, duration),
         )
     except VeniceAPIError as e:
         print(f"quote rejected: {e}", file=sys.stderr)
@@ -184,7 +192,7 @@ def _run_generate(args) -> int:
     try:
         queued = client.post_json(
             "/audio/queue",
-            {"model": args.model, "prompt": args.prompt, "duration_seconds": duration},
+            queue_body(args.model, args.prompt, duration),
         )
     except VeniceAPIError as e:
         print(f"queue failed: {e}", file=sys.stderr)

@@ -180,6 +180,26 @@ def resolve_instrumental(instrumental, lyrics, *, explicit: bool):
     return instrumental
 
 
+def quote_body(model: str, duration: Optional[int]) -> dict:
+    body = {"model": model}
+    if duration is not None:
+        body["duration_seconds"] = duration
+    return body
+
+
+def queue_body(args) -> dict:
+    body = {"model": args.model, "prompt": args.prompt}
+    if args.duration is not None:
+        body["duration_seconds"] = args.duration
+    if args.instrumental:
+        body["force_instrumental"] = True
+    if args.lyrics:
+        body["lyrics_prompt"] = args.lyrics
+    if args.speed is not None:
+        body["speed"] = args.speed
+    return body
+
+
 def _validate(args, spec: Optional[dict]) -> Optional[int]:
     """Return an exit code if the request is invalid, else None. Music-only
     params are gated by the model's advertised capabilities."""
@@ -286,11 +306,9 @@ def _run_generate(args) -> int:
     if rc is not None:
         return rc
 
-    quote_body = {"model": args.model}
-    if args.duration is not None:
-        quote_body["duration_seconds"] = args.duration
+    quote_request = quote_body(args.model, args.duration)
     try:
-        quote = client.post_json("/audio/quote", quote_body)
+        quote = client.post_json("/audio/quote", quote_request)
     except VeniceAPIError as e:
         print(f"quote rejected: {e}", file=sys.stderr)
         return _queue.status_to_exit(e)
@@ -322,18 +340,10 @@ def _run_generate(args) -> int:
         if rc is not None:
             return rc
 
-    queue_body = {"model": args.model, "prompt": args.prompt}
-    if args.duration is not None:
-        queue_body["duration_seconds"] = args.duration
-    if args.instrumental:
-        queue_body["force_instrumental"] = True
-    if args.lyrics:
-        queue_body["lyrics_prompt"] = args.lyrics
-    if args.speed is not None:
-        queue_body["speed"] = args.speed
+    queue_request = queue_body(args)
 
     try:
-        queued = client.post_json("/audio/queue", queue_body)
+        queued = client.post_json("/audio/queue", queue_request)
     except VeniceAPIError as e:
         print(f"queue failed: {e}", file=sys.stderr)
         return _queue.status_to_exit(e)

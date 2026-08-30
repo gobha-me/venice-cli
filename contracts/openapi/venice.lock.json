@@ -1,0 +1,2649 @@
+{
+  "all_operations": [
+    {
+      "key": "GET /api_keys",
+      "operation_id": "getApiKeys"
+    },
+    {
+      "key": "POST /api_keys",
+      "operation_id": "createApiKey"
+    },
+    {
+      "key": "PATCH /api_keys",
+      "operation_id": "updateApiKey"
+    },
+    {
+      "key": "DELETE /api_keys",
+      "operation_id": "deleteApiKey"
+    },
+    {
+      "key": "GET /api_keys/generate_web3_key",
+      "operation_id": "getApiKeyGenerateWeb3Key"
+    },
+    {
+      "key": "POST /api_keys/generate_web3_key",
+      "operation_id": "postApiKeyGenerateWeb3Key"
+    },
+    {
+      "key": "GET /api_keys/rate_limits",
+      "operation_id": "getApiKeyRateLimits"
+    },
+    {
+      "key": "GET /api_keys/rate_limits/log",
+      "operation_id": "getApiKeyRateLimitLogs"
+    },
+    {
+      "key": "GET /api_keys/{id}",
+      "operation_id": "getApiKeyById"
+    },
+    {
+      "key": "POST /audio/complete",
+      "operation_id": "completeAudio"
+    },
+    {
+      "key": "POST /audio/queue",
+      "operation_id": "queueAudio"
+    },
+    {
+      "key": "POST /audio/quote",
+      "operation_id": "quoteAudio"
+    },
+    {
+      "key": "POST /audio/retrieve",
+      "operation_id": "retrieveAudio"
+    },
+    {
+      "key": "POST /audio/speech",
+      "operation_id": "createSpeech"
+    },
+    {
+      "key": "POST /audio/transcriptions",
+      "operation_id": "createTranscription"
+    },
+    {
+      "key": "POST /audio/voices",
+      "operation_id": "createClonedVoice"
+    },
+    {
+      "key": "POST /augment/scrape",
+      "operation_id": "webScrape"
+    },
+    {
+      "key": "POST /augment/search",
+      "operation_id": "webSearch"
+    },
+    {
+      "key": "POST /augment/text-parser",
+      "operation_id": "createTextParser"
+    },
+    {
+      "key": "GET /billing/balance",
+      "operation_id": "getBillingBalance"
+    },
+    {
+      "key": "GET /billing/usage",
+      "operation_id": "getBillingUsage"
+    },
+    {
+      "key": "GET /billing/usage-analytics",
+      "operation_id": "getBillingUsageAnalytics"
+    },
+    {
+      "key": "GET /billing/usage-history",
+      "operation_id": "getBillingUsageHistory"
+    },
+    {
+      "key": "GET /characters",
+      "operation_id": "listCharacters"
+    },
+    {
+      "key": "GET /characters/{slug}",
+      "operation_id": "getCharacterBySlug"
+    },
+    {
+      "key": "GET /characters/{slug}/reviews",
+      "operation_id": "getCharacterReviews"
+    },
+    {
+      "key": "POST /chat/completions",
+      "operation_id": "createChatCompletion"
+    },
+    {
+      "key": "GET /crypto/rpc/networks",
+      "operation_id": "listCryptoRpcNetworks"
+    },
+    {
+      "key": "POST /crypto/rpc/{network}",
+      "operation_id": "cryptoRpcProxy"
+    },
+    {
+      "key": "POST /embeddings",
+      "operation_id": "createEmbedding"
+    },
+    {
+      "key": "POST /image/background-remove",
+      "operation_id": "backgroundRemoveImage"
+    },
+    {
+      "key": "POST /image/edit",
+      "operation_id": "editImage"
+    },
+    {
+      "key": "POST /image/generate",
+      "operation_id": "generateImage"
+    },
+    {
+      "key": "POST /image/multi-edit",
+      "operation_id": "multiEditImage"
+    },
+    {
+      "key": "GET /image/styles",
+      "operation_id": null
+    },
+    {
+      "key": "POST /image/upscale",
+      "operation_id": "upscaleImage"
+    },
+    {
+      "key": "POST /images/generations",
+      "operation_id": "simpleGenerateImage"
+    },
+    {
+      "key": "GET /models",
+      "operation_id": "listModels"
+    },
+    {
+      "key": "GET /models/compatibility_mapping",
+      "operation_id": "listModelCompatibilityMapping"
+    },
+    {
+      "key": "GET /models/traits",
+      "operation_id": "listModelTraits"
+    },
+    {
+      "key": "POST /responses",
+      "operation_id": "createResponse"
+    },
+    {
+      "key": "POST /video/complete",
+      "operation_id": "completeVideo"
+    },
+    {
+      "key": "POST /video/queue",
+      "operation_id": "queueVideo"
+    },
+    {
+      "key": "POST /video/quote",
+      "operation_id": "quoteVideo"
+    },
+    {
+      "key": "POST /video/retrieve",
+      "operation_id": "retrieveVideo"
+    },
+    {
+      "key": "POST /video/transcriptions",
+      "operation_id": "createVideoTranscription"
+    },
+    {
+      "key": "GET /x402/balance/{walletAddress}",
+      "operation_id": "getX402Balance"
+    },
+    {
+      "key": "POST /x402/top-up",
+      "operation_id": "topUpX402Balance"
+    },
+    {
+      "key": "GET /x402/transactions/{walletAddress}",
+      "operation_id": "getX402Transactions"
+    }
+  ],
+  "format": 1,
+  "implemented_operations": {
+    "GET /api_keys/rate_limits": {
+      "operation_id": "getApiKeyRateLimits",
+      "parameters": [],
+      "request_bodies": {}
+    },
+    "GET /models": {
+      "operation_id": "listModels",
+      "parameters": [
+        {
+          "in": "query",
+          "name": "type",
+          "required": false,
+          "schema": {
+            "anyOf": [
+              {
+                "enum": [
+                  "asr",
+                  "embedding",
+                  "image",
+                  "inpaint",
+                  "music",
+                  "text",
+                  "tts",
+                  "upscale",
+                  "video"
+                ],
+                "type": "string"
+              },
+              {
+                "enum": [
+                  "all",
+                  "code"
+                ],
+                "type": "string"
+              }
+            ]
+          }
+        }
+      ],
+      "request_bodies": {}
+    },
+    "POST /audio/complete": {
+      "operation_id": "completeAudio",
+      "parameters": [],
+      "request_bodies": {
+        "application/json": {
+          "additionalProperties": false,
+          "properties": {
+            "model": {
+              "type": "string"
+            },
+            "queue_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "model",
+            "queue_id"
+          ],
+          "type": "object"
+        }
+      }
+    },
+    "POST /audio/queue": {
+      "operation_id": "queueAudio",
+      "parameters": [],
+      "request_bodies": {
+        "application/json": {
+          "additionalProperties": false,
+          "properties": {
+            "duration_seconds": {
+              "anyOf": [
+                {
+                  "exclusiveMinimum": true,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "pattern": "^\\d+$",
+                  "type": "string"
+                }
+              ]
+            },
+            "force_instrumental": {
+              "type": "boolean"
+            },
+            "language_code": {
+              "type": "string"
+            },
+            "loop": {
+              "type": "boolean"
+            },
+            "lyrics_optimizer": {
+              "type": "boolean"
+            },
+            "lyrics_prompt": {
+              "type": "string"
+            },
+            "model": {
+              "type": "string"
+            },
+            "prompt": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "speed": {
+              "maximum": 4,
+              "minimum": 0.25,
+              "type": "number"
+            },
+            "voice": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "model",
+            "prompt"
+          ],
+          "type": "object"
+        }
+      }
+    },
+    "POST /audio/quote": {
+      "operation_id": "quoteAudio",
+      "parameters": [],
+      "request_bodies": {
+        "application/json": {
+          "additionalProperties": false,
+          "properties": {
+            "character_count": {
+              "exclusiveMinimum": true,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "duration_seconds": {
+              "anyOf": [
+                {
+                  "exclusiveMinimum": true,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "pattern": "^\\d+$",
+                  "type": "string"
+                }
+              ]
+            },
+            "model": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "model"
+          ],
+          "type": "object"
+        }
+      }
+    },
+    "POST /audio/retrieve": {
+      "operation_id": "retrieveAudio",
+      "parameters": [],
+      "request_bodies": {
+        "application/json": {
+          "additionalProperties": false,
+          "properties": {
+            "delete_media_on_completion": {
+              "type": "boolean"
+            },
+            "model": {
+              "type": "string"
+            },
+            "queue_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "model",
+            "queue_id"
+          ],
+          "type": "object"
+        }
+      }
+    },
+    "POST /audio/speech": {
+      "operation_id": "createSpeech",
+      "parameters": [],
+      "request_bodies": {
+        "application/json": {
+          "additionalProperties": false,
+          "properties": {
+            "input": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            },
+            "language": {
+              "maxLength": 32,
+              "minLength": 2,
+              "type": "string"
+            },
+            "model": {
+              "enum": [
+                "tts-chatterbox-hd",
+                "tts-elevenlabs-turbo-v2-5",
+                "tts-gemini-3-1-flash",
+                "tts-gradium-v1",
+                "tts-inworld-1-5-max",
+                "tts-kokoro",
+                "tts-minimax-speech-02-hd",
+                "tts-orpheus",
+                "tts-qwen3-0-6b",
+                "tts-qwen3-1-7b",
+                "tts-xai-v1"
+              ],
+              "type": "string"
+            },
+            "prompt": {
+              "maxLength": 500,
+              "type": "string"
+            },
+            "response_format": {
+              "enum": [
+                "aac",
+                "flac",
+                "mp3",
+                "opus",
+                "pcm",
+                "wav"
+              ],
+              "type": "string"
+            },
+            "speed": {
+              "maximum": 4,
+              "minimum": 0.25,
+              "type": "number"
+            },
+            "streaming": {
+              "type": "boolean"
+            },
+            "temperature": {
+              "maximum": 2,
+              "minimum": 0,
+              "type": "number"
+            },
+            "top_p": {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            "voice": {
+              "maxLength": 512,
+              "type": "string"
+            }
+          },
+          "required": [
+            "input"
+          ],
+          "type": "object"
+        }
+      }
+    },
+    "POST /chat/completions": {
+      "operation_id": "createChatCompletion",
+      "parameters": [
+        {
+          "in": "header",
+          "name": "Accept-Encoding",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "request_bodies": {
+        "application/json": {
+          "additionalProperties": false,
+          "properties": {
+            "fallbacks": {
+              "items": {
+                "properties": {
+                  "model": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "model"
+                ],
+                "type": "object"
+              },
+              "maxItems": 10,
+              "type": "array"
+            },
+            "frequency_penalty": {
+              "maximum": 2,
+              "minimum": -2,
+              "type": "number"
+            },
+            "include": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "logprobs": {
+              "type": "boolean"
+            },
+            "max_completion_tokens": {
+              "type": "integer"
+            },
+            "max_temp": {
+              "maximum": 2,
+              "minimum": 0,
+              "type": "number"
+            },
+            "max_tokens": {
+              "type": "integer"
+            },
+            "messages": {
+              "items": {
+                "anyOf": [
+                  {
+                    "properties": {
+                      "content": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "items": {
+                              "oneOf": [
+                                {
+                                  "properties": {
+                                    "cache_control": {
+                                      "properties": {
+                                        "ttl": {
+                                          "type": "string"
+                                        },
+                                        "type": {
+                                          "enum": [
+                                            "ephemeral"
+                                          ],
+                                          "type": "string"
+                                        }
+                                      },
+                                      "required": [
+                                        "type"
+                                      ],
+                                      "type": "object"
+                                    },
+                                    "text": {
+                                      "minLength": 1,
+                                      "type": "string"
+                                    },
+                                    "type": {
+                                      "enum": [
+                                        "text"
+                                      ],
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [
+                                    "text",
+                                    "type"
+                                  ],
+                                  "type": "object"
+                                },
+                                {
+                                  "properties": {
+                                    "cache_control": {
+                                      "properties": {
+                                        "ttl": {
+                                          "type": "string"
+                                        },
+                                        "type": {
+                                          "enum": [
+                                            "ephemeral"
+                                          ],
+                                          "type": "string"
+                                        }
+                                      },
+                                      "required": [
+                                        "type"
+                                      ],
+                                      "type": "object"
+                                    },
+                                    "image_url": {
+                                      "properties": {
+                                        "url": {
+                                          "format": "uri",
+                                          "type": "string"
+                                        }
+                                      },
+                                      "required": [
+                                        "url"
+                                      ],
+                                      "type": "object"
+                                    },
+                                    "type": {
+                                      "enum": [
+                                        "image_url"
+                                      ],
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [
+                                    "image_url",
+                                    "type"
+                                  ],
+                                  "type": "object"
+                                },
+                                {
+                                  "properties": {
+                                    "cache_control": {
+                                      "properties": {
+                                        "ttl": {
+                                          "type": "string"
+                                        },
+                                        "type": {
+                                          "enum": [
+                                            "ephemeral"
+                                          ],
+                                          "type": "string"
+                                        }
+                                      },
+                                      "required": [
+                                        "type"
+                                      ],
+                                      "type": "object"
+                                    },
+                                    "input_audio": {
+                                      "properties": {
+                                        "data": {
+                                          "type": "string"
+                                        },
+                                        "format": {
+                                          "enum": [
+                                            "aac",
+                                            "aiff",
+                                            "flac",
+                                            "m4a",
+                                            "mp3",
+                                            "ogg",
+                                            "pcm16",
+                                            "pcm24",
+                                            "wav"
+                                          ],
+                                          "type": "string"
+                                        }
+                                      },
+                                      "required": [
+                                        "data"
+                                      ],
+                                      "type": "object"
+                                    },
+                                    "type": {
+                                      "enum": [
+                                        "input_audio"
+                                      ],
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [
+                                    "input_audio",
+                                    "type"
+                                  ],
+                                  "type": "object"
+                                },
+                                {
+                                  "properties": {
+                                    "cache_control": {
+                                      "properties": {
+                                        "ttl": {
+                                          "type": "string"
+                                        },
+                                        "type": {
+                                          "enum": [
+                                            "ephemeral"
+                                          ],
+                                          "type": "string"
+                                        }
+                                      },
+                                      "required": [
+                                        "type"
+                                      ],
+                                      "type": "object"
+                                    },
+                                    "type": {
+                                      "enum": [
+                                        "video_url"
+                                      ],
+                                      "type": "string"
+                                    },
+                                    "video_url": {
+                                      "properties": {
+                                        "url": {
+                                          "format": "uri",
+                                          "type": "string"
+                                        }
+                                      },
+                                      "required": [
+                                        "url"
+                                      ],
+                                      "type": "object"
+                                    }
+                                  },
+                                  "required": [
+                                    "type",
+                                    "video_url"
+                                  ],
+                                  "type": "object"
+                                },
+                                {
+                                  "properties": {
+                                    "cache_control": {
+                                      "properties": {
+                                        "ttl": {
+                                          "type": "string"
+                                        },
+                                        "type": {
+                                          "enum": [
+                                            "ephemeral"
+                                          ],
+                                          "type": "string"
+                                        }
+                                      },
+                                      "required": [
+                                        "type"
+                                      ],
+                                      "type": "object"
+                                    },
+                                    "file": {
+                                      "properties": {
+                                        "file_data": {
+                                          "type": "string"
+                                        },
+                                        "filename": {
+                                          "type": "string"
+                                        }
+                                      },
+                                      "required": [
+                                        "file_data"
+                                      ],
+                                      "type": "object"
+                                    },
+                                    "type": {
+                                      "enum": [
+                                        "file"
+                                      ],
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [
+                                    "file",
+                                    "type"
+                                  ],
+                                  "type": "object"
+                                }
+                              ]
+                            },
+                            "type": "array"
+                          }
+                        ]
+                      },
+                      "name": {
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "role": {
+                        "enum": [
+                          "user"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "content",
+                      "role"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "properties": {
+                      "content": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "items": {
+                              "properties": {
+                                "cache_control": {
+                                  "properties": {
+                                    "ttl": {
+                                      "type": "string"
+                                    },
+                                    "type": {
+                                      "enum": [
+                                        "ephemeral"
+                                      ],
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [
+                                    "type"
+                                  ],
+                                  "type": "object"
+                                },
+                                "text": {
+                                  "minLength": 1,
+                                  "type": "string"
+                                },
+                                "type": {
+                                  "enum": [
+                                    "text"
+                                  ],
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "text",
+                                "type"
+                              ],
+                              "type": "object"
+                            },
+                            "type": "array"
+                          },
+                          {
+                            "nullable": true
+                          }
+                        ]
+                      },
+                      "name": {
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "reasoning_content": {
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "reasoning_details": {
+                        "items": {
+                          "properties": {
+                            "data": {
+                              "type": "string"
+                            },
+                            "format": {
+                              "type": "string"
+                            },
+                            "id": {
+                              "type": "string"
+                            },
+                            "index": {
+                              "type": "number"
+                            },
+                            "text": {
+                              "type": "string"
+                            },
+                            "type": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "type"
+                          ],
+                          "type": "object"
+                        },
+                        "type": "array"
+                      },
+                      "role": {
+                        "enum": [
+                          "assistant"
+                        ],
+                        "type": "string"
+                      },
+                      "thought_signature": {
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "tool_calls": {
+                        "items": {
+                          "nullable": true
+                        },
+                        "nullable": true,
+                        "type": "array"
+                      }
+                    },
+                    "required": [
+                      "role"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "properties": {
+                      "content": {
+                        "type": "string"
+                      },
+                      "name": {
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "reasoning_content": {
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "role": {
+                        "enum": [
+                          "tool"
+                        ],
+                        "type": "string"
+                      },
+                      "tool_call_id": {
+                        "type": "string"
+                      },
+                      "tool_calls": {
+                        "items": {
+                          "nullable": true
+                        },
+                        "nullable": true,
+                        "type": "array"
+                      }
+                    },
+                    "required": [
+                      "content",
+                      "role",
+                      "tool_call_id"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "properties": {
+                      "content": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "items": {
+                              "properties": {
+                                "cache_control": {
+                                  "properties": {
+                                    "ttl": {
+                                      "type": "string"
+                                    },
+                                    "type": {
+                                      "enum": [
+                                        "ephemeral"
+                                      ],
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [
+                                    "type"
+                                  ],
+                                  "type": "object"
+                                },
+                                "text": {
+                                  "minLength": 1,
+                                  "type": "string"
+                                },
+                                "type": {
+                                  "enum": [
+                                    "text"
+                                  ],
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "text",
+                                "type"
+                              ],
+                              "type": "object"
+                            },
+                            "type": "array"
+                          }
+                        ]
+                      },
+                      "name": {
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "role": {
+                        "enum": [
+                          "system"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "content",
+                      "role"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "properties": {
+                      "content": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "items": {
+                              "properties": {
+                                "cache_control": {
+                                  "properties": {
+                                    "ttl": {
+                                      "type": "string"
+                                    },
+                                    "type": {
+                                      "enum": [
+                                        "ephemeral"
+                                      ],
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [
+                                    "type"
+                                  ],
+                                  "type": "object"
+                                },
+                                "text": {
+                                  "minLength": 1,
+                                  "type": "string"
+                                },
+                                "type": {
+                                  "enum": [
+                                    "text"
+                                  ],
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "text",
+                                "type"
+                              ],
+                              "type": "object"
+                            },
+                            "type": "array"
+                          }
+                        ]
+                      },
+                      "name": {
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "role": {
+                        "enum": [
+                          "developer"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "content",
+                      "role"
+                    ],
+                    "type": "object"
+                  }
+                ]
+              },
+              "minItems": 1,
+              "type": "array"
+            },
+            "metadata": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "min_p": {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            "min_temp": {
+              "maximum": 2,
+              "minimum": 0,
+              "type": "number"
+            },
+            "model": {
+              "type": "string"
+            },
+            "n": {
+              "type": "integer"
+            },
+            "parallel_tool_calls": {
+              "type": "boolean"
+            },
+            "presence_penalty": {
+              "maximum": 2,
+              "minimum": -2,
+              "type": "number"
+            },
+            "prompt_cache_key": {
+              "type": "string"
+            },
+            "prompt_cache_retention": {
+              "enum": [
+                "24h",
+                "default",
+                "extended"
+              ],
+              "type": "string"
+            },
+            "reasoning": {
+              "properties": {
+                "effort": {
+                  "enum": [
+                    "high",
+                    "low",
+                    "max",
+                    "medium",
+                    "minimal",
+                    "none",
+                    "xhigh"
+                  ],
+                  "type": "string"
+                },
+                "summary": {
+                  "enum": [
+                    "auto",
+                    "concise",
+                    "detailed"
+                  ],
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "reasoning_effort": {
+              "enum": [
+                "high",
+                "low",
+                "max",
+                "medium",
+                "minimal",
+                "none",
+                "xhigh"
+              ],
+              "type": "string"
+            },
+            "repetition_penalty": {
+              "minimum": 0,
+              "type": "number"
+            },
+            "response_format": {
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "json_schema": {
+                      "additionalProperties": {
+                        "nullable": true
+                      },
+                      "type": "object"
+                    },
+                    "type": {
+                      "enum": [
+                        "json_schema"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "json_schema",
+                    "type"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "type": {
+                      "enum": [
+                        "json_object"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "type"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "type": {
+                      "enum": [
+                        "text"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "type"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "seed": {
+              "exclusiveMinimum": true,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "stop": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 4,
+                  "minItems": 1,
+                  "type": "array"
+                },
+                {
+                  "nullable": true
+                }
+              ]
+            },
+            "stop_token_ids": {
+              "items": {
+                "type": "number"
+              },
+              "type": "array"
+            },
+            "store": {
+              "type": "boolean"
+            },
+            "stream": {
+              "type": "boolean"
+            },
+            "stream_options": {
+              "properties": {
+                "include_usage": {
+                  "type": "boolean"
+                }
+              },
+              "type": "object"
+            },
+            "temperature": {
+              "maximum": 2,
+              "minimum": 0,
+              "type": "number"
+            },
+            "text": {
+              "properties": {
+                "verbosity": {
+                  "enum": [
+                    "auto",
+                    "high",
+                    "low",
+                    "medium"
+                  ],
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "tool_choice": {
+              "anyOf": [
+                {
+                  "properties": {
+                    "function": {
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "name"
+                      ],
+                      "type": "object"
+                    },
+                    "type": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "function",
+                    "type"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "type": "string"
+                }
+              ]
+            },
+            "tools": {
+              "items": {
+                "anyOf": [
+                  {
+                    "properties": {
+                      "type": {
+                        "enum": [
+                          "web_search",
+                          "x_search"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "type"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "properties": {
+                      "function": {
+                        "properties": {
+                          "description": {
+                            "type": "string"
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "parameters": {
+                            "additionalProperties": {
+                              "nullable": true
+                            },
+                            "type": "object"
+                          },
+                          "strict": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "name"
+                        ],
+                        "type": "object"
+                      },
+                      "id": {
+                        "type": "string"
+                      },
+                      "type": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "function"
+                    ],
+                    "type": "object"
+                  }
+                ]
+              },
+              "nullable": true,
+              "type": "array"
+            },
+            "top_k": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "top_logprobs": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "top_p": {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            "user": {
+              "type": "string"
+            },
+            "venice_parameters": {
+              "properties": {
+                "character_slug": {
+                  "type": "string"
+                },
+                "disable_thinking": {
+                  "type": "boolean"
+                },
+                "enable_e2ee": {
+                  "type": "boolean"
+                },
+                "enable_web_citations": {
+                  "type": "boolean"
+                },
+                "enable_web_scraping": {
+                  "type": "boolean"
+                },
+                "enable_web_search": {
+                  "enum": [
+                    "auto",
+                    false,
+                    true
+                  ],
+                  "type": "string"
+                },
+                "enable_x_search": {
+                  "type": "boolean"
+                },
+                "include_search_results_in_stream": {
+                  "type": "boolean"
+                },
+                "include_venice_system_prompt": {
+                  "type": "boolean"
+                },
+                "return_search_results_as_documents": {
+                  "type": "boolean"
+                },
+                "strip_thinking_response": {
+                  "type": "boolean"
+                }
+              },
+              "type": "object"
+            },
+            "verbosity": {
+              "enum": [
+                "auto",
+                "high",
+                "low",
+                "medium"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "messages",
+            "model"
+          ],
+          "type": "object"
+        }
+      }
+    },
+    "POST /embeddings": {
+      "operation_id": "createEmbedding",
+      "parameters": [
+        {
+          "in": "header",
+          "name": "Accept-Encoding",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "request_bodies": {
+        "application/json": {
+          "additionalProperties": false,
+          "properties": {
+            "dimensions": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "encoding_format": {
+              "enum": [
+                "base64",
+                "float"
+              ],
+              "type": "string"
+            },
+            "input": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 2048,
+                  "minItems": 1,
+                  "type": "array"
+                }
+              ]
+            },
+            "model": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "enum": [
+                    "gemini-embedding-2-preview",
+                    "text-embedding-3-large",
+                    "text-embedding-3-small",
+                    "text-embedding-bge-en-icl",
+                    "text-embedding-bge-m3",
+                    "text-embedding-multilingual-e5-large-instruct",
+                    "text-embedding-nemotron-embed-vl-1b-v2",
+                    "text-embedding-qwen3-0-6b",
+                    "text-embedding-qwen3-8b"
+                  ],
+                  "type": "string"
+                }
+              ]
+            },
+            "user": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "input",
+            "model"
+          ],
+          "type": "object"
+        }
+      }
+    },
+    "POST /image/background-remove": {
+      "operation_id": "backgroundRemoveImage",
+      "parameters": [],
+      "request_bodies": {
+        "application/json": {
+          "additionalProperties": false,
+          "properties": {
+            "image": {
+              "anyOf": [
+                {},
+                {
+                  "type": "string"
+                }
+              ]
+            },
+            "image_url": {
+              "format": "uri",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "multipart/form-data": {
+          "additionalProperties": false,
+          "properties": {
+            "image": {
+              "anyOf": [
+                {},
+                {
+                  "type": "string"
+                }
+              ]
+            },
+            "image_url": {
+              "format": "uri",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        }
+      }
+    },
+    "POST /image/edit": {
+      "operation_id": "editImage",
+      "parameters": [],
+      "request_bodies": {
+        "application/json": {
+          "additionalProperties": false,
+          "properties": {
+            "aspect_ratio": {
+              "enum": [
+                "auto",
+                123,
+                1269,
+                182,
+                184,
+                245,
+                556,
+                61,
+                969
+              ],
+              "type": "string"
+            },
+            "disable_prompt_optimization_thinking": {
+              "type": "boolean"
+            },
+            "enhance_prompt": {
+              "type": "boolean"
+            },
+            "image": {
+              "anyOf": [
+                {},
+                {
+                  "type": "string"
+                },
+                {
+                  "format": "uri",
+                  "type": "string"
+                }
+              ]
+            },
+            "model": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "modelId": {
+              "deprecated": true,
+              "enum": [
+                "firered-image-edit",
+                "flux-2-max-edit",
+                "gpt-image-1-5-edit",
+                "gpt-image-2-edit",
+                "grok-imagine-edit",
+                "grok-imagine-image-2-0-edit",
+                "grok-imagine-quality-edit",
+                "luma-uni-1-edit",
+                "luma-uni-1-max-edit",
+                "nano-banana-2-edit",
+                "nano-banana-2-lite-edit",
+                "nano-banana-pro-edit",
+                "qwen-edit-uncensored",
+                "qwen-image-2-edit",
+                "qwen-image-2-pro-edit",
+                "qwen-image-3-edit",
+                "qwen-image-3-pro-edit",
+                "seedream-v4-edit",
+                "seedream-v5-lite-edit",
+                "seedream-v5-pro-edit",
+                "wan-2-7-pro-edit"
+              ],
+              "minLength": 1,
+              "type": "string"
+            },
+            "output_format": {
+              "enum": [
+                "jpeg",
+                "png",
+                "webp"
+              ],
+              "type": "string"
+            },
+            "prompt": {
+              "maxLength": 32768,
+              "minLength": 1,
+              "type": "string"
+            },
+            "resolution": {
+              "maxLength": 10,
+              "minLength": 1,
+              "type": "string"
+            },
+            "safe_mode": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "image",
+            "prompt"
+          ],
+          "type": "object"
+        },
+        "multipart/form-data": {
+          "additionalProperties": false,
+          "properties": {
+            "aspect_ratio": {
+              "enum": [
+                "auto",
+                123,
+                1269,
+                182,
+                184,
+                245,
+                556,
+                61,
+                969
+              ],
+              "type": "string"
+            },
+            "disable_prompt_optimization_thinking": {
+              "type": "boolean"
+            },
+            "enhance_prompt": {
+              "type": "boolean"
+            },
+            "image": {
+              "anyOf": [
+                {},
+                {
+                  "type": "string"
+                },
+                {
+                  "format": "uri",
+                  "type": "string"
+                }
+              ]
+            },
+            "model": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "modelId": {
+              "deprecated": true,
+              "enum": [
+                "firered-image-edit",
+                "flux-2-max-edit",
+                "gpt-image-1-5-edit",
+                "gpt-image-2-edit",
+                "grok-imagine-edit",
+                "grok-imagine-image-2-0-edit",
+                "grok-imagine-quality-edit",
+                "luma-uni-1-edit",
+                "luma-uni-1-max-edit",
+                "nano-banana-2-edit",
+                "nano-banana-2-lite-edit",
+                "nano-banana-pro-edit",
+                "qwen-edit-uncensored",
+                "qwen-image-2-edit",
+                "qwen-image-2-pro-edit",
+                "qwen-image-3-edit",
+                "qwen-image-3-pro-edit",
+                "seedream-v4-edit",
+                "seedream-v5-lite-edit",
+                "seedream-v5-pro-edit",
+                "wan-2-7-pro-edit"
+              ],
+              "minLength": 1,
+              "type": "string"
+            },
+            "output_format": {
+              "enum": [
+                "jpeg",
+                "png",
+                "webp"
+              ],
+              "type": "string"
+            },
+            "prompt": {
+              "maxLength": 32768,
+              "minLength": 1,
+              "type": "string"
+            },
+            "resolution": {
+              "maxLength": 10,
+              "minLength": 1,
+              "type": "string"
+            },
+            "safe_mode": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "image",
+            "prompt"
+          ],
+          "type": "object"
+        }
+      }
+    },
+    "POST /image/generate": {
+      "operation_id": "generateImage",
+      "parameters": [
+        {
+          "in": "header",
+          "name": "Accept-Encoding",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "request_bodies": {
+        "application/json": {
+          "additionalProperties": false,
+          "properties": {
+            "aspect_ratio": {
+              "type": "string"
+            },
+            "cfg_scale": {
+              "exclusiveMinimum": true,
+              "maximum": 20,
+              "minimum": 0,
+              "type": "number"
+            },
+            "disable_prompt_optimization_thinking": {
+              "type": "boolean"
+            },
+            "embed_exif_metadata": {
+              "type": "boolean"
+            },
+            "enable_web_search": {
+              "type": "boolean"
+            },
+            "enhance_prompt": {
+              "type": "boolean"
+            },
+            "format": {
+              "enum": [
+                "jpeg",
+                "png",
+                "webp"
+              ],
+              "type": "string"
+            },
+            "height": {
+              "exclusiveMinimum": true,
+              "maximum": 1280,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "hide_watermark": {
+              "type": "boolean"
+            },
+            "inpaint": {
+              "deprecated": true,
+              "nullable": true
+            },
+            "lora_strength": {
+              "maximum": 100,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "model": {
+              "type": "string"
+            },
+            "negative_prompt": {
+              "maxLength": 7500,
+              "type": "string"
+            },
+            "prompt": {
+              "maxLength": 7500,
+              "minLength": 1,
+              "type": "string"
+            },
+            "quality": {
+              "enum": [
+                "high",
+                "low",
+                "medium"
+              ],
+              "type": "string"
+            },
+            "resolution": {
+              "type": "string"
+            },
+            "return_binary": {
+              "type": "boolean"
+            },
+            "safe_mode": {
+              "type": "boolean"
+            },
+            "seed": {
+              "maximum": 999999999,
+              "minimum": -999999999,
+              "type": "integer"
+            },
+            "steps": {
+              "type": "integer"
+            },
+            "style_preset": {
+              "type": "string"
+            },
+            "style_references": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "image": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "format": "uri",
+                        "type": "string"
+                      }
+                    ]
+                  },
+                  "strength": {
+                    "maximum": 1,
+                    "minimum": 0.1,
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "image"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "variants": {
+              "maximum": 4,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "width": {
+              "exclusiveMinimum": true,
+              "maximum": 1280,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "model",
+            "prompt"
+          ],
+          "type": "object"
+        }
+      }
+    },
+    "POST /image/multi-edit": {
+      "operation_id": "multiEditImage",
+      "parameters": [],
+      "request_bodies": {
+        "application/json": {
+          "additionalProperties": false,
+          "properties": {
+            "aspect_ratio": {
+              "enum": [
+                "auto",
+                123,
+                1269,
+                182,
+                184,
+                245,
+                556,
+                61,
+                969
+              ],
+              "type": "string"
+            },
+            "disable_prompt_optimization_thinking": {
+              "type": "boolean"
+            },
+            "enhance_prompt": {
+              "type": "boolean"
+            },
+            "images": {
+              "items": {
+                "anyOf": [
+                  {
+                    "format": "uri",
+                    "type": "string"
+                  },
+                  {
+                    "type": "string"
+                  }
+                ]
+              },
+              "minItems": 1,
+              "type": "array"
+            },
+            "modelId": {
+              "enum": [
+                "firered-image-edit",
+                "flux-2-max-edit",
+                "gpt-image-1-5-edit",
+                "gpt-image-2-edit",
+                "grok-imagine-edit",
+                "grok-imagine-image-2-0-edit",
+                "grok-imagine-quality-edit",
+                "nano-banana-2-edit",
+                "nano-banana-2-lite-edit",
+                "nano-banana-pro-edit",
+                "qwen-edit-uncensored",
+                "qwen-image-2-edit",
+                "qwen-image-2-pro-edit",
+                "qwen-image-3-edit",
+                "qwen-image-3-pro-edit",
+                "seedream-v4-edit",
+                "seedream-v5-lite-edit",
+                "seedream-v5-pro-edit",
+                "wan-2-7-pro-edit"
+              ],
+              "minLength": 1,
+              "type": "string"
+            },
+            "output_format": {
+              "enum": [
+                "jpeg",
+                "png",
+                "webp"
+              ],
+              "type": "string"
+            },
+            "prompt": {
+              "maxLength": 32768,
+              "minLength": 1,
+              "type": "string"
+            },
+            "quality": {
+              "enum": [
+                "high",
+                "low",
+                "medium"
+              ],
+              "type": "string"
+            },
+            "resolution": {
+              "maxLength": 10,
+              "minLength": 1,
+              "type": "string"
+            },
+            "safe_mode": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "images",
+            "prompt"
+          ],
+          "type": "object"
+        },
+        "multipart/form-data": {
+          "properties": {
+            "aspect_ratio": {
+              "enum": [
+                "auto",
+                123,
+                1269,
+                182,
+                184,
+                245,
+                556,
+                61,
+                969
+              ],
+              "type": "string"
+            },
+            "disable_prompt_optimization_thinking": {
+              "type": "boolean"
+            },
+            "enhance_prompt": {
+              "type": "boolean"
+            },
+            "images": {
+              "items": {
+                "format": "binary",
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            },
+            "modelId": {
+              "enum": [
+                "firered-image-edit",
+                "flux-2-max-edit",
+                "gpt-image-1-5-edit",
+                "gpt-image-2-edit",
+                "grok-imagine-edit",
+                "grok-imagine-image-2-0-edit",
+                "grok-imagine-quality-edit",
+                "nano-banana-2-edit",
+                "nano-banana-2-lite-edit",
+                "nano-banana-pro-edit",
+                "qwen-edit-uncensored",
+                "qwen-image-2-edit",
+                "qwen-image-2-pro-edit",
+                "qwen-image-3-edit",
+                "qwen-image-3-pro-edit",
+                "seedream-v4-edit",
+                "seedream-v5-lite-edit",
+                "seedream-v5-pro-edit",
+                "wan-2-7-pro-edit"
+              ],
+              "minLength": 1,
+              "type": "string"
+            },
+            "output_format": {
+              "enum": [
+                "jpeg",
+                "png",
+                "webp"
+              ],
+              "type": "string"
+            },
+            "prompt": {
+              "maxLength": 32768,
+              "minLength": 1,
+              "type": "string"
+            },
+            "quality": {
+              "enum": [
+                "high",
+                "low",
+                "medium"
+              ],
+              "type": "string"
+            },
+            "resolution": {
+              "maxLength": 10,
+              "minLength": 1,
+              "type": "string"
+            },
+            "safe_mode": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "images",
+            "prompt"
+          ],
+          "type": "object"
+        }
+      }
+    },
+    "POST /image/upscale": {
+      "operation_id": "upscaleImage",
+      "parameters": [],
+      "request_bodies": {
+        "application/json": {
+          "properties": {
+            "creativity": {
+              "nullable": true,
+              "type": "number"
+            },
+            "image": {
+              "anyOf": [
+                {},
+                {
+                  "type": "string"
+                }
+              ]
+            },
+            "scale": {
+              "maximum": 4,
+              "minimum": 2,
+              "type": "number"
+            }
+          },
+          "required": [
+            "image"
+          ],
+          "type": "object"
+        },
+        "multipart/form-data": {
+          "properties": {
+            "creativity": {
+              "nullable": true,
+              "type": "number"
+            },
+            "image": {
+              "anyOf": [
+                {},
+                {
+                  "type": "string"
+                }
+              ]
+            },
+            "scale": {
+              "maximum": 4,
+              "minimum": 2,
+              "type": "number"
+            }
+          },
+          "required": [
+            "image"
+          ],
+          "type": "object"
+        }
+      }
+    },
+    "POST /video/complete": {
+      "operation_id": "completeVideo",
+      "parameters": [],
+      "request_bodies": {
+        "application/json": {
+          "additionalProperties": false,
+          "properties": {
+            "model": {
+              "type": "string"
+            },
+            "queue_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "model",
+            "queue_id"
+          ],
+          "type": "object"
+        }
+      }
+    },
+    "POST /video/queue": {
+      "operation_id": "queueVideo",
+      "parameters": [],
+      "request_bodies": {
+        "application/json": {
+          "properties": {
+            "aspect_ratio": {
+              "enum": [
+                "adaptive",
+                "auto",
+                123,
+                1269,
+                182,
+                184,
+                243,
+                245,
+                304,
+                556,
+                561,
+                61,
+                969
+              ],
+              "type": "string"
+            },
+            "audio": {
+              "type": "boolean"
+            },
+            "audio_url": {
+              "type": "string"
+            },
+            "compression": {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            "consents": {
+              "properties": {
+                "seedance": {
+                  "properties": {
+                    "confirmed_legal_right": {
+                      "enum": [
+                        true
+                      ],
+                      "type": "boolean"
+                    },
+                    "confirmed_screening_acknowledged": {
+                      "enum": [
+                        true
+                      ],
+                      "type": "boolean"
+                    },
+                    "confirmed_terms_and_privacy": {
+                      "enum": [
+                        true
+                      ],
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "confirmed_legal_right",
+                    "confirmed_screening_acknowledged",
+                    "confirmed_terms_and_privacy"
+                  ],
+                  "type": "object"
+                }
+              },
+              "type": "object"
+            },
+            "creativity": {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            "duration": {
+              "enum": [
+                "-1",
+                "1 gen",
+                "10s",
+                "11s",
+                "12s",
+                "13s",
+                "14s",
+                "15s",
+                "16s",
+                "17s",
+                "18s",
+                "19s",
+                "1s",
+                "20s",
+                "21s",
+                "22s",
+                "23s",
+                "24s",
+                "25s",
+                "26s",
+                "27s",
+                "28s",
+                "29s",
+                "2s",
+                "30s",
+                "3s",
+                "4s",
+                "5s",
+                "6s",
+                "7s",
+                "8s",
+                "9s",
+                "Auto",
+                "auto"
+              ],
+              "type": "string"
+            },
+            "elements": {
+              "items": {
+                "properties": {
+                  "frontal_image_url": {
+                    "type": "string"
+                  },
+                  "reference_image_urls": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "maxItems": 3,
+                    "type": "array"
+                  },
+                  "video_url": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
+              "maxItems": 4,
+              "type": "array"
+            },
+            "end_image_url": {
+              "type": "string"
+            },
+            "enhancement_model": {
+              "type": "string"
+            },
+            "grain": {
+              "maximum": 0.1,
+              "minimum": 0,
+              "type": "number"
+            },
+            "h264_output": {
+              "type": "boolean"
+            },
+            "halo": {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            "image_url": {
+              "type": "string"
+            },
+            "keyframes": {
+              "items": {
+                "properties": {
+                  "frame_index": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "image_url": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "frame_index",
+                  "image_url"
+                ],
+                "type": "object"
+              },
+              "maxItems": 10,
+              "type": "array"
+            },
+            "model": {
+              "type": "string"
+            },
+            "negative_prompt": {
+              "maxLength": 20000,
+              "type": "string"
+            },
+            "noise": {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            "omni_reference_task_type": {
+              "enum": [
+                "auto",
+                "edit",
+                "extend",
+                "reference"
+              ],
+              "type": "string"
+            },
+            "output_format": {
+              "enum": [
+                "mp4",
+                "prores"
+              ],
+              "type": "string"
+            },
+            "prompt": {
+              "maxLength": 20000,
+              "minLength": 1,
+              "type": "string"
+            },
+            "realism": {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            "recover_detail": {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            "reference_audio_urls": {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 10,
+              "type": "array"
+            },
+            "reference_document_urls": {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 1,
+              "type": "array"
+            },
+            "reference_image_urls": {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 30,
+              "type": "array"
+            },
+            "reference_video_urls": {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 10,
+              "type": "array"
+            },
+            "resolution": {
+              "enum": [
+                "1080p",
+                "1440p",
+                "1x",
+                "2160p",
+                "256p",
+                "2K",
+                "2x",
+                "360p",
+                "480p",
+                "4k",
+                "4x",
+                "540p",
+                "580p",
+                "720p",
+                "768P",
+                "true_1080p"
+              ],
+              "type": "string"
+            },
+            "scene_image_urls": {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 4,
+              "type": "array"
+            },
+            "sharp": {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            "slowdown_factor": {
+              "enum": [
+                1,
+                2,
+                4,
+                8
+              ],
+              "type": "integer"
+            },
+            "softness": {
+              "maximum": 5,
+              "minimum": 1,
+              "type": "number"
+            },
+            "target_fps": {
+              "type": "integer"
+            },
+            "upscale_factor": {
+              "enum": [
+                1,
+                2,
+                4
+              ],
+              "type": "integer"
+            },
+            "video_url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "duration",
+            "model",
+            "prompt"
+          ],
+          "type": "object"
+        }
+      }
+    },
+    "POST /video/quote": {
+      "operation_id": "quoteVideo",
+      "parameters": [],
+      "request_bodies": {
+        "application/json": {
+          "properties": {
+            "aspect_ratio": {
+              "enum": [
+                "adaptive",
+                "auto",
+                123,
+                1269,
+                182,
+                184,
+                243,
+                245,
+                304,
+                556,
+                561,
+                61,
+                969
+              ],
+              "type": "string"
+            },
+            "audio": {
+              "type": "boolean"
+            },
+            "duration": {
+              "enum": [
+                "-1",
+                "1 gen",
+                "10s",
+                "11s",
+                "12s",
+                "13s",
+                "14s",
+                "15s",
+                "16s",
+                "17s",
+                "18s",
+                "19s",
+                "1s",
+                "20s",
+                "21s",
+                "22s",
+                "23s",
+                "24s",
+                "25s",
+                "26s",
+                "27s",
+                "28s",
+                "29s",
+                "2s",
+                "30s",
+                "3s",
+                "4s",
+                "5s",
+                "6s",
+                "7s",
+                "8s",
+                "9s",
+                "Auto",
+                "auto"
+              ],
+              "type": "string"
+            },
+            "enhancement_model": {
+              "type": "string"
+            },
+            "model": {
+              "type": "string"
+            },
+            "reference_video_total_duration": {
+              "minimum": 0,
+              "type": "number"
+            },
+            "resolution": {
+              "enum": [
+                "1080p",
+                "1440p",
+                "1x",
+                "2160p",
+                "256p",
+                "2K",
+                "2x",
+                "360p",
+                "480p",
+                "4k",
+                "4x",
+                "540p",
+                "580p",
+                "720p",
+                "768P",
+                "true_1080p"
+              ],
+              "type": "string"
+            },
+            "slowdown_factor": {
+              "enum": [
+                1,
+                2,
+                4,
+                8
+              ],
+              "type": "integer"
+            },
+            "target_fps": {
+              "type": "integer"
+            },
+            "upscale_factor": {
+              "enum": [
+                1,
+                2,
+                4
+              ],
+              "type": "integer"
+            },
+            "video_url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "duration",
+            "model"
+          ],
+          "type": "object"
+        }
+      }
+    },
+    "POST /video/retrieve": {
+      "operation_id": "retrieveVideo",
+      "parameters": [],
+      "request_bodies": {
+        "application/json": {
+          "additionalProperties": false,
+          "properties": {
+            "delete_media_on_completion": {
+              "type": "boolean"
+            },
+            "model": {
+              "type": "string"
+            },
+            "queue_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "model",
+            "queue_id"
+          ],
+          "type": "object"
+        }
+      }
+    }
+  },
+  "source": {
+    "sha256": "0daa64c8907430bfafc2aea862eaa161a6c77c9bb3a5b4edb2e517ae95532b33",
+    "url": "https://docs.venice.ai/swagger.yaml",
+    "version": "20260826.105305"
+  }
+}

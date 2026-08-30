@@ -89,6 +89,7 @@ include = [
   "/src",
   "/tests",
   "/scripts",
+  "/contracts",
   "/bin",
   "/Makefile",
   "/install.sh",
