@@ -48,6 +48,10 @@ class InstallScriptTests(unittest.TestCase):
             }
         )
 
+        self.completion = (
+            self.data_home / "bash-completion" / "completions" / "venice"
+        )
+
     @staticmethod
     def _shell_quote(value):
         return "'" + value.replace("'", "'\\''") + "'"
@@ -85,6 +89,10 @@ class InstallScriptTests(unittest.TestCase):
         self.assertEqual(os.readlink(lib_link), str(ROOT / "src/venice"))
         config_dir = self.home / ".config/venice"
         self.assertEqual(stat.S_IMODE(config_dir.stat().st_mode), 0o700)
+        self.assertEqual(
+            self.completion.read_text(encoding="utf-8").splitlines()[0],
+            f"# venice source completion owner: {ROOT}",
+        )
 
         credentials = config_dir / "credentials"
         credentials.write_text("test-fake-key\n", encoding="utf-8")
@@ -94,10 +102,52 @@ class InstallScriptTests(unittest.TestCase):
         self.assertEqual(uninstalled.returncode, 0, uninstalled.stderr)
         self.assertFalse(bin_link.exists())
         self.assertFalse(lib_link.exists())
+        self.assertFalse(self.completion.exists())
         self.assertTrue(credentials.exists())
         self.assertNotIn("shred", uninstalled.stdout)
         self.assertIn("rm -f ~/.config/venice/credentials", uninstalled.stdout)
         self.assertIn("rmdir ~/.config/venice", uninstalled.stdout)
+
+    def test_uninstall_preserves_foreign_completion_with_registration(self):
+        self.completion.parent.mkdir(parents=True)
+        content = (
+            "# user-managed completion\n"
+            "_venice() { :; }\n"
+            "complete -F _venice venice\n"
+        )
+        self.completion.write_text(content, encoding="utf-8")
+
+        uninstalled = self.run_script("uninstall.sh")
+        self.assertEqual(uninstalled.returncode, 0, uninstalled.stderr)
+        self.assertEqual(self.completion.read_text(encoding="utf-8"), content)
+        self.assertIn(f"skip     {self.completion} (not ours)", uninstalled.stdout)
+
+    def test_uninstall_preserves_completion_owned_by_another_checkout(self):
+        self.completion.parent.mkdir(parents=True)
+        content = (
+            f"# venice source completion owner: {self.temp / 'other checkout'}\n"
+            "complete -F _venice venice\n"
+        )
+        self.completion.write_text(content, encoding="utf-8")
+
+        uninstalled = self.run_script("uninstall.sh")
+        self.assertEqual(uninstalled.returncode, 0, uninstalled.stderr)
+        self.assertEqual(self.completion.read_text(encoding="utf-8"), content)
+
+    def test_uninstall_preserves_completion_symlink(self):
+        self.completion.parent.mkdir(parents=True)
+        target = self.temp / "foreign completion"
+        content = (
+            f"# venice source completion owner: {ROOT}\n"
+            "complete -F _venice venice\n"
+        )
+        target.write_text(content, encoding="utf-8")
+        self.completion.symlink_to(target)
+
+        uninstalled = self.run_script("uninstall.sh")
+        self.assertEqual(uninstalled.returncode, 0, uninstalled.stderr)
+        self.assertTrue(self.completion.is_symlink())
+        self.assertEqual(target.read_text(encoding="utf-8"), content)
 
     def test_install_refuses_to_replace_a_regular_file(self):
         bin_dst = self.home / ".local/bin/venice"
