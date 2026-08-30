@@ -2078,6 +2078,7 @@ The player list (`paplay` -> `aplay` -> `ffplay` -> `mpg123` -> `play`
 ```sh
 make test     # everything, including the drive suite
 make drive    # the drive suite + its fake-API fixture
+make openapi-check  # offline check of implemented API contracts
 ```
 
 Stdlib `unittest` only. Most tests mock `urlopen` (and, for `chat`, the OpenAI
@@ -2099,6 +2100,13 @@ because the reviewer shells out to git and a mocked git would only test the mock
 `-z` rename records and `-W` function context are exactly what a fake gets wrong.
 They skip cleanly where no `git` binary is on `PATH`, and neutralize
 `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` so they can never read your gitconfig.
+
+The committed OpenAPI lock covers only operations this project intentionally
+wraps. `make openapi-check` validates it without network access. Maintainers can
+install `scripts/openapi-requirements.txt` and run `make openapi-live` to compare
+against the official Swagger, or `make openapi-refresh` after reviewing upstream
+drift. A weekly/manual workflow reports implemented-operation changes while
+treating new unsupported endpoints as informational.
 
 ## Uninstall
 

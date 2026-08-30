@@ -262,6 +262,23 @@ def _response_format(ctype: str, fallback: str) -> str:
     return FORMAT_BY_CTYPE.get(base, fallback)
 
 
+def request_body(
+    text: str,
+    model: str,
+    requested_format: Optional[str],
+    voice: Optional[str],
+    speed: Optional[float],
+) -> dict:
+    body: dict = {"input": text, "model": model}
+    if requested_format is not None:
+        body["response_format"] = requested_format
+    if voice:
+        body["voice"] = voice
+    if speed is not None:
+        body["speed"] = speed
+    return body
+
+
 # ---- main flow ---------------------------------------------------------------
 
 def _print_estimate(cost: Optional[float], char_count: int, model: str) -> None:
@@ -385,16 +402,9 @@ def _run(args) -> int:
     if rc is not None:
         return rc
 
-    body: dict = {
-        "input": text,
-        "model": args.model,
-    }
-    if resolved.requested_format is not None:
-        body["response_format"] = resolved.requested_format
-    if args.voice:
-        body["voice"] = args.voice
-    if args.speed is not None:
-        body["speed"] = args.speed
+    body = request_body(
+        text, args.model, resolved.requested_format, args.voice, args.speed
+    )
 
     try:
         status, ctype, audio = client.request(

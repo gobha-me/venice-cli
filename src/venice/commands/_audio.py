@@ -29,6 +29,11 @@ def ext_for(ctype: str) -> Tuple[str, bool]:
     return _queue.ext_for(ctype, EXT_BY_CTYPE)
 
 
+def job_body(model: str, queue_id: str) -> dict:
+    """Canonical request body for audio retrieve/complete operations."""
+    return {"model": model, "queue_id": queue_id}
+
+
 def retrieve_bytes(
     client,
     model: str,
@@ -47,7 +52,7 @@ def retrieve_bytes(
     """
     return client.poll_retrieve(
         "/audio/retrieve",
-        {"model": model, "queue_id": queue_id},
+        job_body(model, queue_id),
         interval=poll_interval,
         max_wait=max_wait,
         on_tick=on_tick,
@@ -111,7 +116,7 @@ def retrieve_and_save(
 
     if not no_cleanup:
         try:
-            client.post_json("/audio/complete", {"model": model, "queue_id": queue_id})
+            client.post_json("/audio/complete", job_body(model, queue_id))
         except VeniceAPIError as e:
             print(f"warning: cleanup call failed: {e}", file=sys.stderr)
 

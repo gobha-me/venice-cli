@@ -1,4 +1,4 @@
-.PHONY: install uninstall test drive lint scan build clean
+.PHONY: install uninstall test drive lint scan openapi-check openapi-live openapi-refresh build clean
 
 install:
 	@./install.sh
@@ -33,6 +33,15 @@ lint:
 # OK. Same split as test/drive: the suite degrades, the explicit target won't.
 scan:
 	@python3 -m tests._hygiene
+
+openapi-check:
+	@python3 scripts/openapi_contract.py check
+
+openapi-live:
+	@python3 scripts/openapi_contract.py check-live
+
+openapi-refresh:
+	@python3 scripts/openapi_contract.py refresh
 
 build:
 	@rm -rf dist

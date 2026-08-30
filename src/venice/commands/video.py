@@ -223,6 +223,28 @@ def _shared_params(args) -> dict:
     return extra
 
 
+def quote_body(model: str, shared: dict, media: dict) -> dict:
+    body = {"model": model}
+    body.update(shared)
+    body.update(media)
+    return body
+
+
+def queue_body(
+    model: str, prompt: str, shared: dict, media: dict, negative_prompt=None
+) -> dict:
+    body = {"model": model, "prompt": prompt}
+    body.update(shared)
+    if negative_prompt:
+        body["negative_prompt"] = negative_prompt
+    body.update(media)
+    return body
+
+
+def job_body(model: str, queue_id: str) -> dict:
+    return {"model": model, "queue_id": queue_id}
+
+
 def _constraint_values(constraints: dict, field: str, model: str) -> Tuple[str, ...]:
     values = constraints.get(field)
     if (
@@ -513,11 +535,9 @@ def _run_generate(args) -> int:
         return rc
 
     extra = _shared_params(args)
-    quote_body = {"model": model}
-    quote_body.update(extra)
-    quote_body.update(quote_media)
+    quote_request = quote_body(model, extra, quote_media)
     try:
-        quote = client.post_json("/video/quote", quote_body)
+        quote = client.post_json("/video/quote", quote_request)
     except VeniceAPIError as e:
         print(f"quote rejected: {e}", file=sys.stderr)
         return _queue.status_to_exit(e)
@@ -549,14 +569,12 @@ def _run_generate(args) -> int:
         if rc is not None:
             return rc
 
-    queue_body = {"model": model, "prompt": args.prompt}
-    queue_body.update(extra)
-    if args.negative_prompt:
-        queue_body["negative_prompt"] = args.negative_prompt
-    queue_body.update(queue_media)
+    queue_request = queue_body(
+        model, args.prompt, extra, queue_media, args.negative_prompt
+    )
 
     try:
-        queued = client.post_json("/video/queue", queue_body)
+        queued = client.post_json("/video/queue", queue_request)
     except VeniceAPIError as e:
         print(f"queue failed: {e}", file=sys.stderr)
         return _queue.status_to_exit(e)
@@ -660,7 +678,7 @@ def retrieve_bytes(
     """
     ctype, payload = client.poll_retrieve(
         "/video/retrieve",
-        {"model": model, "queue_id": queue_id},
+        job_body(model, queue_id),
         interval=poll_interval,
         max_wait=max_wait,
         on_tick=on_tick,
@@ -753,7 +771,7 @@ def _retrieve_and_save(
 
     if not no_cleanup:
         try:
-            client.post_json("/video/complete", {"model": model, "queue_id": queue_id})
+            client.post_json("/video/complete", job_body(model, queue_id))
         except VeniceAPIError as e:
             print(f"warning: cleanup call failed: {e}", file=sys.stderr)
     return 0

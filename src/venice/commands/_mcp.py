@@ -315,13 +315,9 @@ def tts_tool(
     if gate is not None:
         return gate
 
-    body: dict = {"input": text, "model": model}
-    if resolved.requested_format is not None:
-        body["response_format"] = resolved.requested_format
-    if voice:
-        body["voice"] = voice
-    if speed is not None:
-        body["speed"] = speed
+    body = _tts.request_body(
+        text, model, resolved.requested_format, voice, speed
+    )
     try:
         _status, ctype, audio = client.request("POST", "/audio/speech", json_body=body)
     except VeniceAPIError as e:
@@ -426,7 +422,7 @@ def _queue_media(
         )
 
     try:  # best-effort cleanup; the file is already saved
-        client.post_json("/audio/complete", {"model": model, "queue_id": queue_id})
+        client.post_json("/audio/complete", _audio.job_body(model, queue_id))
     except VeniceAPIError:
         pass
     return {
@@ -469,7 +465,7 @@ def sfx_tool(
     duration = _sfx._clamp_duration(model, duration)  # stderr warnings only
     try:
         quote = client.post_json(
-            "/audio/quote", {"model": model, "duration_seconds": duration}
+            "/audio/quote", _sfx.quote_body(model, duration)
         )
     except VeniceAPIError as e:
         return _err(f"sfx quote rejected: {e}")
@@ -478,7 +474,7 @@ def sfx_tool(
     return _queue_media(
         client,
         model=model,
-        queue_body={"model": model, "prompt": prompt.strip(), "duration_seconds": duration},
+        queue_body=_sfx.queue_body(model, prompt.strip(), duration),
         quote_value=quote_value,
         confirm=confirm,
         max_spend=max_spend,
@@ -533,24 +529,14 @@ def music_tool(
     if rc is not None:
         return _err(f"music: request rejected by client-side validation (exit {rc})")
 
-    quote_body = {"model": model}
-    if duration is not None:
-        quote_body["duration_seconds"] = duration
+    quote_body = _music.quote_body(model, duration)
     try:
         quote = client.post_json("/audio/quote", quote_body)
     except VeniceAPIError as e:
         return _err(f"music quote rejected: {e}")
     quote_value = quote.get("quote", quote)
 
-    queue_body: dict = {"model": model, "prompt": prompt.strip()}
-    if duration is not None:
-        queue_body["duration_seconds"] = duration
-    if instrumental:
-        queue_body["force_instrumental"] = True
-    if lyrics:
-        queue_body["lyrics_prompt"] = lyrics
-    if speed is not None:
-        queue_body["speed"] = speed
+    queue_body = _music.queue_body(ns)
 
     return _queue_media(
         client,
@@ -917,9 +903,7 @@ def video_tool(
         return _err(f"video: {e}")
 
     extra = _video._shared_params(ns)
-    quote_body = {"model": model}
-    quote_body.update(extra)
-    quote_body.update(quote_media)
+    quote_body = _video.quote_body(model, extra, quote_media)
     try:
         quote = client.post_json("/video/quote", quote_body)
     except VeniceAPIError as e:
@@ -933,11 +917,9 @@ def video_tool(
     if gate is not None:
         return gate
 
-    queue_body = {"model": model, "prompt": prompt.strip()}
-    queue_body.update(extra)
-    if negative_prompt:
-        queue_body["negative_prompt"] = negative_prompt
-    queue_body.update(queue_media)
+    queue_body = _video.queue_body(
+        model, prompt.strip(), extra, queue_media, negative_prompt
+    )
     try:
         queued = client.post_json("/video/queue", queue_body)
     except VeniceAPIError as e:
@@ -1015,7 +997,7 @@ def video_tool(
             )
 
     try:  # best-effort cleanup; the file is already saved
-        client.post_json("/video/complete", {"model": model, "queue_id": queue_id})
+        client.post_json("/video/complete", _video.job_body(model, queue_id))
     except VeniceAPIError:
         pass
     return {
@@ -1053,9 +1035,12 @@ def job_status_tool(client, *, queue_id: str, type: str, model: str) -> dict:
             f"{', '.join(sorted(_JOB_ROUTE))}"
         )
     try:
-        ctype, payload = client.post_for_bytes_or_json(
-            f"/{base}/retrieve", {"model": model, "queue_id": queue_id}
+        body = (
+            _audio.job_body(model, queue_id)
+            if base == "audio"
+            else _video.job_body(model, queue_id)
         )
+        ctype, payload = client.post_for_bytes_or_json(f"/{base}/retrieve", body)
     except VeniceAPIError as e:
         if e.status == 404:
             return {
@@ -1192,7 +1177,12 @@ def job_result_tool(
             )
 
     try:  # best-effort cleanup; the file is already saved
-        client.post_json(f"/{base}/complete", {"model": model, "queue_id": queue_id})
+        body = (
+            _audio.job_body(model, queue_id)
+            if base == "audio"
+            else _video.job_body(model, queue_id)
+        )
+        client.post_json(f"/{base}/complete", body)
     except VeniceAPIError:
         pass
     if base == "video":
