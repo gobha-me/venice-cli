@@ -61,7 +61,7 @@ jobs:
 
   # Builds the distributions and proves the *base* install is dependency-free.
   # The test job above always installs the [openai] extra, so it cannot catch a
-  # module-scope `import openai` sneaking into a base command -- this job can.
+  # module-scope third-party import sneaking into a base command -- this job can.
   package:
     runs-on: ubuntu-latest
     steps:
@@ -79,26 +79,51 @@ jobs:
           python -m build
           twine check --strict dist/*
 
-      - name: Install the wheel (base only, no extras)
-        run: pip install dist/*.whl
-
-      - name: Console script works
+      # Build/twine and their transitive dependencies stay in setup-python's
+      # interpreter.  A default venv does not inherit those site-packages, so
+      # importing the installed wheel here proves the base command graph is
+      # genuinely stdlib-only rather than accidentally borrowing CI tooling.
+      - name: Smoke the base wheel in a clean environment
         run: |
-          venice --version
-          venice --help
+          SMOKE_VENV="${RUNNER_TEMP}/venice-base-wheel"
+          python -m venv "$SMOKE_VENV"
+          "$SMOKE_VENV/bin/python" -m pip install --no-deps dist/*.whl
+          "$SMOKE_VENV/bin/python" - <<'PY'
+          import importlib.metadata
+          import importlib.util
+          import re
+          import sys
 
-      # register_all imports every command module eagerly, so the two steps
-      # above already exercised the whole command graph. If openai/mcp are
-      # absent and they passed, the base really is stdlib-only. The mcp check
-      # guards the most likely regression: a module-scope `import mcp` sneaking
-      # into mcp_serve/_mcp (which must stay import-clean so the base install,
-      # and Python 3.9 where the mcp SDK can't install, keep working).
-      - name: Base install must not pull in openai or mcp
-        run: |
-          for mod in openai mcp; do
-            if python -c "import $mod" 2>/dev/null; then
-              echo "::error::$mod is importable after a base install -- a base command imports it at module scope"
-              exit 1
-            fi
-          done
-          echo "ok: base install is openai-free and mcp-free"
+          if sys.prefix == sys.base_prefix:
+              raise SystemExit("base-wheel smoke is not running in an isolated venv")
+
+          forbidden = (
+              "build", "twine", "requests", "urllib3", "keyring", "rich",
+              "openai", "mcp",
+          )
+          present = [name for name in forbidden if importlib.util.find_spec(name)]
+          if present:
+              raise SystemExit(
+                  "third-party modules are visible in the base-wheel venv: "
+                  + ", ".join(present)
+              )
+
+          requirements = importlib.metadata.requires("venice-cli") or []
+          unconditional = [
+              requirement for requirement in requirements
+              if re.search(r"\bextra\s*==", requirement) is None
+          ]
+          if unconditional:
+              raise SystemExit(
+                  "base wheel has unconditional Requires-Dist entries: "
+                  + ", ".join(unconditional)
+              )
+
+          from venice.cli import build_parser
+
+          build_parser()
+          print("ok: isolated base wheel has optional-only metadata and a clean command graph")
+          PY
+          "$SMOKE_VENV/bin/venice" --version
+          "$SMOKE_VENV/bin/venice" --help >/dev/null
+          "$SMOKE_VENV/bin/venice" completion bash >/dev/null
