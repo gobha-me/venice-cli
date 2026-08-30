@@ -48,12 +48,21 @@ unlink_if_ours() {
 unlink_if_ours "$HOME/.local/bin/venice" "$REPO/bin/venice"
 unlink_if_ours "$HOME/.local/lib/venice" "$REPO/src/venice"
 
-# Remove the bash completion install.sh wrote -- but only if it's ours (carries
-# the generated `complete -F _venice venice` line), never a hand-placed file.
+# Remove the bash completion install.sh wrote, but only when its checkout-
+# specific marker proves this exact source install owns the regular file.
 COMPL_DST="${XDG_DATA_HOME:-$HOME/.local/share}/bash-completion/completions/venice"
-if [ -f "$COMPL_DST" ] && grep -q "complete -F _venice venice" "$COMPL_DST" 2>/dev/null; then
-    rm -f "$COMPL_DST"
-    echo "removed  $COMPL_DST"
+COMPL_OWNER="# venice source completion owner: $REPO"
+if [ -L "$COMPL_DST" ]; then
+    echo "skip     $COMPL_DST (not ours)"
+elif [ -f "$COMPL_DST" ]; then
+    first_line=
+    IFS= read -r first_line < "$COMPL_DST" || true
+    if [ "$first_line" = "$COMPL_OWNER" ]; then
+        rm -f "$COMPL_DST"
+        echo "removed  $COMPL_DST"
+    else
+        echo "skip     $COMPL_DST (not ours)"
+    fi
 elif [ -e "$COMPL_DST" ]; then
     echo "skip     $COMPL_DST (not ours)"
 fi

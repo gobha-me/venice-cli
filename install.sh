@@ -78,8 +78,10 @@ link "$PKG_SRC" "$LIB_DST"
 # `source <(venice completion bash)`. Never fatal: a missing dir or unwritable
 # path just skips it (a partial write on failure is cleaned up).
 COMPL_DST="${XDG_DATA_HOME:-$HOME/.local/share}/bash-completion/completions/venice"
+COMPL_OWNER="# venice source completion owner: $REPO"
 if mkdir -p "$(dirname "$COMPL_DST")" 2>/dev/null \
-   && "$BIN_SRC" completion bash > "$COMPL_DST" 2>/dev/null; then
+   && { printf '%s\n' "$COMPL_OWNER"; "$BIN_SRC" completion bash; } \
+      > "$COMPL_DST" 2>/dev/null; then
     echo "wrote    $COMPL_DST  (bash completion)"
 else
     rm -f "$COMPL_DST" 2>/dev/null || true
