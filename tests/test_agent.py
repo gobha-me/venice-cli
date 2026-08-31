@@ -8,6 +8,7 @@ import contextlib
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -3283,6 +3284,73 @@ class TestToolRegistry(unittest.TestCase):
         names = {t.name for t in _agent.builtin_tools(
             object(), only=_agent.select(categories={"image", "audio", "video"}))}
         self.assertEqual(names, self._ASSETS)
+
+    def test_system_and_selected_tool_bytes_ignore_python_hash_seed(self):
+        # #102: select() deliberately returns a set, but builtin_tools() filters the
+        # ordered registry by membership. Serializing in fresh processes pins that
+        # boundary: iterating the set instead makes this output seed-dependent.
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        script = """
+import json
+from venice.commands import _agent
+
+selected = _agent.select(categories={"image", "audio", "video"})
+tools = _agent.builtin_tools(object(), only=selected)
+print(json.dumps(
+    {"system": _agent.SPAWN_SYSTEM, "tools": _agent.to_openai_tools(tools)},
+    separators=(",", ":"),
+))
+"""
+        outputs = []
+        for seed in ("1", "2"):
+            env = dict(os.environ)
+            env["PYTHONHASHSEED"] = seed
+            env["PYTHONPATH"] = os.pathsep.join(
+                filter(None, (os.path.join(root, "src"), env.get("PYTHONPATH")))
+            )
+            proc = subprocess.run(
+                [sys.executable, "-c", script], cwd=root, env=env,
+                check=True, capture_output=True, text=True,
+            )
+            outputs.append(proc.stdout)
+
+        self.assertEqual(outputs[0], outputs[1])
+        payload = json.loads(outputs[0])
+        self.assertEqual(payload["system"], _agent.SPAWN_SYSTEM)
+        selected = _agent.select(categories={"image", "audio", "video"})
+        expected = [spec.name for spec in _agent._REGISTRY if spec.name in selected]
+        self.assertEqual(
+            [tool["function"]["name"] for tool in payload["tools"]], expected,
+        )
+
+
+class TestToolSchemaStability(unittest.TestCase):
+    def test_tool_array_is_snapshotted_once_for_the_run(self):
+        tools = []
+
+        def mutate(_arguments, *, confirm=False):
+            tools.append(_tool("late", lambda a, *, confirm=False: {"status": "ok"}))
+            return {"status": "ok"}
+
+        tools.append(_tool("early", mutate))
+        fake, calls = _fake_oai([
+            FakeToolCompletion(tool_calls=[_FnCall("c1", "early", "{}")]),
+            FakeToolCompletion("done"),
+        ])
+        with mock.patch.object(sys, "stdout", io.StringIO()), \
+             mock.patch.object(sys, "stderr", io.StringIO()):
+            _agent.run_loop(
+                fake, "m", [{"role": "user", "content": "go"}], {}, tools,
+                max_tool_calls=0, yes=True, json_out=False,
+            )
+
+        self.assertEqual([t.name for t in tools], ["early", "late"])
+        self.assertEqual(len(calls), 2)
+        for call in calls:
+            self.assertEqual(
+                [tool["function"]["name"] for tool in call["tools"]], ["early"],
+            )
+        self.assertIs(calls[0]["tools"], calls[1]["tools"])
 
 
 # --------------------------------------------------------------------------- #

@@ -3683,17 +3683,20 @@ def _run_disposable(
     budget: Optional[_compact.Budget] = None,
     ledger: Optional[CostLedger] = None,
     focus: Optional[str] = None,
+    role: Optional[str] = None,
 ) -> dict:
     """Run one disposable subagent turn-loop on a FRESH context and return its report.
 
     The shared core behind :func:`run_scout` (read-only) and :func:`run_spawn`
-    (write/paid-capable): seeds a fresh ``messages`` list (only ``system`` + ``task`` --
-    nothing from the caller's context leaks in), drives :func:`run_loop` with the given
-    ``tools`` under a stdout firewall (the printed final answer is captured and
-    discarded), and returns ``{"status","report","tool_calls","truncated"}``. The report
-    is recovered from the message tail -- the final assistant turn in both the natural-
-    stop and cap-forced paths. ``openai.OpenAIError`` from the loop propagates to the
-    caller (the Tool wrapper turns it into an error envelope).
+    (write/paid-capable): seeds a fresh ``messages`` list (only static ``system`` + one
+    user task -- nothing from the caller's context leaks in), drives :func:`run_loop`
+    with the given ``tools`` under a stdout firewall (the printed final answer is
+    captured and discarded), and returns
+    ``{"status","report","tool_calls","truncated"}``. Dynamic focus/role guidance rides
+    in that user turn so repeated rail invocations keep a byte-identical cacheable
+    system prefix. The report is recovered from the message tail -- the final assistant
+    turn in both the natural-stop and cap-forced paths. ``openai.OpenAIError`` from the
+    loop propagates to the caller (the Tool wrapper turns it into an error envelope).
 
     Capability-agnostic: the read-only-vs-write distinction and any self-spawn guard live
     in the two thin wrappers, not here. Runs with ``yes=True`` -- for the worker that is
@@ -3704,12 +3707,15 @@ def _run_disposable(
     if not task:
         return {"status": "error", "message": "subagent requires a non-empty task"}
 
-    sys_prompt = system
+    guidance = []
+    if role:
+        guidance.append(f"Your role: {role}.")
     if focus:
-        sys_prompt = f"{system}\nFocus hint (not a hard scope): {focus}\n"
+        guidance.append(f"Focus hint (not a hard scope): {focus}")
+    user_task = "\n".join(guidance) + f"\n\n{task}" if guidance else task
     messages: List[dict] = [
-        {"role": "system", "content": sys_prompt},
-        {"role": "user", "content": task},
+        {"role": "system", "content": system},
+        {"role": "user", "content": user_task},
     ]
     # #128: this is a fresh conversation, not a continuation of the parent. Replace
     # (rather than inherit) its routing key; every call inside this disposable loop
@@ -3952,11 +3958,10 @@ def run_spawn(
             "worker subagent tools must not include a spawn, scout, merge, or review "
             f"tool (no nested subagents; merging is the planner's job); got: {bad}"
         )
-    if role:
-        system = f"{system}\nYour role: {role}.\n"
     out = _run_disposable(
         oai, model, task, tools, base_kwargs, system=system,
         max_tool_calls=max_tool_calls, budget=budget, ledger=ledger, focus=focus,
+        role=role,
     )
     if out.get("status") == "ok":
         out["fields"] = _parse_sections(out.get("report", ""), SPAWN_SECTIONS)

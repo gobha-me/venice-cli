@@ -627,9 +627,15 @@ class TestRunCycle(_RepoBase):
             [_report(["src/pool.cc:1 [major] first"]),
              _report(["src/pool.cc:2 [major] second"])], rounds=2)
         self.assertEqual(len(seen), 2)
+        # The entire first-round task, including the closing diff fence, is the
+        # byte-identical prefix of round two. Prior findings may only follow it.
+        self.assertTrue(seen[1].startswith(seen[0]))
         self.assertIn("ALREADY REPORTED", seen[1])
         self.assertIn("first", seen[1])
         self.assertNotIn("ALREADY REPORTED", seen[0])
+        self.assertGreater(
+            seen[1].index("ALREADY REPORTED"), seen[1].index("\n```\n")
+        )
         self.assertEqual(len(out["findings"]), 2)
 
     def test_stops_early_when_a_round_adds_nothing_new(self):
