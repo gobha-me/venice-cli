@@ -19,9 +19,12 @@ suite can exercise:
 pip install -e ".[all,test]"
 ```
 
-`[openai]` alone is enough for day-to-day work (only `venice chat` / `venice
-code` / `venice embed` need it). `[test]` adds `pexpect` for the drive suite
-below; without it those tests report as **skipped**, not failed.
+`[openai]` alone is enough for day-to-day model-backed work: chat, code, embed,
+index/search, model-backed review, and their delegated model tools. `[mcp]`
+adds MCP server/client transport; a model-delegating MCP tool can need both.
+`[test]` adds `pexpect` for the drive suite below; without it those tests report
+as **skipped**, not failed. The authoritative feature inventory is in README's
+Dependencies section.
 
 `./install.sh` symlinks `venice` onto your PATH if you want the real command
 without pip. Don't mix the two: both own `~/.local/bin/venice`.
@@ -106,11 +109,13 @@ distinction is invisible until you run the suite from a venv, where
 
 ## House style
 
-- **Stdlib-only in the base.** `venice chat` and `venice embed` use the OpenAI
-  SDK, lazy-imported inside the handler so a missing `openai` degrades to a
-  hint and exit 2 rather than breaking `venice --help`. Keep it that way: new
-  third-party deps need a good reason and must not be imported at module scope
-  in the base commands.
+- **No required dependencies in the base.** OpenAI-backed commands and tools
+  lazy-import the SDK at their feature boundaries; MCP transport does the same
+  with its SDK. A missing extra must degrade to a scoped hint/error rather than
+  breaking `venice --help` or the complete command graph. Keep the README
+  inventory and its regression guard current when adding a new lazy-import
+  call site. New third-party dependencies need a good reason and must not be
+  imported at module scope in base commands.
 - **Shared plumbing lives in `src/venice/commands/_*.py`** (`_shared`, `_queue`,
   `_models`, `_openai`). These take primitive args -- a label, a model type, a
   cost -- rather than an argparse namespace, so they stay independent of any one

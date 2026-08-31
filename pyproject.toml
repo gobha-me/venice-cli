@@ -40,9 +40,10 @@ classifiers = [
   "Topic :: Utilities",
 ]
 
-# The base CLI is stdlib-only. Third-party SDKs are lazy-imported by the
-# commands that need them and declared as extras below, so `pip install
-# venice-cli` stays dependency-free.
+# The base package has no required third-party dependencies. Optional SDKs are
+# lazy-imported at the command/tool feature boundary and declared as extras
+# below, so `pip install venice-cli` keeps a dependency-free command graph even
+# though invoking those model/MCP-backed features requires the relevant extra.
 dependencies = []
 
 [project.optional-dependencies]

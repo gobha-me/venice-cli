@@ -1,8 +1,9 @@
 # venice-cli
 
-A Python CLI wrapping the [Venice.ai](https://venice.ai) API. The base is
-stdlib-only; the optional `venice chat` and `venice embed` commands use the
-official OpenAI SDK (Venice is OpenAI-compatible).
+A Python CLI wrapping the [Venice.ai](https://venice.ai) API. The base package
+has no required third-party dependencies; model-backed commands use the
+optional OpenAI SDK (Venice is OpenAI-compatible), and MCP transport uses the
+optional MCP SDK.
 
 ```sh
 pip install venice-cli
@@ -28,7 +29,7 @@ review of a diff), `venice balance` (budget tracking), and `venice models`
 
 ```sh
 pip install venice-cli              # base: stdlib-only, no dependencies
-pip install "venice-cli[openai]"    # + venice chat / venice embed
+pip install "venice-cli[openai]"    # + model-backed chat/code/review/search features
 ```
 
 The distribution is named `venice-cli`, but the command is `venice` (and the
@@ -37,21 +38,43 @@ keeps the CLI out of your system site-packages.
 
 ### Dependencies
 
-The base install pulls in **nothing** — every command is stdlib-only except
-`venice chat` and `venice embed`, which use the official OpenAI SDK against
-Venice's OpenAI-compatible API, and `venice mcp-serve` / `venice chat --mcp`,
-which use the MCP SDK. Those SDKs are lazy-imported, so they ship as optional
-extras rather than hard requirements: if you only generate images or audio, you
-don't pay for them. Without the relevant extra, that command exits 2 with a hint;
-every other command works normally.
+The base install pulls in **nothing**: its package metadata has no required
+third-party dependencies, and the complete command graph remains importable.
+Some commands and features need an optional SDK when invoked. Those SDKs are
+lazy-imported, so image/audio/video generation and the other stdlib-backed
+features remain usable without them. A missing SDK fails at the feature boundary
+with an installation hint rather than breaking the base CLI.
+
+#### OpenAI feature inventory
+
+This is the authoritative inventory of features that use the `[openai]` extra.
+The name at the left is the corresponding lazy-import label in the source.
+
+<!-- openai-extra-inventory:start -->
+- `chat`: `venice chat`, including its agent loop and the MCP server's
+  `venice_chat` tool. `venice chat --mcp` needs both `[openai]` for chat and
+  `[mcp]` to attach external servers.
+- `code`: `venice code` and its model-backed agent loop.
+- `embed`: `venice embed`.
+- `index`: `venice index` and the agent's `reindex` tool.
+- `search`: `venice search` and the agent's `project_search` tool.
+- `review`: model-backed `venice review` runs. A diff skipped by `auto` triage,
+  an empty diff, or `--effort never` returns before importing the SDK.
+- `vision`: the agent's model-backed `vision` tool.
+<!-- openai-extra-inventory:end -->
+
+The `[mcp]` extra is independent: it provides the transport used to start
+`venice mcp-serve` or attach servers with `venice chat --mcp`. Starting the
+Venice MCP server needs only `[mcp]`; invoking its model-delegating
+`venice_chat` tool additionally needs `[openai]`.
 
 Extras are per-feature and additive, so the pattern holds as the CLI grows:
 
 | Install | Enables |
 | --- | --- |
-| `venice-cli` | everything except chat/embed and the MCP commands |
-| `venice-cli[openai]` | `venice chat`, `venice embed` |
-| `venice-cli[mcp]` | `venice mcp-serve` (MCP server) and `venice chat --mcp` (MCP client); needs Python ≥ 3.10 |
+| `venice-cli` | dependency-free command graph and stdlib-backed features; SDK-backed features above remain unavailable |
+| `venice-cli[openai]` | every model-backed feature in the authoritative inventory above |
+| `venice-cli[mcp]` | MCP server/client transport; needs Python ≥ 3.10, and does not itself provide `[openai]` |
 | `venice-cli[all]` | every extra (`openai` + `mcp`) |
 
 The `[mcp]` extra pulls in the [`mcp`](https://pypi.org/project/mcp/) SDK, which
@@ -1772,11 +1795,14 @@ look" must never be able to masquerade as "we looked and found nothing".
 
 `venice mcp-serve` runs an [MCP](https://modelcontextprotocol.io) server over
 stdio, exposing venice's generators as tools that an MCP host (Claude Code, or
-any MCP client) can call directly instead of shelling out to the CLI. It needs
-the `[mcp]` extra (Python ≥ 3.10):
+any MCP client) can call directly instead of shelling out to the CLI. Starting
+the server needs the `[mcp]` extra (Python ≥ 3.10); its `venice_chat` tool also
+needs `[openai]`. Install `[all]` when the host should be able to call all nine
+tools:
 
 ```sh
 pip install "venice-cli[mcp]"
+pip install "venice-cli[all]"       # MCP transport + venice_chat
 
 # Register it with Claude Code:
 claude mcp add venice -- venice mcp-serve
@@ -1794,7 +1820,7 @@ The server exposes nine tools:
 | `venice_upscale` | upscale a local image → image file | yes (dynamic) |
 | `venice_bg_remove` | remove a background → transparent PNG | yes (dynamic) |
 | `venice_image_edit` | edit/inpaint an image (+ optional mask layers) → image file | yes (dynamic) |
-| `venice_chat` | one-shot chat completion → reply text | no |
+| `venice_chat` | one-shot chat completion → reply text (needs `[openai]`) | no |
 
 **Spend gating.** MCP is non-interactive, so instead of a `[y/N]` prompt the
 paid tools gate on cost. A tool call whose estimated cost is at or under the
@@ -2065,10 +2091,10 @@ The player list (`paplay` -> `aplay` -> `ffplay` -> `mpg123` -> `play`
 | `venice chat [-i] [--continue\|--resume ID\|FILE] [--ephemeral]` | interactive multi-turn REPL (auto-saved sessions, `/`-commands, transcripts) |
 | `venice sessions ls\|show\|rm [ID]` | list/inspect/remove auto-saved chat & code sessions (`~/.config/venice/sessions/`, 0600) |
 | `venice embed [TEXT] [--from-file PATH] [--model M] [--dimensions N] [--json] [--embed-base-url URL --embed-model M [--embed-ca-bundle PATH \| --embed-insecure]]` | text embeddings (OpenAI SDK; alt/local backend) |
-| `venice index [PATH] [--model M] [--embed-base-url URL --embed-model M [--embed-ca-bundle PATH \| --embed-insecure]] [...]` / `venice search QUERY [-k N] [--json] [--embed-ca-bundle PATH \| --embed-insecure]` | build / query a local semantic index of a project tree |
+| `venice index [PATH] [--model M] [--embed-base-url URL --embed-model M [--embed-ca-bundle PATH \| --embed-insecure]] [...]` / `venice search QUERY [-k N] [--json] [--embed-ca-bundle PATH \| --embed-insecure]` | build / query a local semantic index of a project tree (needs `[openai]`) |
 | `venice code [TASK] [--auto\|--manual] [--plan-only] [-i] [--root DIR] [--continue\|--resume ID\|FILE] [--ephemeral] [--json] [...]` | coding agent: plan → accept → edit/run a project (needs `[openai]` + tool-calling model) |
-| `venice review [FOCUS] [--base REF] [--rounds N] [--effort auto\|always\|never] [--fail-on LEVEL] [--json]` | cold-context review of the current diff (fresh context, read-only, different model where available); **findings only — no gate, writes nothing** |
-| `venice mcp-serve` | run an MCP server (stdio) exposing venice tools (needs `[mcp]`) |
+| `venice review [FOCUS] [--base REF] [--rounds N] [--effort auto\|always\|never] [--fail-on LEVEL] [--json]` | cold-context review of the current diff (model-backed runs need `[openai]`; skipped/empty runs do not); **findings only — no gate, writes nothing** |
+| `venice mcp-serve` | run an MCP server (stdio) exposing venice tools (needs `[mcp]`; `venice_chat` additionally needs `[openai]`) |
 | `venice config add\|list\|remove\|show` | manage the MCP server registry |
 | `venice config get\|set\|unset KEY [VALUE]` | manage default flag values |
 | `venice completion bash\|zsh` | print a shell tab-completion script (generated from the parser) |
@@ -2081,10 +2107,11 @@ make drive    # the drive suite + its fake-API fixture
 make openapi-check  # offline check of implemented API contracts
 ```
 
-Stdlib `unittest` only. Most tests mock `urlopen` (and, for `chat`, the OpenAI
-client) and patch `HOME` to a tmpdir -- no live API calls, no real disk writes
-outside the tmpdir. The `chat` and `embed` tests need the OpenAI SDK importable
-(`pip install -e ".[openai]"`).
+Stdlib `unittest` only. Most tests mock `urlopen` (and the OpenAI client on
+model-backed paths) and patch `HOME` to a tmpdir -- no live API calls, no real
+disk writes outside the tmpdir. Tests for the `[openai]` inventory above need
+the OpenAI SDK importable (`pip install -e ".[openai]"`); the complete suite
+uses `pip install -e ".[all,test]"`.
 
 On top of that, `tests/test_drive_cli.py` drives the **real** CLI over a pty
 with `pexpect`, pointed at a local fake API via `$VENICE_BASE_URL`. It asserts
