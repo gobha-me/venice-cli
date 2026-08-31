@@ -520,6 +520,139 @@ class TestCostLedger(unittest.TestCase):
         self.assertEqual(L._in, 2.0 / 1e6)
         self.assertIsNone(L._out)  # no output price advertised
 
+    def test_model_switch_rebinds_pricing_and_partitions_usage(self):
+        models = [
+            {"id": "author", "model_spec": {"pricing": {
+                "input": {"usd": 1.0}, "output": {"usd": 2.0},
+            }}},
+            {"id": "reviewer", "model_spec": {"pricing": {
+                "input": {"usd": 10.0}, "output": {"usd": 20.0},
+            }}},
+        ]
+        args = type("A", (), {"session_max_spend": None})()
+        ledger = _agent.usage_ledger(args, models, "author")
+        ledger.record({"prompt_tokens": 1000, "completion_tokens": 100})
+        ledger.bind_model("reviewer", models)
+        ledger.record({"prompt_tokens": 1000, "completion_tokens": 100})
+
+        self.assertAlmostEqual(ledger.total, 0.0012 + 0.012)
+        self.assertAlmostEqual(ledger.models["author"]["total"], 0.0012)
+        self.assertAlmostEqual(ledger.models["reviewer"]["total"], 0.012)
+        self.assertEqual(
+            [row["model"] for row in ledger.api_calls()], ["author", "reviewer"]
+        )
+
+    def test_resume_keeps_cumulative_models_but_resets_current_run(self):
+        models = [{"id": "m", "model_spec": {"pricing": {
+            "input": {"usd": 1.0}, "cache_input": {"usd": 0.1},
+        }}}]
+        args = type("A", (), {"session_max_spend": 1.0})()
+        first = _agent.usage_ledger(args, models, "m")
+        first.record({
+            "prompt_tokens": 100, "completion_tokens": 10,
+            "prompt_tokens_details": {"cached_tokens": 90},
+        })
+
+        resumed = _agent.usage_ledger(args, models, "m")
+        resumed.restore(first.to_dict(), legacy_model="m")
+        self.assertEqual(resumed.current_run_models, {})
+        resumed.record({
+            "prompt_tokens": 50, "completion_tokens": 5,
+            "prompt_tokens_details": {"cached_tokens": 0},
+        })
+
+        self.assertEqual(resumed.prompt_tokens, 150)
+        self.assertEqual(resumed.models["m"]["prompt_tokens"], 150)
+        self.assertEqual(resumed.current_run_models["m"]["prompt_tokens"], 50)
+        self.assertEqual(
+            resumed.to_dict()["current_run_models"]["m"]["cache_hit_percent"],
+            0.0,
+        )
+        # The footer's cache clause is current-run, not the blended session rate.
+        self.assertIn("cache 0.0% hit", resumed.summary(cache=True))
+
+    def test_legacy_usage_is_attributed_to_saved_not_overridden_model(self):
+        models = [{"id": "old", "model_spec": {}},
+                  {"id": "new", "model_spec": {}}]
+        args = type("A", (), {"session_max_spend": None})()
+        ledger = _agent.usage_ledger(args, models, "new")
+        ledger.restore(
+            {"prompt_tokens": 25, "completion_tokens": 2, "api_calls_total": 1},
+            legacy_model="old",
+        )
+        self.assertEqual(ledger.model_id, "new")
+        self.assertEqual(ledger.models["old"]["prompt_tokens"], 25)
+        self.assertNotIn("new", ledger.models)
+        self.assertEqual(ledger.current_run_models, {})
+
+    def test_model_restore_tolerates_junk_and_never_restores_current_run(self):
+        ledger = _agent.CostLedger(model_id="live", models=[])
+        ledger.current_run_models["preexisting"] = _agent._new_model_usage_row()
+        ledger.restore({
+            "models": {
+                "good": {"prompt_tokens": 7, "cache_read_tokens": 3},
+                "bad": "not a row",
+                "": {"prompt_tokens": 99},
+            },
+            "current_run_models": {
+                "stale": {"prompt_tokens": 1000},
+            },
+        })
+        self.assertEqual(ledger.models["good"]["prompt_tokens"], 7)
+        self.assertEqual(set(ledger.models), {"good"})
+        self.assertEqual(ledger.current_run_models, {})
+
+    def test_switch_from_valid_to_invalid_pricing_fails_closed(self):
+        models = [
+            {"id": "good", "model_spec": {"pricing": {
+                "input": {"usd": 1.0},
+            }}},
+            {"id": "bad", "model_spec": {"pricing": {
+                "input": {"usd": float("inf")},
+            }}},
+        ]
+        ledger = _agent.CostLedger(max_spend=1.0, model_id="good", models=models)
+        self.assertFalse(ledger.invalid_pricing)
+        ledger.bind_model("bad", models)
+        self.assertTrue(ledger.invalid_pricing)
+        self.assertTrue(ledger.over())
+
+    def test_legacy_trace_rows_gain_only_known_saved_model_provenance(self):
+        with_model = _agent.CostLedger()
+        with_model.restore(
+            {"api_calls": [{"n": 1}], "api_calls_total": 1},
+            legacy_model="saved",
+        )
+        self.assertEqual(with_model.api_calls()[0]["model"], "saved")
+
+        unknown = _agent.CostLedger()
+        unknown.restore({"api_calls": [{"n": 1}], "api_calls_total": 1})
+        self.assertNotIn("model", unknown.api_calls()[0])
+
+    def test_model_cache_guard_is_independent_after_a_switch(self):
+        pricing = {"input": {"usd": 3.0}, "cache_input": {"usd": 0.3}}
+        models = [
+            {"id": "a", "model_spec": {"pricing": pricing}},
+            {"id": "b", "model_spec": {"pricing": pricing}},
+        ]
+        args = type("A", (), {
+            "session_max_spend": None, "cache_guard": "warn",
+        })()
+        ledger = _agent.usage_ledger(args, models, "a")
+        usage = {
+            "prompt_tokens": 3000, "completion_tokens": 1,
+            "prompt_tokens_details": {"cached_tokens": 0},
+        }
+        ledger.record(usage)
+        self.assertIsNone(ledger.cache_guard_event("a"))
+        ledger.record(usage)
+        self.assertIsNotNone(ledger.cache_guard_event("a"))
+        ledger.bind_model("b", models)
+        ledger.record(usage)
+        self.assertIsNone(ledger.cache_guard_event("b"))
+        ledger.record(usage)
+        self.assertIsNotNone(ledger.cache_guard_event("b"))
+
     def test_usage_factory_binds_code_cache_guard_only_when_requested(self):
         models = [{
             "id": "m",

@@ -845,7 +845,7 @@ class TestCodeCommand(unittest.TestCase):
         self.addCleanup(lambda: __import__("shutil").rmtree(zone, ignore_errors=True))
         return zone, _session
 
-    def _run_interactive(self, args, seq, inputs, zone):
+    def _run_interactive(self, args, seq, inputs, zone, *, stderr=None):
         from venice.commands import code
         fake, calls = _fake_openai_seq(seq)
         stdin = mock.MagicMock()
@@ -857,7 +857,7 @@ class TestCodeCommand(unittest.TestCase):
              mock.patch("builtins.input", side_effect=inputs), \
              mock.patch.object(sys, "stdin", stdin), \
              mock.patch.object(sys, "stdout", io.StringIO()), \
-             mock.patch.object(sys, "stderr", io.StringIO()):
+             mock.patch.object(sys, "stderr", stderr or io.StringIO()):
             rc = code._run(args)
         return rc, calls
 
@@ -874,16 +874,49 @@ class TestCodeCommand(unittest.TestCase):
             _session.save(stale)
         # Resume by id with an explicit --root: the leading system message must be
         # rebuilt against the NEW root, not the persisted stale one.
+        err = io.StringIO()
         rc, calls = self._run_interactive(
             _code_args(resume=stale.id, root=self.root, auto=True),
             [FakeToolCompletion("done")],           # one turn, no tool calls -> ends
-            ["carry on", "/exit"], zone,
+            ["carry on", "/exit"], zone, stderr=err,
         )
         self.assertEqual(rc, 0)
         sysmsg = calls[0]["messages"][0]
         self.assertEqual(sysmsg["role"], "system")
         self.assertIn(self.root, sysmsg["content"])
         self.assertNotIn("/nonexistent/oldroot", sysmsg["content"])
+        self.assertIn(
+            "code: resumed with a different system prompt; prompt cache will be cold",
+            err.getvalue(),
+        )
+        with open(Path(zone) / f"{stale.id}.json") as f:
+            usage = json.load(f)["usage"]
+        self.assertEqual(
+            usage["context_events"][0], {"kind": "resume_reseed", "after_n": 0}
+        )
+        self.assertNotIn("STALE", json.dumps(usage["context_events"]))
+
+    def test_identical_resume_prompt_emits_no_warning_or_event(self):
+        zone, _session = self._mk_zone()
+        rc, _ = self._run_interactive(
+            _code_args(task="first", root=self.root, interactive=True, auto=True),
+            [FakeToolCompletion("done")], ["/exit"], zone,
+        )
+        self.assertEqual(rc, 0)
+        saved = json.loads(next(Path(zone).glob("*.json")).read_text())
+
+        err = io.StringIO()
+        rc2, _ = self._run_interactive(
+            _code_args(resume=saved["id"], root=self.root, auto=True),
+            [], ["/exit"], zone, stderr=err,
+        )
+        self.assertEqual(rc2, 0)
+        self.assertNotIn("prompt cache will be cold", err.getvalue())
+        persisted = json.loads((Path(zone) / f"{saved['id']}.json").read_text())
+        self.assertNotIn(
+            "resume_reseed",
+            [event.get("kind") for event in persisted["usage"]["context_events"]],
+        )
 
     def test_resume_restores_saved_root_when_no_root_flag(self):
         zone, _session = self._mk_zone()

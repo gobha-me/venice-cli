@@ -517,6 +517,9 @@ def _dispatch_slash(line, messages, state, args, models, oai=None, gen_kwargs=No
             if rc is not None:
                 pass  # resolve_model printed why; keep the current model
             else:
+                ledger = state.get("ledger")
+                if ledger is not None:
+                    ledger.bind_model(new, models)
                 state["model"] = new
                 if state["tools_on"] and (
                     _agent.supports_function_calling(models, new) is False
@@ -660,7 +663,17 @@ def run(args, oai, openai, client, models, model, initial=None, *,
         gen_kwargs = _session.merge_gen_kwargs(session.gen_kwargs, gen_kwargs)
     # `venice code` rebuilds its system prompt against the live root each launch, so
     # on resume replace the persisted (stale) leading system message with the fresh one.
+    resume_reseeded = False
     if system_reseed and getattr(args, "system", None):
+        resume_reseeded = (
+            session is not None and _current_system(messages) != args.system
+        )
+        if resume_reseeded:
+            print(
+                f"{_session.command_from_label(label)}: resumed with a different "
+                "system prompt; prompt cache will be cold",
+                file=sys.stderr,
+            )
         _set_system(messages, args.system)
 
     # `--tools`/`--mcp` (or an injected `tools_session`) turns the REPL into an
@@ -710,7 +723,9 @@ def run(args, oai, openai, client, models, model, initial=None, *,
         # Carry usage across resume (#47/#75): seed the fresh, currently-priced
         # ledger with the saved totals so `/usage` and `/cost` are cumulative.
         if session is not None and session.usage:
-            state["ledger"].restore(session.usage)
+            state["ledger"].restore(session.usage, legacy_model=session.model)
+        if resume_reseeded:
+            state["ledger"].record_context_event({"kind": "resume_reseed"})
 
         # The active session (#47): the resumed one, or a freshly minted one.
         # --ephemeral means persist nothing -- so no active session at all, even on
