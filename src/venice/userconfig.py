@@ -699,17 +699,25 @@ _COMMAND_MAP = {
 }
 
 
-def resolve_default(command: str, key: str, doc=None):
-    """Value for a defaults key, per-command section overriding a global scalar.
-    None if unset. `key` is the config key (e.g. "model", "output_dir")."""
+def _resolve_default_with_source(command: str, key: str, doc=None):
+    """Return ``(value, dotted_source)`` for a config-backed default.
+
+    ``dotted_source`` names the exact winning key, so callers can distinguish a
+    command override (``defaults.chat.max_spend``) from a global fallback
+    (``defaults.max_spend``). An absent or explicit JSON ``null`` value is
+    unresolved and therefore has no source.
+    """
     if doc is None:
         doc = load_config()
     defaults = doc.get("defaults")
     if not isinstance(defaults, dict):
-        return None
+        return None, None
     section = defaults.get(command)
     if isinstance(section, dict) and key in section:
-        return section[key]
+        value = section[key]
+        if value is not None:
+            return value, f"defaults.{command}.{key}"
+        return None, None
     if key not in _GLOBAL_MAP:
         # Globals are an explicit ALLOW-LIST: only a `_GLOBAL_MAP` key may be
         # written as a top-level scalar. Anything a command section declares is
@@ -723,14 +731,21 @@ def resolve_default(command: str, key: str, doc=None):
         # fallthrough let a bare `defaults.model` retarget every command with a
         # `model` row. Both were undocumented; the section form still works and
         # is what the README has always shown.
-        return None
+        return None, None
     val = defaults.get(key)
     if isinstance(val, dict):  # a command section, not a global scalar
-        return None
-    return val
+        return None, None
+    return (val, f"defaults.{key}") if val is not None else (None, None)
 
 
-def config_defaults_for(section: str, impl, doc=None) -> dict:
+def resolve_default(command: str, key: str, doc=None):
+    """Value for a defaults key, per-command section overriding a global scalar.
+    None if unset. `key` is the config key (e.g. "model", "output_dir")."""
+    value, _ = _resolve_default_with_source(command, key, doc)
+    return value
+
+
+def config_defaults_for(section: str, impl, doc=None, *, sources=None) -> dict:
     """Config-backed defaults for a tool `impl`, as a kwargs dict (issue #58).
 
     Only keys in ``_COMMAND_MAP[section]`` (the #57 allow-list) whose ``dest`` the
@@ -739,6 +754,12 @@ def config_defaults_for(section: str, impl, doc=None) -> dict:
     skipped so tool building can't be broken by config. Callers layer this UNDER a
     tool's explicit args (precedence: explicit arg > config default > impl hardcoded
     default), the tool-path analogue of the CLI-side :func:`apply_defaults`.
+
+    When ``sources`` is a mutable mapping, each successfully returned kwarg is
+    also recorded as ``dest -> exact dotted config key``. This is additive:
+    existing callers still receive a plain kwargs dict, while a caller that must
+    distinguish host/model input from config can opt into provenance before it
+    applies the higher-precedence explicit arguments.
     """
     if doc is None:
         return {}
@@ -753,11 +774,13 @@ def config_defaults_for(section: str, impl, doc=None) -> dict:
     for key, (dest, coerce) in section_map.items():
         if dest not in params:
             continue  # tool doesn't take this preference
-        raw = resolve_default(section, key, doc)
+        raw, source = _resolve_default_with_source(section, key, doc)
         if raw is None:
             continue
         try:
             out[dest] = coerce(raw)
+            if sources is not None:
+                sources[dest] = source
         except (TypeError, ValueError) as e:
             # Skip it -- a bad config value must never break tool building -- but
             # say so. Silence here meant a typo'd key applied on the CLI and
@@ -788,20 +811,31 @@ def rows_for(command: str) -> dict:
 def apply_defaults(args, command: str, doc=None) -> None:
     """Fill config-backed defaults onto `args`, but only where the dest is still
     None (so an explicit CLI flag always wins -- mirrors image._resolve_preset).
-    Never raises: a bad config value is warned about and skipped."""
+    Never raises: a bad config value is warned about and skipped.
+
+    Successful fills are recorded on ``args._config_sources`` as
+    ``dest -> exact dotted config key``. Values already supplied by the CLI, a
+    restored session, or an environment layer are not config-sourced and are
+    therefore absent from the map.
+    """
     if doc is None:
         doc = load_config()
+    sources = getattr(args, "_config_sources", None)
+    if not isinstance(sources, dict):
+        sources = {}
+        setattr(args, "_config_sources", sources)
     mapping = rows_for(command)
     for key, (dest, coerce) in mapping.items():
         if not hasattr(args, dest):
             continue  # this command doesn't declare the flag
         if getattr(args, dest) is not None:
             continue  # CLI (or an earlier layer) already set it
-        raw = resolve_default(command, key, doc)
+        raw, source = _resolve_default_with_source(command, key, doc)
         if raw is None:
             continue
         try:
             setattr(args, dest, coerce(raw))
+            sources[dest] = source
         except (TypeError, ValueError) as e:
             # Include the coercer's message: for a `choices=` key that is the
             # list of legal values, which is what argparse would have printed.

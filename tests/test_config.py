@@ -146,6 +146,59 @@ class TestApplyDefaults(_Base):
         uc.apply_defaults(args2, "chat", doc)
         self.assertEqual(args2.model, "explicit")
 
+    def test_apply_records_exact_winning_config_paths(self):
+        doc = {"defaults": {
+            "max_spend": 1.0,
+            "chat": {"max_spend": 0.2, "model": "cfg-model"},
+        }}
+        args = argparse.Namespace(max_spend=None, model=None)
+        uc.apply_defaults(args, "chat", doc)
+        self.assertEqual(args.max_spend, 0.2)
+        self.assertEqual(args.model, "cfg-model")
+        self.assertEqual(args._config_sources, {
+            "max_spend": "defaults.chat.max_spend",
+            "model": "defaults.chat.model",
+        })
+
+        global_args = argparse.Namespace(max_spend=None)
+        uc.apply_defaults(global_args, "sfx", doc)
+        self.assertEqual(global_args.max_spend, 1.0)
+        self.assertEqual(
+            global_args._config_sources,
+            {"max_spend": "defaults.max_spend"},
+        )
+
+    def test_apply_records_only_successful_config_fills(self):
+        doc = {"defaults": {"chat": {
+            "model": "configured", "temperature": "not-a-number",
+        }}}
+        # A pre-populated value represents any higher-precedence layer, including
+        # CLI, restored session, or environment input. It is deliberately not
+        # classified as config-sourced.
+        args = argparse.Namespace(model="from-env", temperature=None, max_tokens=None)
+        with contextlib.redirect_stderr(io.StringIO()):
+            uc.apply_defaults(args, "chat", doc)
+        self.assertEqual(args.model, "from-env")
+        self.assertIsNone(args.temperature)
+        self.assertEqual(args._config_sources, {})
+
+        uc.apply_literals(args, max_tokens=123)
+        self.assertEqual(args.max_tokens, 123)
+        self.assertEqual(args._config_sources, {})
+
+    def test_apply_preserves_existing_provenance_entries(self):
+        args = argparse.Namespace(
+            model=None,
+            _config_sources={"system": "defaults.chat.system"},
+        )
+        uc.apply_defaults(
+            args, "chat", {"defaults": {"chat": {"model": "cfg-model"}}}
+        )
+        self.assertEqual(args._config_sources, {
+            "system": "defaults.chat.system",
+            "model": "defaults.chat.model",
+        })
+
     def test_tts_live_catalog_values_remain_config_backable(self):
         doc = {"defaults": {"tts": {
             "model": "tts-gradium-v1", "format": "opus",
@@ -1599,11 +1652,19 @@ class TestConfigDefaultsFor(unittest.TestCase):
         doc = {"defaults": {"image": {
             "hide_watermark": "true", "safe_mode": False, "steps": "12", "preset": "x",
         }}}
-        out = uc.config_defaults_for("image", _mcp.image_tool, doc)
+        sources = {}
+        out = uc.config_defaults_for(
+            "image", _mcp.image_tool, doc, sources=sources
+        )
         self.assertIs(out["hide_watermark"], True)   # _as_bool("true")
         self.assertIs(out["safe_mode"], False)
         self.assertEqual(out["steps"], 12)           # int("12")
         self.assertNotIn("preset", out)              # not an image_tool param
+        self.assertEqual(sources, {
+            "hide_watermark": "defaults.image.hide_watermark",
+            "safe_mode": "defaults.image.safe_mode",
+            "steps": "defaults.image.steps",
+        })
 
     def test_none_doc_and_unknown_section_are_empty(self):
         from venice.commands import _mcp
@@ -1620,9 +1681,15 @@ class TestConfigDefaultsFor(unittest.TestCase):
     def test_bad_value_is_skipped_not_raised(self):
         from venice.commands import _mcp
         doc = {"defaults": {"image": {"steps": "not-an-int", "safe_mode": False}}}
-        out = uc.config_defaults_for("image", _mcp.image_tool, doc)
+        sources = {}
+        out = uc.config_defaults_for(
+            "image", _mcp.image_tool, doc, sources=sources
+        )
         self.assertNotIn("steps", out)               # int("not-an-int") -> skipped
         self.assertIs(out["safe_mode"], False)       # the good key still lands
+        self.assertEqual(
+            sources, {"safe_mode": "defaults.image.safe_mode"}
+        )
 
     def test_browser_section_gates_by_signature(self):
         # #71: web_fetch/browser_capture share the `browser` section; each impl gets only
