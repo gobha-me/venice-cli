@@ -625,8 +625,8 @@ catalog), `/models` (list the available models, marking the current and the
 default), `/auto` and `/manual` (toggle auto-accepting paid/side-effecting tool
 calls for following turns), `/compact [N]` (summarize older history into one
 message, keeping the last `N` turns verbatim),
-`/cost` (this session's estimated spend so far, with the cache hit rate on the
-same line; `--session-max-spend` adds a
+`/cost` (this session's estimated spend so far, with the active model's
+current-run cache hit rate on the same line; `--session-max-spend` adds a
 cap), `/usage` (a token + cost breakdown for the session, keeping the
 cache-read/cache-write/uncached input split distinct so cache-heavy sessions
 cost out correctly — the split and the hit rate report `n/a` when the model's
@@ -637,8 +637,9 @@ governs `/cost` and both run footers — plus a
 for the time the CLI kept you waiting, measured from submitting a turn to
 getting the prompt back, so thinking time at the prompt is never counted; it
 accumulates across `--resume` — plus a **per-API-call trace** with a row per model
-call and a marker wherever compaction moved the prefix, which is what tells a cache
-that was cold from the start apart from one that decayed or is sawtoothing),
+call and a marker wherever compaction or a resume reseed moved the prefix, plus
+cumulative and current-run rows per model — which keeps a model switch or resume
+from averaging two unrelated cache histories together),
 `/reset` (clear history, keep the system prompt),
 `/save [file]` (write the transcript JSON; defaults to the `--resume` file),
 `/paste` (compose a multi-line message a line at a time, ending with `/end` —
@@ -705,6 +706,12 @@ for back-compat (it's imported into a fresh session, leaving the file untouched)
 Pass `--ephemeral` (alias `--no-save`) to run without persisting a session (which
 also makes the run unsteerable). `/save [file]` remains an explicit, separate
 transcript export.
+
+`venice code` rebuilds its root/tool-aware system prompt on resume. If those live
+instructions differ from the stored prompt, it keeps the live sandbox accurate,
+prints `code: resumed with a different system prompt; prompt cache will be cold`,
+and records a `resume_reseed` marker in `usage.context_events`. Prompt text and
+hashes are not copied into the usage record.
 
 #### Mid-run steering (`venice sessions send`)
 
@@ -1308,24 +1315,26 @@ always carry a `usage` blob in their session file — previously only
 `--session-max-spend` runs metered at all.
 
 **Watching the cache.** A prompt-cache collapse is a silent 3-5× cost event, so the
-hit rate rides that same footer (and `/cost`), not just `/usage`. It reports `cache
-n/a` when the model's usage block carried no cache fields at all — a printed
-percentage always means the provider measured something. The machine-readable half
-is `usage.cache_hit_percent`, a number 0-100 or `null`, in both the `--json` envelope
-and the session file:
+active model's current-run hit rate rides that same footer (and `/cost`), not just
+`/usage`. It reports `cache n/a` when the model's usage block carried no cache fields
+at all — a printed percentage always means the provider measured something. The
+machine-readable model dimensions are `usage.models` (cumulative session usage) and
+`usage.current_run_models` (only this process/resume leg), both keyed by exact model
+id. Each row carries `cache_hit_percent`, token/cost counters, reporting flags, and
+the main-loop API-call count:
 
 ```sh
-venice code --json "..." | jq '.usage.cache_hit_percent'
-jq -r '[input_filename, (.usage.cache_hit_percent|tostring)] | @tsv' \
-  ~/.config/venice/sessions/*.json      # date a regression across past runs
+venice code --json "..." | jq '.usage.current_run_models'
+jq '.usage.models' ~/.config/venice/sessions/<id>.json
 ```
 
-If you alert on that number, gate the alert on `.usage.cache_read_unreported` being
-`false`. A run where only *some* turns reported their cache fields yields a real but
-understated percentage, and the human line marks it `[partially unreported]` while the
-JSON does not — so an unguarded `cache_hit_percent < 50` pages you for a provider that
-merely went quiet. `VENICE_USAGE_RAW=1` dumps each response's raw `usage` block to
-stderr when you need to see which turns those were.
+The legacy top-level counters and `usage.cache_hit_percent` remain cumulative for
+JSON compatibility and as the `--session-max-spend` authority; do not use that
+cross-model percentage for cache forensics. Alert on a row under
+`current_run_models` and gate on that row's `cache_read_unreported` being `false`.
+A partially reported row is marked `[partially unreported]` in human output.
+`VENICE_USAGE_RAW=1` dumps each response's raw `usage` block to stderr when you need
+to see which turns those were.
 
 **Where the time went.** "The model is slow" and "my test suite is slow" call for
 completely different responses, so the wall figure carries a tool-time clause —
@@ -1409,14 +1418,17 @@ dispatches tools makes several API calls. The machine-readable half is
 
 ```sh
 # every call's hit rate, in order -- null means the provider reported nothing
-venice code --json "..." | jq '.usage.api_calls[] | {n, prompt_tokens, cache_read_tokens}'
+venice code --json "..." | jq '.usage.api_calls[] | {n, model, prompt_tokens, cache_read_tokens}'
 # did compaction fire, and what did it cost the prefix?
 jq '.usage.context_events' ~/.config/venice/sessions/<id>.json
 ```
 
 Rows are capped at the first 50 plus the most recent 200, so a long session keeps
 both its cold-start evidence and its current state; each row carries its `n`, so a
-jump in the sequence is itself the drop marker.
+jump in the sequence is itself the drop marker. Sessions saved before model-aware
+accounting are attributed to their saved session model when one is available; an
+import with no model provenance retains its cumulative totals without inventing a
+model bucket.
 
 `venice code` also watches that trace for the narrow total-collapse case. Once the
 selected model advertises `pricing.cache_input`, API call 2 or later has at least

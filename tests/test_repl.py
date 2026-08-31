@@ -198,6 +198,20 @@ class TestRepl(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(calls[0]["model"], "venice-uncensored")
 
+    def test_slash_model_switch_rebinds_ledger_pricing(self):
+        models = [
+            {"id": "old", "model_spec": {"pricing": {"input": {"usd": 1.0}}}},
+            {"id": "new", "model_spec": {"pricing": {"input": {"usd": 9.0}}}},
+        ]
+        args = _args(interactive=True)
+        ledger = _agent.usage_ledger(args, models, "old")
+        state = {"model": "old", "tools_on": False, "ledger": ledger}
+        with mock.patch.object(sys, "stderr", io.StringIO()):
+            _repl._dispatch_slash("/model new", [], state, args, models)
+        self.assertEqual(state["model"], "new")
+        self.assertEqual(ledger.model_id, "new")
+        self.assertEqual(ledger._in, 9.0 / 1_000_000)
+
     def test_slash_model_unknown_keeps_current(self):
         err = io.StringIO()
         rc, fake, calls = _run_repl(

@@ -232,6 +232,71 @@ def _as_float(v) -> float:
     return 0.0
 
 
+_MODEL_USAGE_NUMERIC_FIELDS = (
+    "total",
+    "prompt_tokens",
+    "completion_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "reasoning_tokens",
+    "api_calls_total",
+)
+_MODEL_USAGE_FLAG_FIELDS = (
+    "unpriced",
+    "cache_read_unreported",
+    "cache_write_unreported",
+)
+
+
+def _new_model_usage_row() -> dict:
+    """One model's main-loop usage counters (#104)."""
+    return {
+        "total": 0.0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "reasoning_tokens": 0,
+        "api_calls_total": 0,
+        "unpriced": False,
+        "cache_read_unreported": False,
+        "cache_write_unreported": False,
+    }
+
+
+def _restore_model_usage_row(dest: dict, source) -> None:
+    """Add a tolerant persisted model row into ``dest`` (#104)."""
+    if not isinstance(source, dict):
+        return
+    dest["total"] += _as_float(source.get("total"))
+    for key in _MODEL_USAGE_NUMERIC_FIELDS[1:]:
+        dest[key] += _as_int(source.get(key))
+    for key in _MODEL_USAGE_FLAG_FIELDS:
+        if source.get(key):
+            dest[key] = True
+
+
+def _model_cache_hit_percent(row, *, round_to=None):
+    """A model row's three-state cache hit percentage (#104)."""
+    if not isinstance(row, dict):
+        return None
+    prompt = _as_int(row.get("prompt_tokens"))
+    cached = _as_int(row.get("cache_read_tokens"))
+    if prompt == 0:
+        return None
+    if row.get("cache_read_unreported") and cached == 0:
+        return None
+    pct = cached / prompt * 100.0
+    return pct if round_to is None else round(pct, round_to)
+
+
+def _public_model_usage_row(row) -> dict:
+    """Copy one model row and add its derived cache percentage (#104)."""
+    out = dict(row) if isinstance(row, dict) else _new_model_usage_row()
+    out["cache_hit_percent"] = _model_cache_hit_percent(out, round_to=1)
+    return out
+
+
 def _detail(usage: dict, section: str, key: str):
     """A nested usage sub-field (e.g. ``prompt_tokens_details.cached_tokens``).
 
@@ -370,7 +435,7 @@ class CostLedger:
 
     def __init__(self, max_spend: Optional[float] = None,
                  max_tokens: Optional[int] = None, *, mirror=None,
-                 cache_guard: str = "off"):
+                 cache_guard: str = "off", model_id=None, models=None):
         # A non-positive cap means "uncapped" (mirrors --max-tool-calls 0).
         cap = _numeric.finite_float(max_spend) if max_spend is not None else None
         self.max_spend = cap if (cap is not None and cap > 0) else None
@@ -389,6 +454,15 @@ class CostLedger:
         # is still live.
         self.cache_guard = cache_guard
         self._cache_guard_fired = False
+        self._cache_guard_fired_models = set()
+        # #104: production ledgers are bound to an exact model id and retain the
+        # catalog so `/model` can atomically switch both routing and pricing. Bare
+        # ledgers remain supported for focused tests and internal callers.
+        self.model_id = None
+        self._models = models
+        self.models: Dict[str, dict] = {}
+        # Never restored: this is the current process/resume leg, not session history.
+        self.current_run_models: Dict[str, dict] = {}
         self.total = 0.0
         self.prompt_tokens = 0
         self.completion_tokens = 0
@@ -503,6 +577,8 @@ class CostLedger:
         self._cache_in = None    # per-token cache-read rate (USD); None -> use _in
         self._cache_write = None  # per-token cache-write rate (USD); None -> use _in
         self.invalid_pricing = False
+        if model_id is not None:
+            self.bind_model(model_id, models)
 
     def bind_pricing(self, pricing) -> None:
         """Set the per-token rates from a catalog `model_spec.pricing` block.
@@ -519,6 +595,15 @@ class CostLedger:
         except ValueError:
             self._in = self._out = self._cache_in = self._cache_write = None
             self.invalid_pricing = True
+
+    def bind_model(self, model_id, models=None) -> None:
+        """Select the active model and atomically rebind its catalog pricing (#104)."""
+        if models is not None:
+            self._models = models
+        self.model_id = str(model_id) if model_id is not None else None
+        # Always bind, including the missing-price case, so switching away from a
+        # priced model cannot accidentally retain the previous model's rates.
+        self.bind_pricing(_pricing_for(self._models, self.model_id))
 
     def to_dict(self) -> dict:
         """Serialize the running accumulators for cross-resume persistence (#47/#75).
@@ -578,9 +663,18 @@ class CostLedger:
             # `json.dump` while the ledger is still live -- cannot reach back in here.
             "api_calls": [dict(r) for r in self.api_calls()],
             "context_events": [dict(e) for e in self.context_events],
+            # #104: additive public dimensions. `models` is cumulative session usage;
+            # `current_run_models` begins empty after every restore.
+            "models": {
+                k: _public_model_usage_row(self.models[k]) for k in sorted(self.models)
+            },
+            "current_run_models": {
+                k: _public_model_usage_row(self.current_run_models[k])
+                for k in sorted(self.current_run_models)
+            },
         }
 
-    def restore(self, d) -> None:
+    def restore(self, d, *, legacy_model=None) -> None:
         """Seed the accumulators from a :meth:`to_dict` snapshot (resume, #47).
 
         Additive onto the current (freshly-priced) ledger so a session resumed
@@ -590,6 +684,11 @@ class CostLedger:
         """
         if not isinstance(d, dict):
             return
+        # A restore is the boundary between process legs. These diagnostics must never
+        # inherit the previous leg, even if a caller reuses a ledger object.
+        self.current_run_models.clear()
+        self._cache_guard_fired_models.clear()
+        self._cache_guard_fired = False
         self.total += _as_float(d.get("total"))
         self.prompt_tokens += _as_int(d.get("prompt_tokens"))
         self.completion_tokens += _as_int(d.get("completion_tokens"))
@@ -685,10 +784,13 @@ class CostLedger:
                 for row in raw_calls:
                     if not isinstance(row, dict):
                         continue  # tolerant PER ROW, like `tools` above
+                    row = dict(row)
+                    if legacy_model and not row.get("model"):
+                        row["model"] = str(legacy_model)
                     if len(self._calls_head) < self._CALLS_HEAD:
-                        self._calls_head.append(dict(row))
+                        self._calls_head.append(row)
                     else:
-                        self._calls_tail.append(dict(row))
+                        self._calls_tail.append(row)
         if not self.context_events:
             raw_events = d.get("context_events")
             if isinstance(raw_events, list):
@@ -706,6 +808,29 @@ class CostLedger:
         self.api_calls_total = max(
             self.api_calls_total, len(self._calls_head) + len(self._calls_tail)
         )
+        # #104: new envelopes carry exact model buckets. Older envelopes are attributed
+        # to the session's SAVED model (passed by the REPL), never to a command-line
+        # override selected for the new leg. If provenance is unavailable the aggregate
+        # above remains authoritative and no model id is invented.
+        raw_models = d.get("models")
+        if isinstance(raw_models, dict):
+            for model, row in raw_models.items():
+                key = str(model).strip()
+                if not key or not isinstance(row, dict):
+                    continue
+                _restore_model_usage_row(
+                    self.models.setdefault(key, _new_model_usage_row()), row
+                )
+        elif legacy_model:
+            _restore_model_usage_row(
+                self.models.setdefault(str(legacy_model), _new_model_usage_row()),
+                {
+                    key: d.get(key)
+                    for key in _MODEL_USAGE_NUMERIC_FIELDS + _MODEL_USAGE_FLAG_FIELDS
+                },
+            )
+        # Deliberately ignore persisted `current_run_models`: a resume starts a fresh
+        # diagnostic leg while the cumulative `models` map above survives.
 
     def record_turn(self, seconds) -> None:
         """Add one blocked window's wall-clock and count the turn (#81).
@@ -791,8 +916,8 @@ class CostLedger:
         """How many trace rows the cap discarded (#99); 0 when nothing was dropped."""
         return self.api_calls_total - len(self._calls_head) - len(self._calls_tail)
 
-    def record_compaction(self, event: dict) -> None:
-        """Log one prefix-affecting event, anchored to the trace (#99).
+    def record_context_event(self, event: dict) -> None:
+        """Log one context-affecting event, anchored to the trace (#99/#104).
 
         `after_n` is the ordinal of the last call recorded BEFORE the event, so the
         measured post-compaction prompt size is simply the next row's `prompt_tokens` --
@@ -808,6 +933,10 @@ class CostLedger:
             after_n=self.api_calls_total,
             **row,
         ))
+
+    def record_compaction(self, event: dict) -> None:
+        """Compatibility wrapper for the compaction worker's duck-typed hook."""
+        self.record_context_event(dict(event, kind="compaction"))
 
     def record_bucket(self, name: str, *, cost: float = 0.0,
                       prompt_tokens: int = 0, completion_tokens: int = 0,
@@ -940,6 +1069,31 @@ class CostLedger:
         """
         return self.total + self.bucket_cost()
 
+    def _record_model_usage(self, *, usage_present: bool, cost: float,
+                            prompt_tokens: int, completion_tokens: int,
+                            cache_read_tokens: int, cache_write_tokens: int,
+                            reasoning_tokens: int, cache_read_reported: bool,
+                            cache_write_reported: bool, unpriced: bool) -> None:
+        """Accumulate one main-loop call into both #104 model views."""
+        if not self.model_id:
+            return
+        for rows in (self.models, self.current_run_models):
+            row = rows.setdefault(self.model_id, _new_model_usage_row())
+            row["api_calls_total"] += 1
+            if not usage_present:
+                continue
+            row["total"] += cost
+            row["prompt_tokens"] += prompt_tokens
+            row["completion_tokens"] += completion_tokens
+            row["cache_read_tokens"] += cache_read_tokens
+            row["cache_write_tokens"] += cache_write_tokens
+            row["reasoning_tokens"] += min(reasoning_tokens, completion_tokens)
+            row["unpriced"] = row["unpriced"] or unpriced
+            if not cache_read_reported:
+                row["cache_read_unreported"] = True
+            if not cache_write_reported:
+                row["cache_write_unreported"] = True
+
     def record(self, usage, *, seconds=None, bucket=None) -> float:
         """Add one turn's `usage` (dict or SDK obj); return this turn's cost.
 
@@ -995,6 +1149,7 @@ class CostLedger:
         # prefix, so it gets a row -- with null tokens rather than a fabricated 0, the
         # #98 rule applied one level down.
         pt = ct = raw_read = raw_write = None
+        cache_read = cache_write = reasoning = 0
         if usage is not None:
             pt = _as_int(usage.get("prompt_tokens"))
             ct = _as_int(usage.get("completion_tokens"))
@@ -1050,6 +1205,19 @@ class CostLedger:
             if bucket is None:
                 self.unpriced = unpriced_turn or self.unpriced
                 self.total += cost
+        if bucket is None:
+            self._record_model_usage(
+                usage_present=usage is not None,
+                cost=cost,
+                prompt_tokens=_as_int(pt),
+                completion_tokens=_as_int(ct),
+                cache_read_tokens=cache_read,
+                cache_write_tokens=cache_write,
+                reasoning_tokens=reasoning,
+                cache_read_reported=raw_read is not None,
+                cache_write_reported=raw_write is not None,
+                unpriced=unpriced_turn,
+            )
         # The two landing sites are structurally exclusive, and the method still has
         # exactly ONE return: an off-loop call must NOT get a trace row, and a main-loop
         # call must get one on every path including the no-usage shapes. An early return
@@ -1067,7 +1235,7 @@ class CostLedger:
                 unpriced=unpriced_turn, unreported=usage is None,
             )
         else:
-            self._append_call({
+            call = {
                 "prompt_tokens": pt,
                 "cache_read_tokens": raw_read,
                 # Recorded although #99 only asked for cache-READ: a cache-WRITE spike at
@@ -1079,7 +1247,10 @@ class CostLedger:
                 # Rounded like `record_turn`'s, so the persisted envelope stays tidy.
                 # None stays None -- an unstamped window is unknown, not instant.
                 "seconds": None if seconds is None else round(_as_float(seconds), 3),
-            })
+            }
+            if self.model_id:
+                call["model"] = self.model_id
+            self._append_call(call)
         # #117: a SUBAGENT ledger also banks this call into its parent's off-loop bucket.
         # Placed at the one chokepoint every rail's usage already flows through, so the
         # two rails that call the API outside `run_loop` (`_review._retry_for_verdict`,
@@ -1122,22 +1293,36 @@ class CostLedger:
         Missing pricing cannot support either the "advertised" claim or the estimated
         missed discount. Invalid pricing is handled earlier by ``invalid_pricing``.
         """
-        if self.cache_guard == "off" or self._cache_guard_fired:
+        if self.cache_guard == "off":
             return None
+        bound_model = self.model_id or model
+        if self.model_id:
+            if bound_model in self._cache_guard_fired_models:
+                return None
+            model_calls = _as_int(
+                self.current_run_models.get(bound_model, {}).get("api_calls_total")
+            )
+        else:
+            if self._cache_guard_fired:
+                return None
+            model_calls = self.api_calls_total
         rows = self.api_calls()
         if not rows or self._in is None or self._cache_in is None:
             return None
         row = rows[-1]
         prompt_tokens = row.get("prompt_tokens")
         if (
-            row.get("n", 0) < 2
+            model_calls < 2
             or not isinstance(prompt_tokens, int)
             or prompt_tokens < CACHE_GUARD_MIN_PROMPT_TOKENS
             or row.get("cache_read_tokens") != 0
         ):
             return None
 
-        self._cache_guard_fired = True
+        if self.model_id:
+            self._cache_guard_fired_models.add(bound_model)
+        else:
+            self._cache_guard_fired = True
         if self._cache_in == 0:
             advertised = "free cache input"
         elif self._in <= self._cache_in:
@@ -1149,7 +1334,7 @@ class CostLedger:
         amount = f"${missed:.4f}" if missed < 1 else f"${missed:.2f}"
         return CacheGuardEvent(
             self.cache_guard,
-            f"cache: {model} advertises {advertised} but returned 0 cached "
+            f"cache: {bound_model} advertises {advertised} but returned 0 cached "
             f"tokens on API call {row['n']}; this run is paying full input price "
             f"(est. +{amount} so far)",
         )
@@ -1208,15 +1393,59 @@ class CostLedger:
         Vocabulary is `usage_report`'s verbatim -- an operator can run `/cost` and
         `/usage` seconds apart, and two words for one state reads as two states.
         """
-        pct = self.cache_hit_percent()
+        row = self.current_run_models.get(self.model_id) if self.model_id else None
+        if self.model_id and row is None:
+            return ""
+        pct = (_model_cache_hit_percent(row) if row is not None
+               else self.cache_hit_percent())
+        unreported = (bool(row.get("cache_read_unreported")) if row is not None
+                      else self.cache_read_unreported)
         if pct is None:
             # Distinguish "the provider never told us" (worth saying on a run footer --
             # it is the difference between a cache collapse and a blind spot) from
             # "nothing was recorded", which has nothing to report at all.
-            return "cache n/a" if self.cache_read_unreported else ""
-        if self.cache_read_unreported:
+            return "cache n/a" if unreported else ""
+        if unreported:
             return f"cache {pct:.1f}% hit [partially unreported]"
         return f"cache {pct:.1f}% hit"
+
+    @staticmethod
+    def _model_usage_lines_for(title: str, rows: dict) -> List[str]:
+        """Render one bounded per-model accounting section (#104)."""
+        if not rows:
+            return []
+        lines = [f"  {title}:"]
+        for model in sorted(rows):
+            row = rows[model] if isinstance(rows[model], dict) else {}
+            pct = _model_cache_hit_percent(row)
+            if pct is None:
+                cache = (
+                    "n/a (no cache fields reported)"
+                    if row.get("cache_read_unreported")
+                    else "n/a (no input tokens)"
+                )
+            elif row.get("cache_read_unreported"):
+                cache = f"{pct:.1f}% [partially unreported]"
+            else:
+                cache = f"{pct:.1f}%"
+            cost = _as_float(row.get("total"))
+            money = "unpriced" if row.get("unpriced") and not cost else f"${cost:.4f}"
+            lines.append(
+                f"    {model}: {_as_int(row.get('prompt_tokens')):,} in, "
+                f"{_as_int(row.get('completion_tokens')):,} out, "
+                f"cache hit rate: {cache}, {money}, "
+                f"{_as_int(row.get('api_calls_total'))} call(s)"
+            )
+        return lines
+
+    def _model_usage_lines(self) -> List[str]:
+        """Cumulative and current-resume-leg model views (#104)."""
+        return (
+            self._model_usage_lines_for("models (session)", self.models)
+            + self._model_usage_lines_for(
+                "models (current run)", self.current_run_models
+            )
+        )
 
     def summary(self, *, cache: bool = False) -> str:
         """A one-line human-readable total (for stderr / --json).
@@ -1348,6 +1577,7 @@ class CostLedger:
                 # real spend that the token counters above cannot account for.
                 + (self._cost_lines() if self.billed_total() > 0 else [])
                 + ([self._timing_line()] if self.turns else [])
+                + self._model_usage_lines()
                 + self._tool_lines() + self._call_lines() + self._bucket_lines()
             )
         uncached = self.prompt_tokens - self.cache_read_tokens - self.cache_write_tokens
@@ -1376,7 +1606,9 @@ class CostLedger:
         # #100: the rate itself comes from `cache_hit_percent` so `/usage`, `/cost` and
         # both run footers cannot drift apart on what "unknown" means.
         hit = self.cache_hit_percent()
-        if hit is None:
+        if self.models:
+            lines.append("  cache hit rate: see per-model breakdown")
+        elif hit is None:
             # Two distinct unknowns. `no input tokens` is only reachable past the
             # early-return above with completion tokens but no prompt tokens -- which
             # `restore()` can seed from a partial envelope, since (unlike `record`) it
@@ -1392,6 +1624,7 @@ class CostLedger:
         else:
             lines.append(f"  cache hit rate: {hit:.1f}%")
         lines.extend(self._cost_lines())
+        lines.extend(self._model_usage_lines())
         if self.turns:  # #81
             lines.append(self._timing_line())
         lines.extend(self._tool_lines())  # #82 -- own gate; see `_tool_lines`
@@ -1659,6 +1892,11 @@ class CostLedger:
     @staticmethod
     def _event_lines(ev: dict) -> List[str]:
         """The one-or-two-line `/usage` marker for a context event (#99)."""
+        if ev.get("kind") == "resume_reseed":
+            return [
+                "    -- system prompt reseeded on resume "
+                f"after #{ev.get('after_n', '?')}; cache prefix is cold"
+            ]
         out = [f"    -- compacted ({ev.get('trigger', 'auto')}) "
                f"after #{ev.get('after_n', '?')}: "
                f"{ev.get('messages_before', '?')} -> {ev.get('messages_after', '?')} msgs, "
@@ -1727,14 +1965,10 @@ def _build_ledger(cap, models, model_id, *, max_tokens=None,
     "look this model up in the catalog", and a second site would be a second place
     to forget the lookup (which is how every rail ended up unpriced before #117).
     """
-    ledger = CostLedger(
+    return CostLedger(
         max_spend=cap, max_tokens=max_tokens, mirror=mirror,
-        cache_guard=cache_guard,
+        cache_guard=cache_guard, model_id=model_id, models=models,
     )
-    pricing = _pricing_for(models, model_id)
-    if pricing is not None:
-        ledger.bind_pricing(pricing)
-    return ledger
 
 
 def ledger_from_args(args, models, model_id) -> Optional[CostLedger]:
