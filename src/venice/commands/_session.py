@@ -86,6 +86,7 @@ class Session:
     label: str = "venice chat"
     max_tool_calls: Optional[int] = None
     usage: Optional[dict] = None
+    resolved_models: dict = field(default_factory=dict)
     messages: list = field(default_factory=list)
 
     def to_envelope(self) -> dict:
@@ -102,6 +103,7 @@ class Session:
             "label": self.label,
             "max_tool_calls": self.max_tool_calls,
             "usage": self.usage,
+            "resolved_models": self.resolved_models,
             "messages": self.messages,
         }
 
@@ -122,20 +124,25 @@ class Session:
             label=d.get("label") or "venice chat",
             max_tool_calls=d.get("max_tool_calls"),
             usage=d.get("usage") if isinstance(d.get("usage"), dict) else None,
+            resolved_models=(
+                dict(d.get("resolved_models"))
+                if isinstance(d.get("resolved_models"), dict) else {}
+            ),
             messages=_validate_messages(d.get("messages") or []),
         )
 
 
 def new_session(command: str, *, label: str = "venice chat", model=None,
                 system=None, gen_kwargs=None, root=None, max_tool_calls=None,
-                messages=None) -> Session:
+                messages=None, resolved_models=None) -> Session:
     """Mint a brand-new active session (fresh id + timestamps)."""
     now = _now_iso()
     return Session(
         id=new_id(), command=command, created=now, updated=now,
         model=model, system=system,
         gen_kwargs=dict(gen_kwargs or {}), root=root, label=label,
-        max_tool_calls=max_tool_calls, messages=list(messages or []),
+        max_tool_calls=max_tool_calls,
+        resolved_models=dict(resolved_models or {}), messages=list(messages or []),
     )
 
 

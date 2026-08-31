@@ -50,6 +50,7 @@ def _code_args(**ov):
         auto_compact=None, compact_threshold=None, compact_keep_turns=None,
         session_max_spend=None, cache_guard=None, cont=None, ephemeral=None,
         review=None, review_model=None, review_rounds=None,   # #80 part 1a
+        web_search=None, web_search_model=None,
         browser=None, browser_allow=None, browser_deny=None,
     )
     base.update(ov)
@@ -64,6 +65,144 @@ def _write_call(cid, path, content):
 def _mem_call(cid, name, content, scope="project"):
     return _FnCall(cid, "memory_write",
                    json.dumps({"name": name, "content": content, "scope": scope}))
+
+
+class TestAuxiliaryModelResolution(unittest.TestCase):
+    _UNSET = object()
+    MODELS = [
+        {"id": "llama-author", "type": "text", "model_spec": {
+            "traits": ["default"],
+            "capabilities": {
+                "supportsFunctionCalling": True, "supportsWebSearch": False,
+            },
+        }},
+        {"id": "qwen-reviewer", "type": "text", "model_spec": {
+            "traits": [], "capabilities": {"supportsFunctionCalling": True},
+        }},
+        {"id": "searcher", "type": "text", "model_spec": {
+            "traits": [], "capabilities": {
+                "supportsFunctionCalling": True, "supportsWebSearch": True,
+            },
+        }},
+        {"id": "no-tools", "type": "text", "model_spec": {
+            "traits": [], "capabilities": {
+                "supportsFunctionCalling": False, "supportsWebSearch": False,
+            },
+        }},
+    ]
+
+    @staticmethod
+    def _args(**overrides):
+        values = {
+            "review": None, "review_model": None,
+            "web_search": None, "web_search_model": None,
+        }
+        values.update(overrides)
+        return argparse.Namespace(**values)
+
+    def _resolve(self, args, models=_UNSET):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            state, rc = code_command._resolve_auxiliary_models(
+                args, self.MODELS if models is self._UNSET else models, "llama-author",
+            )
+        return state, rc, err.getvalue()
+
+    def test_auto_picks_are_announced_and_structured(self):
+        state, rc, err = self._resolve(self._args(review=True, web_search=True))
+        self.assertIsNone(rc)
+        self.assertEqual(state["review_model"], "qwen-reviewer")
+        self.assertEqual(state["web_search_model"], "searcher")
+        self.assertEqual(state["resolved_models"], {
+            "review": {"id": "qwen-reviewer", "source": "auto"},
+            "web_search": {"id": "searcher", "source": "auto"},
+        })
+        self.assertIn("review model: qwen-reviewer (source: auto)", err)
+        self.assertIn("web-search model: searcher (source: auto)", err)
+
+    def test_flag_and_exact_config_provenance_are_distinct(self):
+        args = self._args(
+            review=True, review_model="qwen-reviewer",
+            web_search=True, web_search_model="searcher",
+            _config_sources={
+                "web_search_model": "defaults.code.web_search_model",
+            },
+        )
+        state, rc, err = self._resolve(args)
+        self.assertIsNone(rc)
+        self.assertEqual(state["resolved_models"], {
+            "review": {"id": "qwen-reviewer", "source": "flag"},
+            "web_search": {
+                "id": "searcher", "source": "config",
+                "config_key": "defaults.code.web_search_model",
+            },
+        })
+        self.assertIn("source: flag --review-model", err)
+        self.assertIn("source: config defaults.code.web_search_model", err)
+
+    def test_unknown_review_model_exits_six(self):
+        state, rc, err = self._resolve(
+            self._args(review=True, review_model="typo-reviewer"),
+        )
+        self.assertIsNone(state)
+        self.assertEqual(rc, 6)
+        self.assertIn("unknown review model 'typo-reviewer'", err)
+
+    def test_unknown_config_web_model_names_the_durable_fix(self):
+        args = self._args(
+            web_search=True, web_search_model="retired-searcher",
+            _config_sources={
+                "web_search_model": "defaults.code.web_search_model",
+            },
+        )
+        state, rc, err = self._resolve(args)
+        self.assertIsNone(state)
+        self.assertEqual(rc, 6)
+        self.assertIn("unknown web-search model 'retired-searcher'", err)
+        self.assertIn("venice config unset defaults.code.web_search_model", err)
+
+    def test_known_incapable_models_fail_at_startup(self):
+        cases = [
+            (self._args(review=True, review_model="no-tools"),
+             "does not support function calling"),
+            (self._args(web_search=True, web_search_model="no-tools"),
+             "does not advertise supportsWebSearch"),
+        ]
+        for args, message in cases:
+            with self.subTest(message=message):
+                state, rc, err = self._resolve(args)
+                self.assertIsNone(state)
+                self.assertEqual(rc, 2)
+                self.assertIn(message, err)
+
+    def test_no_capable_web_model_fails_before_tool_use(self):
+        models = [self.MODELS[0], self.MODELS[1], self.MODELS[3]]
+        state, rc, err = self._resolve(self._args(web_search=True), models=models)
+        self.assertIsNone(state)
+        self.assertEqual(rc, 2)
+        self.assertIn("no web-search-capable model available", err)
+
+    def test_unverifiable_catalog_preserves_attempt_anyway_behavior(self):
+        state, rc, err = self._resolve(
+            self._args(review=True, web_search=True), models=None,
+        )
+        self.assertIsNone(rc)
+        self.assertEqual(state["review_model"], "llama-author")
+        self.assertEqual(state["web_search_model"], "llama-author")
+        self.assertIn("could not verify function-calling support", err)
+
+    def test_disabled_rails_ignore_stale_unused_defaults(self):
+        args = self._args(
+            review_model="retired-reviewer", web_search_model="retired-searcher",
+            _config_sources={
+                "review_model": "defaults.code.review_model",
+                "web_search_model": "defaults.code.web_search_model",
+            },
+        )
+        state, rc, err = self._resolve(args)
+        self.assertIsNone(rc)
+        self.assertEqual(state["resolved_models"], {})
+        self.assertEqual(err, "")
 
 
 class TestCodeCommand(unittest.TestCase):
@@ -592,6 +731,48 @@ class TestCodeCommand(unittest.TestCase):
         self.assertTrue(env["acceptance"]["passed"])
         self.assertEqual(env["acceptance"]["verdict"], "pass")
         self.assertEqual(env["root"], self.root)
+        self.assertEqual(env["resolved_models"], {})
+
+    def test_plan_only_json_records_auxiliary_model_provenance(self):
+        out, err = io.StringIO(), io.StringIO()
+        rc, calls = self._run(
+            _code_args(
+                task="x", root=self.root, plan_only=True, json=True,
+                review=True, review_model="llama-3.3-70b",
+            ),
+            [FakeToolCompletion("plan text")], stdout=out, stderr=err,
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(json.loads(out.getvalue())["resolved_models"], {
+            "review": {"id": "llama-3.3-70b", "source": "flag"},
+        })
+        self.assertIn("source: flag --review-model", err.getvalue())
+
+    def test_full_json_and_session_share_resolved_models(self):
+        out = io.StringIO()
+        selection = {
+            "review": {"id": "llama-3.3-70b", "source": "flag"},
+        }
+        seq = [
+            FakeToolCompletion("plan text"),
+            FakeToolCompletion("done"),
+            FakeToolCompletion("ACCEPTANCE: PASS"),
+        ]
+        rc, _calls = self._run(
+            _code_args(
+                task="x", root=self.root, auto=True, json=True,
+                review=True, review_model="llama-3.3-70b",
+            ),
+            seq, stdout=out,
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(json.loads(out.getvalue())["resolved_models"], selection)
+        session_files = list(Path(self._sess_dir).glob("*.json"))
+        self.assertEqual(len(session_files), 1)
+        self.assertEqual(
+            json.loads(session_files[0].read_text())["resolved_models"], selection,
+        )
 
     # --- --no-plan skips plan + verify ---
     def test_no_plan_executes_directly(self):
@@ -625,6 +806,7 @@ class TestCodeCommand(unittest.TestCase):
             captured["root"] = root
             captured["system_reseed"] = system_reseed
             captured["ledger"] = kw.get("ledger")
+            captured["resolved_models"] = kw.get("resolved_models")
             captured["gen_kwargs"] = gen_kwargs
             return 0
 
@@ -648,6 +830,7 @@ class TestCodeCommand(unittest.TestCase):
         self.assertEqual(captured["max_tool_calls"], code._DEFAULT_MAX_TOOL_CALLS)
         self.assertTrue(captured["system_reseed"])       # code always reseeds (#47)
         self.assertEqual(captured["root"], self.root)
+        self.assertEqual(captured["resolved_models"], {})
         # #117: the REPL is HANDED the hoisted ledger rather than building its own,
         # because the rails already mirror into that object.
         self.assertIsNotNone(captured["ledger"])

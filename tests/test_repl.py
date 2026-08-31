@@ -980,6 +980,35 @@ class TestRepl(unittest.TestCase):
             self.assertEqual(rc2, 0)
             self.assertIn("over 2 turn(s)", err.getvalue())
 
+    def test_resume_replaces_stale_auxiliary_model_metadata(self):
+        from venice.commands import _session
+
+        selection = {"review": {"id": "reviewer", "source": "auto"}}
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.dict(os.environ, {"VENICE_SESSIONS_DIR": d}), \
+                mock.patch("builtins.input", return_value="/exit"), \
+                mock.patch.object(sys, "stdout", io.StringIO()), \
+                mock.patch.object(sys, "stderr", io.StringIO()):
+            session = _session.new_session(
+                "code", model="author", resolved_models={
+                    "web_search": {"id": "stale", "source": "auto"},
+                },
+            )
+            rc = _repl.run(
+                _args(interactive=True), mock.MagicMock(), mock.MagicMock(),
+                None, [], "author", session=session, resolved_models=selection,
+            )
+            self.assertEqual(rc, 0)
+            self.assertEqual(_session.load(session.id, "code").resolved_models,
+                             selection)
+
+            rc = _repl.run(
+                _args(interactive=True), mock.MagicMock(), mock.MagicMock(),
+                None, [], "author", session=session, resolved_models={},
+            )
+            self.assertEqual(rc, 0)
+            self.assertEqual(_session.load(session.id, "code").resolved_models, {})
+
     def test_slash_compact_then_turn_sees_summary(self):
         with tempfile.TemporaryDirectory() as d:
             resume = self._resume_history(d, pairs=6)

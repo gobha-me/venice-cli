@@ -62,6 +62,24 @@ class TestStore(_Base):
         self.assertEqual(r.usage["cache_read_tokens"], 4)
         self.assertEqual([m["content"] for m in r.messages], ["hi"])
 
+    def test_resolved_models_round_trip_and_old_envelopes_default_empty(self):
+        selection = {
+            "review": {"id": "reviewer", "source": "auto"},
+            "web_search": {
+                "id": "searcher", "source": "config",
+                "config_key": "defaults.code.web_search_model",
+            },
+        }
+        sess = self._mk(command="code", resolved_models=selection)
+        S.save(sess)
+        self.assertEqual(S.load(sess.id, "code").resolved_models, selection)
+
+        old = sess.to_envelope()
+        old.pop("resolved_models")
+        self.assertEqual(S.Session.from_envelope(old).resolved_models, {})
+        old["resolved_models"] = ["not", "a", "mapping"]
+        self.assertEqual(S.Session.from_envelope(old).resolved_models, {})
+
     def test_save_rejects_non_finite_usage_without_replacing_destination(self):
         sess = self._mk()
         path = S.save(sess)
