@@ -121,6 +121,42 @@ class TestFakeServerViaOpenAI(_NoProxyCase):
         self.assertEqual(out.choices[0].message.content, "HELLO-FROM-FAKE")
         self.assertEqual(out.usage.total_tokens, 14)
 
+    def test_non_streamed_tool_call_completion(self):
+        self.api.reply_tool_call("venice_models", {"type": "image"})
+        out = self.oai.chat.completions.create(
+            model="llama-3.3-70b",
+            messages=[{"role": "user", "content": "find an image model"}],
+        )
+        choice = out.choices[0]
+        self.assertEqual(choice.finish_reason, "tool_calls")
+        self.assertIsNone(choice.message.content)
+        self.assertEqual(len(choice.message.tool_calls), 1)
+        call = choice.message.tool_calls[0]
+        self.assertEqual(call.id, "call_fake_0")
+        self.assertEqual(call.type, "function")
+        self.assertEqual(call.function.name, "venice_models")
+        self.assertEqual(json.loads(call.function.arguments), {"type": "image"})
+
+    def test_multiple_tool_calls_preserve_order_and_unique_ids(self):
+        self.api.reply_tool_calls([
+            ("venice_models", {"type": "text"}),
+            ("venice_model_details", {"model": "llama-3.3-70b"}),
+        ])
+        out = self.oai.chat.completions.create(
+            model="llama-3.3-70b",
+            messages=[{"role": "user", "content": "compare models"}],
+        )
+        calls = out.choices[0].message.tool_calls
+        self.assertEqual([call.id for call in calls], ["call_fake_0", "call_fake_1"])
+        self.assertEqual(
+            [call.function.name for call in calls],
+            ["venice_models", "venice_model_details"],
+        )
+        self.assertEqual(
+            [json.loads(call.function.arguments) for call in calls],
+            [{"type": "text"}, {"model": "llama-3.3-70b"}],
+        )
+
     def test_streamed_completion_yields_deltas_then_usage(self):
         self.api.reply_chunks("HELLO-", "FROM-", "FAKE")
         stream = self.oai.chat.completions.create(
