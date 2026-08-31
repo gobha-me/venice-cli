@@ -476,6 +476,10 @@ _COMMAND_MAP = {
         "compact_threshold": ("compact_threshold", int),
         "compact_keep_turns": ("compact_keep_turns", int),
         "session_max_spend": ("session_max_spend", _numeric.finite_float),
+        "cache_guard": (
+            "cache_guard",
+            _one_of("venice.commands._agent", "CACHE_GUARD_CHOICES"),
+        ),
         # #80 part 1a: the cold-context reviewer rail. `review_model` is the
         # decorrelation knob -- the reviewer should not be the model that authored.
         "review": ("review", _as_bool),

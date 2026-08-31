@@ -391,6 +391,13 @@ def register(subparsers) -> None:
         "the cap. Distinct from --max-spend (the per-call asset-tool cap).",
     )
     grp.add_argument(
+        "--cache-guard", choices=_agent.CACHE_GUARD_CHOICES, default=None,
+        dest="cache_guard",
+        help="React when a cache-priced model explicitly reports 0 cached tokens "
+        "after the cold first API call: off, warn (default), or stop and request "
+        "a final answer. Config: defaults.code.cache_guard (#105).",
+    )
+    grp.add_argument(
         "--compact-threshold", type=int, default=None, dest="compact_threshold",
         metavar="TOKENS",
         help="Auto-compact once the prompt passes this many tokens "
@@ -631,6 +638,7 @@ def _run(args) -> int:
         return 2
     _session.apply_to_args(args, session, "code")
     userconfig.apply_defaults(args, "code")
+    userconfig.apply_literals(args, cache_guard="warn")
     if getattr(args, "browser", None):
         print(f"code: {_browser.UNAVAILABLE_MESSAGE}", file=sys.stderr)
         return 2

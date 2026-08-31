@@ -164,8 +164,29 @@ class TestModels(unittest.TestCase):
         out = buf.getvalue()
         self.assertIn("pricing:", out)
         self.assertIn("$1.5", out)
+        self.assertIn("cache: not advertised", out)
         self.assertIn("capabilities:", out)
         self.assertIn("WebSearch", out)
+
+    def test_cache_discount_formats_without_mutating_raw_pricing(self):
+        from venice.commands import models
+
+        cases = (
+            ({"input": {"usd": 3.75}, "cache_input": {"usd": 0.375}},
+             "10.0x discount"),
+            ({"input": {"usd": 3.75}, "cache_input": {"usd": 0}},
+             "free cache input"),
+            ({"input": {"usd": 0.375}, "cache_input": {"usd": 3.75}},
+             "advertised (no discount)"),
+            ({"input": {"usd": 3.75}}, "not advertised"),
+            ({"input": {"usd": 3.75}, "cache_input": {"usd": "bad"}},
+             "advertised (discount unavailable)"),
+        )
+        for pricing, expected in cases:
+            with self.subTest(expected=expected):
+                before = json.loads(json.dumps(pricing))
+                self.assertEqual(models._format_cache(pricing), expected)
+                self.assertEqual(pricing, before)
 
     def test_slug_lookup_prints_json_for_one(self):
         from venice.commands import models
@@ -182,6 +203,7 @@ class TestModels(unittest.TestCase):
         doc = json.loads(buf.getvalue())
         self.assertEqual(doc["id"], "mmaudio-v2-text-to-audio")
         self.assertEqual(doc["type"], "music")
+        self.assertNotIn("cache", doc)  # raw catalog JSON gains no derived field
 
     def test_current_type_slugs_are_found_in_the_all_catalog(self):
         from venice.commands import models

@@ -431,6 +431,7 @@ def _code_args(**ov):
         exec_timeout=None, interactive=False, resume=None, assets=None,
         scout=None, spawn=None, spawn_max_spend=None, auto_compact=None,
         compact_threshold=None, compact_keep_turns=None, session_max_spend=None,
+        cache_guard=None,
         cont=None, ephemeral=None, web_search=None, web_search_model=None,
     )
     base.update(ov)

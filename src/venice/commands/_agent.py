@@ -177,6 +177,17 @@ def to_openai_tools(tools: List[Tool]) -> List[dict]:
 # *between* turns: once accumulated cost crosses the cap, no new paid turn
 # starts and the loop forces a final answer (mirroring --max-tool-calls).
 # --------------------------------------------------------------------------- #
+CACHE_GUARD_CHOICES = ("off", "warn", "stop")
+CACHE_GUARD_MIN_PROMPT_TOKENS = 2_000
+
+
+class CacheGuardEvent(NamedTuple):
+    """One once-per-ledger reported-zero cache event (#105)."""
+
+    action: str
+    message: str
+
+
 def _usd_per_token(pricing, key) -> Optional[float]:
     """`pricing.<key>.usd` as a per-token rate (catalog prices are per 1M)."""
     if not isinstance(pricing, dict):
@@ -358,7 +369,8 @@ class CostLedger:
     _CALLS_TAIL = 200
 
     def __init__(self, max_spend: Optional[float] = None,
-                 max_tokens: Optional[int] = None, *, mirror=None):
+                 max_tokens: Optional[int] = None, *, mirror=None,
+                 cache_guard: str = "off"):
         # A non-positive cap means "uncapped" (mirrors --max-tool-calls 0).
         cap = _numeric.finite_float(max_spend) if max_spend is not None else None
         self.max_spend = cap if (cap is not None and cap > 0) else None
@@ -366,6 +378,17 @@ class CostLedger:
         # per-subagent runs (`--subagent-max-tokens`). Same non-positive->None rule.
         tcap = int(max_tokens) if max_tokens is not None else None
         self.max_tokens = tcap if (tcap is not None and tcap > 0) else None
+        if cache_guard not in CACHE_GUARD_CHOICES:
+            raise ValueError(
+                "cache_guard must be one of: " + ", ".join(CACHE_GUARD_CHOICES)
+            )
+        # #105: code opts its PARENT ledger into this policy. Chat and disposable
+        # subagent ledgers keep the constructor default (`off`), so fresh-prefix
+        # off-loop calls cannot manufacture a cache-collapse warning. This is runtime
+        # policy, not session data: a resumed process may warn again if the regression
+        # is still live.
+        self.cache_guard = cache_guard
+        self._cache_guard_fired = False
         self.total = 0.0
         self.prompt_tokens = 0
         self.completion_tokens = 0
@@ -1087,6 +1110,50 @@ class CostLedger:
             )
         return cost
 
+    def cache_guard_event(self, model: str) -> Optional[CacheGuardEvent]:
+        """Return the first qualifying reported-zero cache event, else ``None``.
+
+        The call trace is the authoritative three-state input (#98/#99): ``None``
+        means the provider did not report a cache field and must never be treated as
+        zero. The ordinal is the API-call ordinal, not a REPL/human turn -- one tool
+        loop can make hundreds of calls, which is the failure #105 exists to stop.
+
+        Only a valid ordinary-input + cache-input price pair makes the model eligible.
+        Missing pricing cannot support either the "advertised" claim or the estimated
+        missed discount. Invalid pricing is handled earlier by ``invalid_pricing``.
+        """
+        if self.cache_guard == "off" or self._cache_guard_fired:
+            return None
+        rows = self.api_calls()
+        if not rows or self._in is None or self._cache_in is None:
+            return None
+        row = rows[-1]
+        prompt_tokens = row.get("prompt_tokens")
+        if (
+            row.get("n", 0) < 2
+            or not isinstance(prompt_tokens, int)
+            or prompt_tokens < CACHE_GUARD_MIN_PROMPT_TOKENS
+            or row.get("cache_read_tokens") != 0
+        ):
+            return None
+
+        self._cache_guard_fired = True
+        if self._cache_in == 0:
+            advertised = "free cache input"
+        elif self._in <= self._cache_in:
+            advertised = "cache-input pricing"
+        else:
+            ratio = self._in / self._cache_in
+            advertised = f"a {ratio:.1f}x cache discount"
+        missed = max(self._in - self._cache_in, 0.0) * prompt_tokens
+        amount = f"${missed:.4f}" if missed < 1 else f"${missed:.2f}"
+        return CacheGuardEvent(
+            self.cache_guard,
+            f"cache: {model} advertises {advertised} but returned 0 cached "
+            f"tokens on API call {row['n']}; this run is paying full input price "
+            f"(est. +{amount} so far)",
+        )
+
     def over(self) -> bool:
         """True when accumulated spend has reached/exceeded the cap.
 
@@ -1653,14 +1720,17 @@ def _pricing_for(models, model_id):
 
 
 def _build_ledger(cap, models, model_id, *, max_tokens=None,
-                  mirror=None) -> CostLedger:
+                  mirror=None, cache_guard="off") -> CostLedger:
     """A CostLedger bound to `model_id`'s catalog pricing (cap may be None).
 
     The ONLY caller of `bind_pricing`, deliberately: pricing a ledger is exactly
     "look this model up in the catalog", and a second site would be a second place
     to forget the lookup (which is how every rail ended up unpriced before #117).
     """
-    ledger = CostLedger(max_spend=cap, max_tokens=max_tokens, mirror=mirror)
+    ledger = CostLedger(
+        max_spend=cap, max_tokens=max_tokens, mirror=mirror,
+        cache_guard=cache_guard,
+    )
     pricing = _pricing_for(models, model_id)
     if pricing is not None:
         ledger.bind_pricing(pricing)
@@ -1691,7 +1761,10 @@ def usage_ledger(args, models, model_id) -> CostLedger:
     session. `--session-max-spend`, when set, still supplies the cap; an uncapped
     ledger meters usage without gating (`over()` is None-safe).
     """
-    return _build_ledger(getattr(args, "session_max_spend", None), models, model_id)
+    return _build_ledger(
+        getattr(args, "session_max_spend", None), models, model_id,
+        cache_guard=getattr(args, "cache_guard", None) or "off",
+    )
 
 
 def subagent_ledger(models, model_id, *, max_tokens=None,
@@ -3378,10 +3451,22 @@ def run_loop(
             # wall and `_call_lines` needs no `[concurrent]` marker.
             ledger.record(getattr(resp, "usage", None),
                           seconds=time.monotonic() - _t0)
+        cache_event = (
+            ledger.cache_guard_event(model) if ledger is not None else None
+        )
         msg = resp.choices[0].message if getattr(resp, "choices", None) else None
         messages.append(_assistant_dict(msg))
         tool_calls = getattr(msg, "tool_calls", None) if msg is not None else None
+        if cache_event is not None and cache_event.action == "warn":
+            print(cache_event.message, file=sys.stderr)
         if not tool_calls:
+            if cache_event is not None and cache_event.action == "stop":
+                # The model already supplied a final response. Buying another
+                # completion would contradict the circuit breaker's purpose.
+                print(
+                    f"{cache_event.message}; response is already final",
+                    file=sys.stderr,
+                )
             return _emit_final(resp, json_out)
 
         # Every tool_call in the turn must get a result (message-contract), even
@@ -3417,6 +3502,15 @@ def run_loop(
                         "content": json.dumps(result, default=str, allow_nan=False),
                     }
                 )
+
+        if cache_event is not None and cache_event.action == "stop":
+            # The assistant tool-call message must receive one result per call before
+            # another assistant message is legal. Once that contract is satisfied,
+            # reuse the existing no-tools finalization seam; do not invent a second
+            # teardown path for the cache gate.
+            return _force_final(
+                f"{cache_event.message}; requesting a final answer"
+            )
 
         if not unlimited and calls_made >= max_tool_calls:
             # The forced-final is the turn a long, over-budget run most needs
