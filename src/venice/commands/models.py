@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sys
 from typing import Iterable, List, Optional
 
@@ -105,6 +106,40 @@ def _format_pricing(pricing) -> str:
     return " ".join(parts)
 
 
+def _format_cache(pricing) -> str:
+    """Human cache expectation derived from catalog pricing (#105).
+
+    Presence of ``cache_input`` is the catalog's cache advertisement. Keep an
+    invalid/malformed advertisement distinct from absence, and never mutate the raw
+    model object printed by slug/JSON lookup.
+    """
+    if not isinstance(pricing, dict) or "cache_input" not in pricing:
+        return "not advertised"
+    cache_node = pricing.get("cache_input")
+    input_node = pricing.get("input")
+    if not isinstance(cache_node, dict) or "usd" not in cache_node:
+        return "advertised (discount unavailable)"
+    try:
+        cache_price = float(cache_node["usd"])
+        input_price = float(input_node["usd"])
+    except (KeyError, TypeError, ValueError):
+        return "advertised (discount unavailable)"
+    if (
+        isinstance(cache_node["usd"], bool)
+        or isinstance(input_node["usd"], bool)
+        or not math.isfinite(cache_price)
+        or not math.isfinite(input_price)
+        or cache_price < 0
+        or input_price < 0
+    ):
+        return "advertised (discount unavailable)"
+    if cache_price == 0:
+        return "free cache input"
+    if input_price <= cache_price:
+        return "advertised (no discount)"
+    return f"{input_price / cache_price:.1f}x discount"
+
+
 def _format_caps(caps) -> str:
     if not isinstance(caps, dict):
         return ""
@@ -123,12 +158,14 @@ def _print_listing(models: Iterable[dict], detail: bool) -> None:
         name = spec.get("name", "")
         caps = _format_caps(spec.get("capabilities"))
         price = _format_pricing(spec.get("pricing"))
+        cache = _format_cache(spec.get("pricing"))
         line = mid
         if name:
             line += f"  -- {name}"
         print(line)
         if price:
             print(f"    pricing: {price}")
+        print(f"    cache: {cache}")
         if caps:
             print(f"    capabilities: {caps}")
 

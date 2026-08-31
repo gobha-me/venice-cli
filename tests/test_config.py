@@ -270,6 +270,35 @@ class TestApplyDefaults(_Base):
         uc.apply_defaults(args, "code", doc)
         self.assertIs(args.parallel, True)
 
+    def test_code_cache_guard_cli_config_and_literal_precedence(self):
+        parser = _build_parser(code)
+
+        args = parser.parse_args(["code", "do x"])
+        self.assertIsNone(args.cache_guard)
+        uc.apply_defaults(
+            args, "code", {"defaults": {"code": {"cache_guard": "stop"}}}
+        )
+        uc.apply_literals(args, cache_guard="warn")
+        self.assertEqual(args.cache_guard, "stop")
+
+        explicit = parser.parse_args(["code", "--cache-guard", "off", "do x"])
+        uc.apply_defaults(
+            explicit, "code", {"defaults": {"code": {"cache_guard": "stop"}}}
+        )
+        uc.apply_literals(explicit, cache_guard="warn")
+        self.assertEqual(explicit.cache_guard, "off")
+
+        invalid = parser.parse_args(["code", "do x"])
+        _, _, err = _capture(
+            uc.apply_defaults,
+            invalid,
+            "code",
+            {"defaults": {"code": {"cache_guard": "explode"}}},
+        )
+        uc.apply_literals(invalid, cache_guard="warn")
+        self.assertEqual(invalid.cache_guard, "warn")
+        self.assertIn("expected one of: off, stop, warn", err)
+
     def test_apply_fills_code_web_search(self):
         # #77: defaults.code.web_search (_as_bool) backs --web-search; explicit wins.
         doc = {"defaults": {"code": {"web_search": True}}}

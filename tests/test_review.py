@@ -1375,7 +1375,7 @@ class TestReviewRailWiring(_RepoBase):
             plan_only=True, no_plan=False, no_verify=False, max_tool_calls=None,
             exec_timeout=None, interactive=False, resume=None, assets=None,
             auto_compact=None, compact_threshold=None, compact_keep_turns=None,
-            session_max_spend=None, cont=None, ephemeral=None,
+            session_max_spend=None, cache_guard=None, cont=None, ephemeral=None,
             review=None, review_model=None, review_rounds=None,
         )
         base.update(ov)

@@ -519,6 +519,78 @@ class TestCostLedger(unittest.TestCase):
         self.assertEqual(L._in, 2.0 / 1e6)
         self.assertIsNone(L._out)  # no output price advertised
 
+    def test_usage_factory_binds_code_cache_guard_only_when_requested(self):
+        models = [{
+            "id": "m",
+            "model_spec": {"pricing": {
+                "input": {"usd": 3.75}, "cache_input": {"usd": 0.375},
+            }},
+        }]
+        args = type(
+            "A", (), {"session_max_spend": None, "cache_guard": "stop"}
+        )()
+        self.assertEqual(_agent.usage_ledger(args, models, "m").cache_guard, "stop")
+        plain = type("A", (), {"session_max_spend": None})()
+        self.assertEqual(_agent.usage_ledger(plain, models, "m").cache_guard, "off")
+
+    def test_cache_guard_uses_api_ordinal_and_three_state_usage(self):
+        def usage(prompt, cached_marker):
+            block = None if cached_marker is None else {
+                "cached_tokens": cached_marker,
+            }
+            return {
+                "prompt_tokens": prompt,
+                "completion_tokens": 10,
+                "prompt_tokens_details": block,
+            }
+
+        pricing = {
+            "input": {"usd": 3.75}, "cache_input": {"usd": 0.375},
+        }
+        cases = (
+            ("cold first call", [usage(3_000, 0)], True, None),
+            ("below floor", [usage(3_000, 100), usage(1_999, 0)], True, None),
+            ("unreported", [usage(3_000, 100), usage(3_000, None)], True, None),
+            ("cache hit", [usage(3_000, 100), usage(3_000, 1)], True, None),
+            ("not advertised", [usage(3_000, 100), usage(3_000, 0)], False, None),
+        )
+        for name, rows, advertised, expected in cases:
+            with self.subTest(case=name):
+                ledger = _agent.CostLedger(cache_guard="warn")
+                ledger.bind_pricing(
+                    pricing if advertised else {"input": {"usd": 3.75}}
+                )
+                event = None
+                for row in rows:
+                    ledger.record(row)
+                    event = ledger.cache_guard_event("kimi-k3")
+                self.assertIs(event, expected)
+
+    def test_cache_guard_event_is_once_only_and_estimates_discount(self):
+        ledger = _agent.CostLedger(cache_guard="warn")
+        ledger.bind_pricing({
+            "input": {"usd": 3.75}, "cache_input": {"usd": 0.375},
+        })
+        ledger.record({
+            "prompt_tokens": 3_000, "completion_tokens": 10,
+            "prompt_tokens_details": {"cached_tokens": 100},
+        })
+        self.assertIsNone(ledger.cache_guard_event("kimi-k3"))
+        ledger.record({
+            "prompt_tokens": 120_000, "completion_tokens": 10,
+            "prompt_tokens_details": {"cached_tokens": 0},
+        })
+        event = ledger.cache_guard_event("kimi-k3")
+        self.assertEqual(event.action, "warn")
+        self.assertIn("10.0x cache discount", event.message)
+        self.assertIn("API call 2", event.message)
+        self.assertIn("+$0.4050", event.message)
+        self.assertIsNone(ledger.cache_guard_event("kimi-k3"))
+
+    def test_cache_guard_rejects_unknown_policy(self):
+        with self.assertRaisesRegex(ValueError, "off, warn, stop"):
+            _agent.CostLedger(cache_guard="explode")
+
     # -- cache-bucket accounting (#75) -------------------------------------- #
 
     def test_cache_buckets_priced_distinctly(self):
@@ -2385,6 +2457,112 @@ class TestCallTrace(unittest.TestCase):
         L = _agent.CostLedger()
         L.record_compaction({"messages_before": 4, "messages_after": 2})
         self.assertNotIn("cost", L.context_events[0])
+
+
+class TestRunLoopCacheGuard(unittest.TestCase):
+    """#105: cache collapse is detected per API call inside one tool loop."""
+
+    @staticmethod
+    def _usage(*, cached, prompt=3_000):
+        return {
+            "prompt_tokens": prompt,
+            "completion_tokens": 10,
+            "prompt_tokens_details": {"cached_tokens": cached},
+        }
+
+    @staticmethod
+    def _tool():
+        return _agent.Tool(
+            "t", "t", {"type": "object", "properties": {}},
+            lambda a, *, confirm=False: {"status": "ok"},
+        )
+
+    @staticmethod
+    def _ledger(policy):
+        ledger = _agent.CostLedger(cache_guard=policy)
+        ledger.bind_pricing({
+            "input": {"usd": 3.75}, "cache_input": {"usd": 0.375},
+        })
+        return ledger
+
+    def test_warn_emits_once_and_continues_the_same_tool_loop(self):
+        seq = [
+            FakeToolCompletion(
+                tool_calls=[_FnCall("c1", "t", "{}")],
+                usage=self._usage(cached=500),
+            ),
+            FakeToolCompletion(
+                tool_calls=[_FnCall("c2", "t", "{}")],
+                usage=self._usage(cached=0),
+            ),
+            FakeToolCompletion("done", usage=self._usage(cached=0)),
+        ]
+        fake, calls = _fake_oai(seq)
+        err = io.StringIO()
+        with mock.patch.object(sys, "stdout", io.StringIO()), \
+             mock.patch.object(sys, "stderr", err):
+            rc = _agent.run_loop(
+                fake, "kimi-k3", [{"role": "user", "content": "go"}], {},
+                [self._tool()], max_tool_calls=0, yes=True, json_out=False,
+                ledger=self._ledger("warn"),
+            )
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(err.getvalue().count("returned 0 cached tokens"), 1)
+        self.assertIn("API call 2", err.getvalue())
+
+    def test_stop_finishes_returned_tools_then_uses_no_tools_final(self):
+        seq = [
+            FakeToolCompletion(
+                tool_calls=[_FnCall("c1", "t", "{}")],
+                usage=self._usage(cached=500),
+            ),
+            FakeToolCompletion(
+                tool_calls=[_FnCall("c2", "t", "{}")],
+                usage=self._usage(cached=0),
+            ),
+            FakeToolCompletion("wrapped up", usage=self._usage(cached=0)),
+        ]
+        fake, calls = _fake_oai(seq)
+        err = io.StringIO()
+        messages = [{"role": "user", "content": "go"}]
+        with mock.patch.object(sys, "stdout", io.StringIO()), \
+             mock.patch.object(sys, "stderr", err):
+            rc = _agent.run_loop(
+                fake, "kimi-k3", messages, {}, [self._tool()],
+                max_tool_calls=0, yes=True, json_out=False,
+                ledger=self._ledger("stop"),
+            )
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(calls[-1]["tool_choice"], "none")
+        self.assertTrue(any(
+            m.get("role") == "tool" and m.get("tool_call_id") == "c2"
+            for m in calls[-1]["messages"]
+        ))
+        self.assertEqual(err.getvalue().count("returned 0 cached tokens"), 1)
+        self.assertIn("requesting a final answer", err.getvalue())
+
+    def test_stop_buys_no_extra_call_when_triggering_response_is_final(self):
+        seq = [
+            FakeToolCompletion(
+                tool_calls=[_FnCall("c1", "t", "{}")],
+                usage=self._usage(cached=500),
+            ),
+            FakeToolCompletion("done", usage=self._usage(cached=0)),
+        ]
+        fake, calls = _fake_oai(seq)
+        err = io.StringIO()
+        with mock.patch.object(sys, "stdout", io.StringIO()), \
+             mock.patch.object(sys, "stderr", err):
+            rc = _agent.run_loop(
+                fake, "kimi-k3", [{"role": "user", "content": "go"}], {},
+                [self._tool()], max_tool_calls=0, yes=True, json_out=False,
+                ledger=self._ledger("stop"),
+            )
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 2)
+        self.assertIn("response is already final", err.getvalue())
 
 
 class TestRunLoopSpendGate(unittest.TestCase):

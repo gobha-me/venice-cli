@@ -1416,6 +1416,16 @@ Rows are capped at the first 50 plus the most recent 200, so a long session keep
 both its cold-start evidence and its current state; each row carries its `n`, so a
 jump in the sequence is itself the drop marker.
 
+`venice code` also watches that trace for the narrow total-collapse case. Once the
+selected model advertises `pricing.cache_input`, API call 2 or later has at least
+2,000 prompt tokens, and the provider explicitly reports **zero** cached tokens, the
+default `--cache-guard warn` prints one stderr diagnostic for that run. An absent
+cache field is unknown and never trips the guard. `--cache-guard stop` completes any
+tool results required by the response that exposed the collapse, then requests one
+final answer with tools disabled; if the response was already final it buys no extra
+call. `off` disables the policy. Compaction and the fresh-prefix off-loop rails stay
+outside the guard for the same reason they stay outside the trace.
+
 Compaction's summarization call and every subagent rail **are** metered, each into its
 own `usage.buckets` partition rather than into the rows above — they are fresh prefixes,
 so they read ~0% cached every time and would fabricate a cache cliff if averaged in with
@@ -1516,6 +1526,7 @@ external diff helpers. Use the confirmed `run` tool for other Git forms.
 | `--review-model MODEL` | model for `--review` (default: a function-calling model from a **different family** than the coding model; falls back to the coding model with a warning); config `defaults.code.review_model` |
 | `--review-rounds N` | passes `venice_review` makes over the same diff (default **1**, max 3); config `defaults.code.review_rounds` |
 | `--auto-compact` | summarize older history once the prompt crosses `--compact-threshold` tokens (default 100 000), keeping the last `--compact-keep-turns` turns (default 10); long runs stay in-context |
+| `--cache-guard off\|warn\|stop` | react when a cache-priced model explicitly reports zero cached tokens after the cold first API call and a 2,000-token prompt; default **warn**, config `defaults.code.cache_guard` |
 | `-i`, `--json`, `--model`, `--system` | interactive REPL · JSON envelope · model · extra system instructions |
 | `--persona NAME` | load `~/.config/venice/personas/NAME.md` as the system prompt at launch (`/persona` in the REPL) |
 
@@ -1527,7 +1538,7 @@ model and a sane `--max-tool-calls` when running unattended.
 
 Per-flag config defaults live under `defaults.code.*` (e.g. `model`, `root`, `auto`,
 `assets`, `scout`, `spawn`, `spawn_max_spend`, `subagent_max_tokens`, `planner`,
-`max_tool_calls`, `review`, `review_model`, `review_rounds`).
+`max_tool_calls`, `review`, `review_model`, `review_rounds`, `cache_guard`).
 
 #### Scout subagent (`--scout`)
 
@@ -2012,7 +2023,7 @@ schema is forward-compatible.
 ```sh
 venice models                          # count by type
 venice models --type music             # list ids, one per line
-venice models --type music --detail    # ids + name + pricing + capabilities
+venice models --type music --detail    # ids + name + pricing + cache + capabilities
 venice models elevenlabs-sound-effects-v2   # full JSON for one model
 venice models --type all --json        # everything, raw
 ```
