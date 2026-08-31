@@ -27,6 +27,9 @@ Usage::
 
     with FakeVenice() as api:
         api.reply("HELLO")                 # queue one chat completion
+        api.reply_tool_call(                # or one non-streamed tool turn
+            "venice_models", {"type": "image"}
+        )
         ...                                # drive the CLI at api.base_url
         assert api.paths == ["/models", "/chat/completions"]
 """
@@ -101,6 +104,7 @@ class FakeVenice:
         self._lock = threading.Lock()
         self.requests = []  # [{"method", "path", "query", "body", "has_auth"}]
         self._chat = collections.deque()
+        self._next_tool_call_id = 0
         self._httpd = None
         self._thread = None
 
@@ -154,6 +158,49 @@ class FakeVenice:
         with self._lock:
             self._chat.append({"deltas": list(deltas), "usage": _USAGE})
 
+    def reply_tool_call(self, name: str, arguments: dict) -> None:
+        """Queue one non-streamed assistant turn containing one tool call."""
+        self.reply_tool_calls([(name, arguments)])
+
+    def reply_tool_calls(self, calls) -> None:
+        """Queue one non-streamed assistant turn containing `calls` in order.
+
+        Each entry is a ``(name, arguments)`` pair.  The fake deliberately accepts
+        only JSON-object arguments: this is enough to drive ``_agent.run_loop`` while
+        keeping malformed/delta tool-call simulation out of this narrow fixture.
+        """
+        calls = list(calls)
+        if not calls:
+            raise ValueError("reply_tool_calls requires at least one call")
+        encoded = []
+        for name, arguments in calls:
+            if not isinstance(name, str) or not name:
+                raise ValueError("tool-call name must be a non-empty string")
+            if not isinstance(arguments, dict):
+                raise ValueError("tool-call arguments must be a dict")
+            encoded.append((
+                name,
+                json.dumps(
+                    arguments, sort_keys=True, separators=(",", ":"),
+                    allow_nan=False,
+                ),
+            ))
+
+        scripted = []
+        with self._lock:
+            for name, arguments_json in encoded:
+                call_id = f"call_fake_{self._next_tool_call_id}"
+                self._next_tool_call_id += 1
+                scripted.append({
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "arguments": arguments_json,
+                    },
+                })
+            self._chat.append({"tool_calls": scripted, "usage": _USAGE})
+
     def _next_chat(self) -> dict:
         with self._lock:
             if self._chat:
@@ -168,6 +215,7 @@ class FakeVenice:
         with self._lock:
             self.requests = []
             self._chat.clear()
+            self._next_tool_call_id = 0
 
     @property
     def paths(self):
@@ -276,6 +324,12 @@ def _make_handler(api: FakeVenice):
         # -- chat completions ----------------------------------------------
 
         def _send_completion(self, scripted, model):
+            tool_calls = scripted.get("tool_calls")
+            message = {"role": "assistant", "content": None}
+            if tool_calls is not None:
+                message["tool_calls"] = tool_calls
+            else:
+                message["content"] = "".join(scripted["deltas"])
             self._send_json({
                 "id": "chatcmpl-fake",
                 "object": "chat.completion",
@@ -283,11 +337,10 @@ def _make_handler(api: FakeVenice):
                 "model": model,
                 "choices": [{
                     "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": "".join(scripted["deltas"]),
-                    },
-                    "finish_reason": "stop",
+                    "message": message,
+                    "finish_reason": (
+                        "tool_calls" if tool_calls is not None else "stop"
+                    ),
                 }],
                 "usage": scripted["usage"],
             })

@@ -207,6 +207,39 @@ class TestDriveCharge(_DriveCase):
         self.assertNotIn("/image/generate", self.api.paths)
         self.assertEqual(list(self.project.glob("*.png")), [])
 
+    @needs_openai
+    def test_agent_tool_call_confirm_accept_reaches_the_second_turn(self):
+        """#114: drive the real agent loop through a paid tool and back."""
+        self.api.reply_tool_call("venice_image", {"prompt": "a tiny cat"})
+        self.api.reply("TOOL-LOOP-COMPLETE")
+
+        with self.cli(
+            "chat", "make an image", "--tools", "--tool", "venice_image",
+            "--max-spend", "0", "--json",
+        ) as d:
+            d.expect("image: estimated cost $0.0100 is over the auto-approve cap")
+            d.expect("Proceed? [y]es / [a]ll (accept rest) / [N]o ")
+            d.send("y")
+            d.expect('"content": "TOOL-LOOP-COMPLETE"')
+            self.assertEqual(d.wait(), 0)
+
+        outputs = list(self.project.glob("venice-image-*.png"))
+        self.assertEqual(len(outputs), 1)
+        self.assertEqual(outputs[0].read_bytes(), fake.PNG_BYTES)
+        self.assertEqual(self.api.paths.count("/image/generate"), 1)
+
+        chat_bodies = self.api.bodies("/chat/completions")
+        self.assertEqual(len(chat_bodies), 2)
+        assistant, result = chat_bodies[1]["messages"][-2:]
+        self.assertEqual(assistant["role"], "assistant")
+        self.assertEqual(assistant["tool_calls"][0]["id"], "call_fake_0")
+        self.assertEqual(assistant["tool_calls"][0]["function"]["name"],
+                         "venice_image")
+        self.assertEqual(result["role"], "tool")
+        self.assertEqual(result["tool_call_id"], "call_fake_0")
+        self.assertEqual(result["name"], "venice_image")
+        self.assertEqual(json.loads(result["content"])["status"], "ok")
+
 
 # --------------------------------------------------------------------------
 # C'. the same gates with no pty at all
