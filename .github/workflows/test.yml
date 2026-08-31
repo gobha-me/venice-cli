@@ -18,7 +18,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+        # Keep explicit supported-version legs plus a newest-stable guard. The
+        # 3.x leg intentionally duplicates the current newest classifier until
+        # the next CPython release, when it advances without a metadata gap.
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14", "3.x"]
 
     steps:
       - uses: actions/checkout@v5
@@ -69,7 +72,7 @@ jobs:
 
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version: "3.14"
           cache: pip
           cache-dependency-path: pyproject.toml
 

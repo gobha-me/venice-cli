@@ -35,6 +35,7 @@ classifiers = [
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
   "Topic :: Multimedia :: Sound/Audio",
   "Topic :: Multimedia :: Graphics",
   "Topic :: Utilities",
@@ -55,7 +56,7 @@ openai = ["openai>=1.40"]
 # Upper-bounded as of 2026-07-29 (#95): mcp 2.0.0, published 2026-07-28, deletes
 # `mcp.server.fastmcp` -- `mcp.server` now exposes `mcpserver` instead. The old
 # unbounded `mcp>=1.2` turned that into a red CI on every branch within the hour,
-# on 3.10-3.13 only (2.0 declares requires-python >=3.10, so the 3.9 job kept
+# on 3.10-3.14 only (2.0 declares requires-python >=3.10, so the 3.9 job kept
 # resolving 1.x and stayed green). 1.29.0 is the current 1.x and still ships
 # FastMCP. Lift this when `mcp_serve.py` is ported to the 2.x server API.
 mcp = ["mcp>=1.2,<2; python_version>='3.10'"]
