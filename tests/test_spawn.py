@@ -256,13 +256,19 @@ class TestRunScout(_ScoutBase):
             )
         self.assertEqual(parent["extra_body"]["prompt_cache_key"], "parent-key")
 
-    def test_focus_hint_threaded_into_system(self):
+    def test_focus_hint_rides_in_user_task_not_system(self):
         seq = [FakeToolCompletion(_REPORT)]
         fake, calls = _fake_openai_seq(seq)
         _agent.run_scout(fake, "m", "t", _code.read_only_tools(self.root), {},
                          max_tool_calls=4, focus="src/venice/commands/_repl.py")
-        self.assertIn("src/venice/commands/_repl.py",
-                      calls[0]["messages"][0]["content"])
+        messages = calls[0]["messages"]
+        self.assertEqual(messages[0]["content"], _agent.SCOUT_SYSTEM)
+        self.assertEqual(
+            messages[1],
+            {"role": "user", "content": (
+                "Focus hint (not a hard scope): src/venice/commands/_repl.py\n\nt"
+            )},
+        )
 
     def test_empty_task_short_circuits(self):
         fake, calls = _fake_openai_seq([])
@@ -536,11 +542,12 @@ class TestRunSpawn(_ScoutBase):
                          max_tool_calls=5, focus="src/x.py", role="code")
         first = calls[0]["messages"]
         self.assertEqual(len(first), 2)
-        self.assertEqual(first[0]["role"], "system")
-        self.assertIn("WORKER", first[0]["content"])
-        self.assertIn("Your role: code", first[0]["content"])   # role folded in
-        self.assertIn("src/x.py", first[0]["content"])          # focus hint threaded
-        self.assertEqual(first[1], {"role": "user", "content": "do the thing"})
+        self.assertEqual(first[0], {"role": "system", "content": _agent.SPAWN_SYSTEM})
+        self.assertEqual(first[1], {"role": "user", "content": (
+            "Your role: code.\n"
+            "Focus hint (not a hard scope): src/x.py\n\n"
+            "do the thing"
+        )})
 
     def test_budget_cap_forces_final_and_marks_truncated(self):
         seq = [

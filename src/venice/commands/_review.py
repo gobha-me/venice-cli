@@ -381,9 +381,10 @@ def collect_diff(root: str, base: str, *, paths=None, context: str = "function",
 def build_task(collected: dict, *, prior=None) -> str:
     """Assemble the reviewer's user turn: provenance, caveats, then the diff.
 
-    Prior findings ride HERE, not in the system prompt, so ``REVIEW_SYSTEM`` stays
-    byte-identical across rounds (a stable prompt prefix is what keeps the input
-    cache hot -- aiforge#19 SS5 -- and it keeps the prompt pins meaningful).
+    Prior findings ride HERE after the closing diff fence, not in the system prompt or
+    ahead of the diff. ``REVIEW_SYSTEM`` and the entire first-round task therefore stay
+    a byte-identical prefix of later rounds (what keeps the input cache hot --
+    aiforge#19 SS5 -- and keeps the prompt pins meaningful).
     """
     head = [
         f"Review the following diff. Base: {collected['base']} "
@@ -403,12 +404,15 @@ def build_task(collected: dict, *, prior=None) -> str:
         head.append(
             "Skipped as non-code: "
             + ", ".join(f"{s['path']} ({s['reason']})" for s in collected["files_skipped"]))
+    task = "\n".join(head) + "\n\n```diff\n" + collected["diff"] + "\n```\n"
     if prior:
-        head.append(
-            "ALREADY REPORTED in an earlier pass over this same diff -- do NOT repeat "
-            "these; look for what they missed:\n"
-            + "\n".join(f"  - {f['file']}:{f['line']} {f['summary']}" for f in prior))
-    return "\n".join(head) + "\n\n```diff\n" + collected["diff"] + "\n```\n"
+        task += (
+            "\nALREADY REPORTED in an earlier pass over this same diff -- do NOT "
+            "repeat these; look for what they missed:\n"
+            + "\n".join(f"  - {f['file']}:{f['line']} {f['summary']}" for f in prior)
+            + "\n"
+        )
+    return task
 
 
 # --------------------------------------------------------------------------- #
