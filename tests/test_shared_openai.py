@@ -5,13 +5,19 @@ them only end-to-end. This covers the pure logic directly: catalog parsing,
 default-trait selection, model validation, and the SDK exception -> exit-code
 ladder. No network, no real key, no openai package required.
 """
+import ast
 import io
+import re
 import sys
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from venice.client import VeniceAPIError
 from venice.commands import _models, _openai
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _model(mid, traits=None):
@@ -241,6 +247,47 @@ class _Status(Exception):
 
 
 class TestImportOpenAI(unittest.TestCase):
+
+    def test_readme_inventory_matches_lazy_import_call_sites(self):
+        """Every SDK boundary stays visible in the authoritative docs (#121)."""
+        labels = set()
+        for path in (ROOT / "src" / "venice").rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if not (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "import_openai"
+                ):
+                    continue
+                self.assertTrue(node.args, f"{path}: import_openai needs a label")
+                label = node.args[0]
+                self.assertIsInstance(
+                    label, ast.Constant,
+                    f"{path}:{node.lineno}: import_openai label must be literal",
+                )
+                self.assertIsInstance(
+                    label.value, str,
+                    f"{path}:{node.lineno}: import_openai label must be a string",
+                )
+                labels.add(label.value)
+
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        start_marker = "<!-- openai-extra-inventory:start -->"
+        end_marker = "<!-- openai-extra-inventory:end -->"
+        self.assertEqual(readme.count(start_marker), 1)
+        self.assertEqual(readme.count(end_marker), 1)
+        inventory = readme.split(start_marker, 1)[1].split(end_marker, 1)[0]
+        documented = set(re.findall(r"^- `([a-z_]+)`:", inventory, re.MULTILINE))
+        self.assertEqual(documented, labels)
+
+        # These wrappers delegate to one of the labelled boundaries rather
+        # than importing the SDK themselves, so pin their documentation too.
+        for feature in (
+            "`venice_chat`", "`venice chat --mcp`", "`project_search`", "`reindex`"
+        ):
+            with self.subTest(feature=feature):
+                self.assertIn(feature, inventory)
 
     def test_returns_the_module_when_present(self):
         self.assertIsNotNone(_openai.import_openai("chat"))
