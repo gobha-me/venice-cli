@@ -10,6 +10,7 @@ Reuses the fake OpenAI helpers from `tests.test_chat`.
 """
 import argparse
 import io
+import json
 import os
 import sys
 import tempfile
@@ -397,7 +398,7 @@ class TestWebSearchWiring(unittest.TestCase):
         self.tmp = os.path.realpath(tempfile.mkdtemp())
         self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, ignore_errors=True))
 
-    def _run(self, args, seq, config=None):
+    def _run(self, args, seq, config=None, stdout=None, stderr=None):
         from venice.commands import code
         fake, calls = _fake_openai_seq(seq)
         stdin = mock.MagicMock()
@@ -413,8 +414,8 @@ class TestWebSearchWiring(unittest.TestCase):
              mock.patch("venice.client.urllib.request.urlopen", _urlopen_ok()), \
              mock.patch("openai.OpenAI", return_value=fake), \
              mock.patch.object(sys, "stdin", stdin), \
-             mock.patch.object(sys, "stdout", io.StringIO()), \
-             mock.patch.object(sys, "stderr", io.StringIO()):
+             mock.patch.object(sys, "stdout", stdout or io.StringIO()), \
+             mock.patch.object(sys, "stderr", stderr or io.StringIO()):
             rc = code._run(args)
         return rc, calls
 
@@ -439,6 +440,37 @@ class TestWebSearchWiring(unittest.TestCase):
             config={"code": {"web_search": True}})
         self.assertEqual(rc, 0)
         self.assertIn(_agent.WEB_SEARCH_TOOL_NAME, calls[0]["messages"][0]["content"])
+
+    def test_unknown_config_model_fails_before_a_completion_with_recovery(self):
+        err = io.StringIO()
+        rc, calls = self._run(
+            _code_args(task="do x", root=self.tmp, plan_only=True, web_search=True),
+            [], config={"code": {"web_search_model": "retired-searcher"}},
+            stderr=err,
+        )
+        self.assertEqual(rc, 6)
+        self.assertEqual(calls, [])
+        self.assertIn("unknown web-search model 'retired-searcher'", err.getvalue())
+        self.assertIn(
+            "venice config unset defaults.code.web_search_model", err.getvalue(),
+        )
+
+    def test_plan_json_records_the_resolved_web_search_model(self):
+        out, err = io.StringIO(), io.StringIO()
+        rc, calls = self._run(
+            _code_args(
+                task="do x", root=self.tmp, plan_only=True, json=True,
+                web_search=True,
+            ),
+            list(self._PLAN), stdout=out, stderr=err,
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(json.loads(out.getvalue())["resolved_models"], {
+            "web_search": {"id": "llama-3.3-70b", "source": "auto"},
+        })
+        self.assertIn("web-search model: llama-3.3-70b (source: auto)",
+                      err.getvalue())
 
     def test_web_search_with_scout_makes_a_docs_scout(self):
         # Both the parent web tool AND the scout are advertised; the scout carries the

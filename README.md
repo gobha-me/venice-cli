@@ -1000,7 +1000,9 @@ venice code --web-search --auto \
 - **Model.** Web search needs a model advertising `supportsWebSearch`. By default the
   coding `--model` is used when it qualifies, else the first capable model in the catalog;
   override with `--web-search-model MODEL` (or `defaults.code.web_search_model`). No model id
-  is hard-coded — it's resolved against the live `/models` catalog.
+  is hard-coded — it's resolved against the live `/models` catalog. The resolved id and
+  whether it came from the flag, config, or automatic selection are printed before the
+  first paid call; unknown ids and models known to lack web search fail at startup.
 - **Billed, bounded.** It rides the normal completion path (same key, same billing) rather
   than a scraper, so there's no new dependency or secret. It isn't per-call spend-gated; its
   cost is bounded by the agent's tool-call budget, and each result carries a best-effort
@@ -1530,6 +1532,12 @@ external diff helpers. Use the confirmed `run` tool for other Git forms.
 | `-i`, `--json`, `--model`, `--system` | interactive REPL · JSON envelope · model · extra system instructions |
 | `--persona NAME` | load `~/.config/venice/personas/NAME.md` as the system prompt at launch (`/persona` in the REPL) |
 
+When review or web search is enabled, `--json` includes a `resolved_models` object whose
+`review` / `web_search` rows carry the resolved `id`, a `source` of `flag`, `config`, or
+`auto`, and the exact `config_key` for config-sourced values. Saved session envelopes carry
+the same object. Disabled rails have no row, and invalid auxiliary models fail before the
+planning or agent completion.
+
 With `--assets`, generated files land in `$VENICE_MCP_OUTPUT_DIR` or, by default, under
 the project root, and paid calls are capped per call by `$VENICE_MCP_MAX_SPEND` (default
 **$0.10**) — **except** that `--auto` auto-approves every call and so bypasses that cap;
@@ -1760,7 +1768,10 @@ early as soon as a pass finds nothing new.
 **different family** than the catalog default (`qwen3-4b` and `qwen-2.5-coder` count as
 the same family — a different id alone is not decorrelation). If the catalog offers no
 alternative it reviews with the same model and says so loudly; that is never a hard
-error, but the output carries `decorrelated: false` so a caller can tell.
+error, but the output carries `decorrelated: false` so a caller can tell. Under `venice
+code --review`, the selected reviewer id and its flag/config/automatic provenance are
+reported before the first paid call; an unknown or known non-function-calling reviewer
+fails at startup.
 
 | flag | effect |
 | --- | --- |

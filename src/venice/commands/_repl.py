@@ -611,7 +611,7 @@ def _dispatch_slash(line, messages, state, args, models, oai=None, gen_kwargs=No
 def run(args, oai, openai, client, models, model, initial=None, *,
         tools_session=None, gen_kwargs=None, label="venice chat",
         max_tool_calls=8, session=None, ephemeral=False, root=None,
-        system_reseed=False, ledger=None) -> int:
+        system_reseed=False, ledger=None, resolved_models=None) -> int:
     """Drive the interactive REPL until `/exit`, `/quit`, or EOF (Ctrl-D).
 
     `initial` is an already-resolved first message (e.g. `venice chat -i "hi"`);
@@ -633,7 +633,8 @@ def run(args, oai, openai, client, models, model, initial=None, *,
     `--resume <id>`/`--continue` restore settings + usage, not just messages.
     `root` (code) is recorded on the session; `system_reseed` overwrites a stale
     leading system message with `args.system` (code rebuilds it against the live
-    root each launch).
+    root each launch). `resolved_models` records the current invocation's enabled
+    auxiliary-model selections; it replaces stale selection metadata on resume.
     """
     from . import chat  # lazy: chat imports this module at top (avoid a cycle)
 
@@ -722,7 +723,9 @@ def run(args, oai, openai, client, models, model, initial=None, *,
                 model=state["model"], system=_current_system(messages),
                 gen_kwargs=gen_kwargs, root=root,
                 max_tool_calls=state["max_tool_calls"], messages=messages,
+                resolved_models=resolved_models,
             )
+            active.resolved_models = dict(resolved_models or {})
             if root is not None:
                 active.root = root
         state["session"] = active

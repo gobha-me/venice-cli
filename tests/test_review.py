@@ -1353,7 +1353,7 @@ class TestReviewCommand(_RepoBase):
 class TestReviewRailWiring(_RepoBase):
     """`venice code --review` folds the rail in and keeps it operator-controlled."""
 
-    def _run(self, args, seq, models=None, stderr=None):
+    def _run(self, args, seq, models=None, stderr=None, config=None):
         from venice.commands import code
         fake, calls = _fake_openai_seq(seq)
         stdin = mock.MagicMock()
@@ -1364,7 +1364,7 @@ class TestReviewRailWiring(_RepoBase):
                                           "VENICE_SESSIONS_DIR": sess}), \
              mock.patch("venice.userconfig.load_config",
                         lambda *a, **k: {"version": 1, "mcpServers": {},
-                                         "defaults": {}}), \
+                                         "defaults": config or {}}), \
              mock.patch("venice.client.urllib.request.urlopen",
                         _catalog_urlopen(models or _TWO_FAMILY_MODELS)), \
              mock.patch("openai.OpenAI", return_value=fake), \
@@ -1426,6 +1426,19 @@ class TestReviewRailWiring(_RepoBase):
         with mock.patch.object(_review, "review_tool", _spy):
             self._run(self._args(review=True, review_model="llama-3.3-70b"), seq)
         self.assertEqual(built["model"], "llama-3.3-70b")
+
+    def test_unknown_config_reviewer_fails_before_a_completion_with_recovery(self):
+        err = io.StringIO()
+        rc, calls = self._run(
+            self._args(review=True), [], stderr=err,
+            config={"code": {"review_model": "retired-reviewer"}},
+        )
+        self.assertEqual(rc, 6)
+        self.assertEqual(calls, [])
+        self.assertIn("unknown review model 'retired-reviewer'", err.getvalue())
+        self.assertIn(
+            "venice config unset defaults.code.review_model", err.getvalue(),
+        )
 
     def test_single_family_catalog_warns_instead_of_failing(self):
         solo = [{"id": "llama-3.3-70b", "type": "text",

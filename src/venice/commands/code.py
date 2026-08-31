@@ -607,9 +607,128 @@ def _prompt_accept(*, no_plan: bool = False) -> str:
         print("Please answer a, s, e, or n.", file=sys.stderr)
 
 
-def _emit_plan_only(args, root, task, plan_text, *, usage=None) -> int:
+def _model_provenance(args, dest: str) -> dict:
+    """Describe whether an auxiliary model came from a flag, config, or auto-pick."""
+    sources = getattr(args, "_config_sources", None)
+    config_key = sources.get(dest) if isinstance(sources, dict) else None
+    if config_key:
+        return {"source": "config", "config_key": config_key}
+    if getattr(args, dest, None) is not None:
+        return {"source": "flag"}
+    return {"source": "auto"}
+
+
+def _config_model_recovery(provenance: dict) -> None:
+    """Point a config-sourced auxiliary-model failure at its durable fix."""
+    key = provenance.get("config_key")
+    if key:
+        print(
+            f"code: that model came from {key}; update it or run: "
+            f"venice config unset {key}",
+            file=sys.stderr,
+        )
+
+
+def _record_auxiliary_model(args, dest: str, role: str, flag: str,
+                            model: str) -> dict:
+    """Build the public selection row and announce it before any paid call."""
+    row = {"id": model, **_model_provenance(args, dest)}
+    if row["source"] == "config":
+        source = f"config {row['config_key']}"
+    elif row["source"] == "flag":
+        source = f"flag {flag}"
+    else:
+        source = "auto"
+    print(f"code: {role} model: {model} (source: {source})", file=sys.stderr)
+    return row
+
+
+def _resolve_auxiliary_models(args, models, author_model: str):
+    """Resolve enabled review/web-search models before a paid completion (#103).
+
+    Returns ``(state, rc)``. ``state['resolved_models']`` is the stable public
+    provenance map; the other keys are the already-validated values consumed by
+    the tool factories. Disabled rails are intentionally ignored, including stale
+    defaults for their otherwise-unused model flags.
+    """
+    state = {
+        "resolved_models": {},
+        "review_model": None,
+        "review_decorrelated": False,
+        "web_search_model": None,
+    }
+
+    if bool(getattr(args, "review", None)):
+        provenance = _model_provenance(args, "review_model")
+        picked, decorrelated = _review.resolve_reviewer_model(
+            models, getattr(args, "review_model", None), author_model,
+        )
+        review_model, rc = _models.resolve_model(
+            picked, models, label="code", noun="review model",
+        )
+        if rc is not None:
+            _config_model_recovery(provenance)
+            return None, rc
+        ok, rc = _agent.check_function_calling(
+            models, review_model, label="code",
+            degraded_tail=(
+                "venice code --review needs a tool-calling model "
+                "(pass --review-model)."
+            ),
+            unverified_tail="attempting the review anyway",
+            degrade=False,
+        )
+        if not ok:
+            _config_model_recovery(provenance)
+            return None, rc
+        state["review_model"] = review_model
+        state["review_decorrelated"] = decorrelated
+        state["resolved_models"]["review"] = _record_auxiliary_model(
+            args, "review_model", "review", "--review-model", review_model,
+        )
+
+    if bool(getattr(args, "web_search", None)):
+        provenance = _model_provenance(args, "web_search_model")
+        picked = _agent.resolve_web_search_model(
+            models, getattr(args, "web_search_model", None), author_model,
+        )
+        if not picked:
+            print(
+                "code: no web-search-capable model available; pass "
+                "--web-search-model (or set defaults.code.web_search_model)",
+                file=sys.stderr,
+            )
+            _config_model_recovery(provenance)
+            return None, 2
+        web_model, rc = _models.resolve_model(
+            picked, models, label="code", noun="web-search model",
+        )
+        if rc is not None:
+            _config_model_recovery(provenance)
+            return None, rc
+        if _agent.supports_web_search(models, web_model) is False:
+            print(
+                f"code: web-search model {web_model!r} does not advertise "
+                "supportsWebSearch",
+                file=sys.stderr,
+            )
+            _config_model_recovery(provenance)
+            return None, 2
+        state["web_search_model"] = web_model
+        state["resolved_models"]["web_search"] = _record_auxiliary_model(
+            args, "web_search_model", "web-search", "--web-search-model", web_model,
+        )
+
+    return state, None
+
+
+def _emit_plan_only(args, root, task, plan_text, *, usage=None,
+                    resolved_models=None) -> int:
     if args.json:
-        doc = {"root": root, "task": task, "plan": plan_text, "mode": "plan_only"}
+        doc = {
+            "root": root, "task": task, "plan": plan_text, "mode": "plan_only",
+            "resolved_models": dict(resolved_models or {}),
+        }
         if usage is not None:
             doc["usage"] = usage  # #81: a plan turn is a real call and a real wait
         json.dump(doc, sys.stdout, indent=2, default=str, allow_nan=False)
@@ -686,6 +805,14 @@ def _run(args) -> int:
     if not ok:
         return rc  # degrade_to_chat is False for code -> rc == 2
 
+    auxiliary, rc = _resolve_auxiliary_models(args, models, model)
+    if rc is not None:
+        return rc
+    resolved_models = auxiliary["resolved_models"]
+    review_model = auxiliary["review_model"]
+    decorrelated = auxiliary["review_decorrelated"]
+    web_search_model = auxiliary["web_search_model"]
+
     oai = _openai.build_openai(openai, client)
     doc = userconfig.load_config()  # #58 tool defaults + #33 shell policy
     pol = userconfig.shell_policy(doc)
@@ -755,7 +882,7 @@ def _run(args) -> int:
     if bool(getattr(args, "web_search", None)):
         ws_tool = _code.web_search_tool(
             oai, model, models=models,
-            search_model=getattr(args, "web_search_model", None),
+            search_model=web_search_model,
             parent_ledger=ledger,  # #117: bills the `web_search` bucket
         )
     # #52: per-subagent cumulative-token ceiling (None = uncapped); applies to BOTH the
@@ -782,8 +909,6 @@ def _run(args) -> int:
         # a costlier model. A reviewer from a different family than the author is the
         # point of the rail -- same-family is allowed but warned about, because
         # refusing would make --review useless on a single-model catalog.
-        review_model, decorrelated = _review.resolve_reviewer_model(
-            models, getattr(args, "review_model", None), model)
         if not decorrelated:
             print(f"code: --review will use {review_model}, the same model family "
                   "that is authoring -- blind spots are correlated. Pass "
@@ -824,16 +949,18 @@ def _run(args) -> int:
             session=session, ephemeral=bool(getattr(args, "ephemeral", None)),
             root=root, system_reseed=PROFILE.system_reseed,
             ledger=ledger,  # #117: the rails already hold this one
+            resolved_models=resolved_models,
         )
 
     return _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task,
                         models, dispatches=dispatches,
                         ephemeral=bool(getattr(args, "ephemeral", None)),
-                        ledger=ledger)  # #117
+                        ledger=ledger, resolved_models=resolved_models)  # #117
 
 
 def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task,
-                 models=None, *, dispatches=None, ephemeral=False, ledger=None) -> int:
+                 models=None, *, dispatches=None, ephemeral=False, ledger=None,
+                 resolved_models=None) -> int:
     messages: List[dict] = [
         {"role": "system", "content": system},
         {"role": "user", "content": task},
@@ -889,7 +1016,8 @@ def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task
             if args.plan_only:
                 _finish(ledger, t0, human, json_out=args.json)
                 return _emit_plan_only(args, root, task, plan_text,
-                                       usage=ledger.to_dict())
+                                       usage=ledger.to_dict(),
+                                       resolved_models=resolved_models)
             if not args.json:
                 _show_plan(plan_text)
 
@@ -952,7 +1080,7 @@ def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task
         active = _session.new_session(
             "code", label=PROFILE.label, model=model, system=system,
             gen_kwargs=gen_kwargs, root=root, max_tool_calls=max_calls,
-            messages=messages,
+            messages=messages, resolved_models=resolved_models,
         )
         active.messages = messages  # share the live list so saves capture the transcript
         try:
@@ -1066,6 +1194,7 @@ def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task
         envelope = {
             "root": root, "task": task, "plan": plan_text, "mode": mode,
             "final": final_text,
+            "resolved_models": dict(resolved_models or {}),
             # #81: `to_dict()` verbatim, so `venice code --json | jq .usage` and
             # `jq .usage <session>.json` are the same shape and cannot drift apart.
             # Numbers here, `format_duration` only on the human line. FOUR surfaces
