@@ -2017,6 +2017,13 @@ safety), it should be settable in config." Currently config-backable:
 Per-invocation flags (`--dry-run`, `--json`, `--resume`, `--seed`, inputs and
 positionals) stay CLI-only by design.
 
+Config enrollment is an explicit, fail-closed allow-list. The CLI does not
+derive `defaults.*` keys from argparse or auto-enroll every flag except a
+denylist: a new flag remains CLI-only until its persistence, coercion, and
+precedence are deliberately reviewed. The test suite inventories every command
+and every option on config-aware commands, so an unclassified addition fails CI
+instead of silently gaining config authority.
+
 These per-command defaults also apply when a generator runs as an **agent tool**
 inside `venice chat --tools` and `venice code` — e.g. `defaults.image.safe_mode`
 is honored when the model calls `venice_image`, not just on the `venice image`

@@ -463,6 +463,306 @@ def _build_status_parser(mod):
 _rows_for = uc.rows_for
 
 
+# #57 final architecture: keep runtime enrollment explicitly allow-listed, but
+# make drift impossible to miss. Every top-level command is classified below as
+# config-aware or as owning no command-option config surface. On config-aware
+# surfaces, every OPTIONAL argparse destination must either be in the runtime
+# rows or be named as a per-invocation exception. Positionals are inputs by
+# definition and do not need a second hand-written inventory.
+#
+# The same config section can back more than one parser surface. In particular,
+# the `-status` commands share polling/output preferences with generation, while
+# `model` identifies an already-queued job and must not be filled from config.
+def _surface(section, argv, cli_only=(), masked=()):
+    return {
+        "section": section,
+        "argv": argv,
+        "cli_only": frozenset(cli_only),
+        "masked": frozenset(masked),
+    }
+
+
+_CONFIG_SURFACES = {
+    "balance": _surface("balance", ["balance"], {"json", "verbose"}),
+    "sfx": _surface("sfx", ["sfx", "p"], {"background", "dry_run"}),
+    "sfx-status": _surface("sfx", ["sfx-status", "q"], masked={"model"}),
+    "music": _surface(
+        "music", ["music", "p"], {"background", "dry_run", "lyrics"}
+    ),
+    "music-status": _surface(
+        "music", ["music-status", "q"], masked={"model"}
+    ),
+    "video": _surface(
+        "video",
+        ["video", "p"],
+        {
+            "audio_input", "background", "dry_run", "element", "end_image",
+            "image", "reference_audio", "reference_image", "reference_video",
+            "reference_video_duration", "scene_image", "video",
+        },
+    ),
+    "video-status": _surface(
+        "video", ["video-status", "q"], {"download_url"}, masked={"model"}
+    ),
+    "chat": _surface(
+        "chat",
+        ["chat", "p"],
+        {
+            "browser", "browser_allow", "browser_deny", "cont", "ephemeral",
+            "interactive", "json", "memory", "no_mcp", "no_thinking",
+            "no_venice_system_prompt", "resume", "shell", "shell_allow",
+            "shell_deny", "shell_unrestricted", "stream", "strip_thinking",
+            "tool", "web_citations", "web_scraping", "x_search",
+        },
+    ),
+    "tts": _surface("tts", ["tts", "p"], {"dry_run", "from_file", "stdin"}),
+    "image": _surface(
+        "image",
+        ["image", "p"],
+        {"dry_run", "from_file", "from_json", "name", "save_json", "seed"},
+    ),
+    "upscale": _surface("upscale", ["upscale", "in.png"], {"dry_run"}),
+    "bg-remove": _surface(
+        "bg_remove", ["bg-remove", "in.png"], {"dry_run", "image_url"}
+    ),
+    "image-edit": _surface(
+        "image_edit",
+        ["image-edit", "in.png"],
+        {"dry_run", "image_url", "layer", "prompt"},
+    ),
+    "embed": _surface(
+        "embed", ["embed", "x"], {"embed_insecure", "from_file", "json"}
+    ),
+    "index": _surface("index", ["index"], {"embed_insecure", "rebuild"}),
+    "search": _surface(
+        "search", ["search", "q"], {"embed_insecure", "index_path", "json"}
+    ),
+    "code": _surface(
+        "code",
+        ["code", "task"],
+        {
+            "allow_root", "browser", "browser_allow", "browser_deny", "cont",
+            "deny_root", "ephemeral", "interactive", "json", "manual",
+            "max_tokens", "memory", "no_plan", "no_verify", "plan_only",
+            "resume", "shell_allow", "shell_deny", "temperature",
+        },
+    ),
+    "review": _surface(
+        "review",
+        ["review"],
+        {"json", "max_tokens", "paths", "root", "temperature"},
+    ),
+    "master": _surface("master", ["master", "in.wav"], {"dry_run"}),
+    "contact-sheet": _surface(
+        "contact_sheet", ["contact-sheet", "*.png"], {"dry_run"}
+    ),
+}
+
+
+# A command in this set has no `defaults.<command>` surface by design. Adding a
+# command requires an explicit choice here or in `_CONFIG_SURFACES`; otherwise
+# the inventory test fails instead of silently choosing a policy.
+_NO_CONFIG_COMMANDS = frozenset({
+    "completion", "config", "login", "mcp-serve", "memory", "models",
+    "secret", "sessions",
+})
+
+
+# Reasons are keyed by argparse dest so every exception above is reviewable.
+# A dest can be config-backed on one surface and per-run on another (`root`,
+# `temperature`, `max_tokens`), which is why policy is checked per surface.
+_CLI_ONLY_REASONS = {
+    # Output/presentation modes.
+    "json": "per-invocation output mode",
+    "verbose": "per-invocation output detail",
+    "stream": "per-invocation output transport",
+    "save_json": "per-invocation sidecar output",
+    # Inputs, selectors, and replay/resume state.
+    "audio_input": "request media input",
+    "download_url": "queued-job result input",
+    "element": "request media input",
+    "end_image": "request media input",
+    "from_file": "request input source",
+    "from_json": "request replay source",
+    "image": "request media input",
+    "image_url": "request media input",
+    "index_path": "search target",
+    "layer": "request media input",
+    "lyrics": "per-song content",
+    "name": "per-invocation artifact name",
+    "paths": "review scope",
+    "prompt": "request content",
+    "reference_audio": "request media input",
+    "reference_image": "request media input",
+    "reference_video": "request media input",
+    "reference_video_duration": "request media input",
+    "resume": "session identity",
+    "scene_image": "request media input",
+    "seed": "per-generation identity",
+    "stdin": "request input source",
+    "video": "request media input",
+    # One-run execution, authority, and capability choices.
+    "allow_root": "runtime path authority",
+    "background": "one-run execution mode",
+    "browser": "runtime capability enablement",
+    "browser_allow": "runtime network authority",
+    "browser_deny": "runtime network authority",
+    "cont": "session identity",
+    "deny_root": "runtime path authority",
+    "dry_run": "one-run execution mode",
+    "embed_insecure": "one-run TLS exception",
+    "ephemeral": "one-run persistence policy",
+    "interactive": "one-run interaction mode",
+    "manual": "one-run approval mode",
+    "memory": "runtime capability enablement",
+    "no_mcp": "one-run capability override",
+    "no_plan": "one-run workflow override",
+    "no_thinking": "one-run model control",
+    "no_venice_system_prompt": "one-run model control",
+    "no_verify": "one-run workflow override",
+    "plan_only": "one-run workflow mode",
+    "rebuild": "one-run index operation",
+    "shell": "runtime capability enablement",
+    "shell_allow": "runtime command authority",
+    "shell_deny": "runtime command authority",
+    "shell_unrestricted": "runtime command authority",
+    "strip_thinking": "one-run output transformation",
+    "tool": "one-run tool selection",
+    "web_citations": "one-run web request control",
+    "web_scraping": "one-run web request control",
+    "x_search": "one-run web request control",
+    # Existing surface-specific generation overrides. They remain CLI-only here;
+    # the same dest is already config-backed for chat where promised publicly.
+    "max_tokens": "surface-specific generation override",
+    "root": "review scope",
+    "temperature": "surface-specific generation override",
+}
+
+
+_MASKED_REASONS = {
+    ("sfx-status", "model"): "queued-job identity",
+    ("music-status", "model"): "queued-job identity",
+    ("video-status", "model"): "queued-job identity",
+}
+
+
+def _top_level_parsers(parser):
+    action = next(
+        a for a in parser._actions if isinstance(a, argparse._SubParsersAction)
+    )
+    return action.choices
+
+
+def _optional_dests(parser):
+    return {
+        action.dest for action in parser._actions
+        if action.option_strings and action.dest != "help"
+    }
+
+
+def _classification_errors(option_dests, mapped_dests, cli_only, masked):
+    errors = []
+    overlap = cli_only & mapped_dests
+    if overlap:
+        errors.append(f"CLI-only destinations are config-mapped: {sorted(overlap)}")
+    if not masked <= mapped_dests:
+        absent = sorted(masked - mapped_dests)
+        errors.append(
+            f"masked destinations are not config-mapped: {absent}"
+        )
+    classified = mapped_dests | cli_only
+    if option_dests - classified:
+        unclassified = sorted(option_dests - classified)
+        errors.append(f"unclassified destinations: {unclassified}")
+    if classified - option_dests:
+        absent = sorted(classified - option_dests)
+        errors.append(f"classified destinations are absent: {absent}")
+    return errors
+
+
+class TestExplicitConfigEnrollment(unittest.TestCase):
+    """The option-(1) closure for #57: explicit enrollment with drift alarms."""
+
+    def test_every_top_level_command_has_an_explicit_policy(self):
+        commands = set(_top_level_parsers(cli.build_parser()))
+        classified = set(_CONFIG_SURFACES) | set(_NO_CONFIG_COMMANDS)
+        self.assertEqual(commands, classified)
+        self.assertFalse(set(_CONFIG_SURFACES) & set(_NO_CONFIG_COMMANDS))
+
+    def test_every_config_surface_option_is_classified(self):
+        parsers = _top_level_parsers(cli.build_parser())
+        used_cli_only = set()
+        used_masked = set()
+        for name, spec in _CONFIG_SURFACES.items():
+            with self.subTest(command=name):
+                option_dests = _optional_dests(parsers[name])
+                mapped_dests = {
+                    dest for dest, _coerce in _rows_for(spec["section"]).values()
+                    if dest in option_dests
+                }
+                errors = _classification_errors(
+                    option_dests, mapped_dests, spec["cli_only"], spec["masked"]
+                )
+                self.assertEqual(errors, [])
+                used_cli_only.update(spec["cli_only"])
+                used_masked.update((name, dest) for dest in spec["masked"])
+        self.assertEqual(used_cli_only, set(_CLI_ONLY_REASONS))
+        self.assertEqual(used_masked, set(_MASKED_REASONS))
+        self.assertTrue(all(_CLI_ONLY_REASONS.values()))
+        self.assertTrue(all(_MASKED_REASONS.values()))
+
+    def test_active_config_destinations_parse_unset(self):
+        """A concrete argparse default prevents `apply_defaults` from filling."""
+        parser = cli.build_parser()
+        parsers = _top_level_parsers(parser)
+        for name, spec in _CONFIG_SURFACES.items():
+            args = parser.parse_args(spec["argv"])
+            option_dests = _optional_dests(parsers[name])
+            mapped_dests = {
+                dest for dest, _coerce in _rows_for(spec["section"]).values()
+                if dest in option_dests
+            }
+            for dest in sorted(mapped_dests - spec["masked"]):
+                with self.subTest(command=name, dest=dest):
+                    self.assertIsNone(getattr(args, dest))
+
+    def test_every_command_row_reaches_a_parser_surface(self):
+        """A stale allow-list row is dead configuration and must fail CI."""
+        parsers = _top_level_parsers(cli.build_parser())
+        by_section = {}
+        for name, spec in _CONFIG_SURFACES.items():
+            by_section.setdefault(spec["section"], set()).update(
+                _optional_dests(parsers[name])
+            )
+        # `browser` is compatibility/tool-only while the CLI rail is disabled.
+        self.assertEqual(set(uc._COMMAND_MAP) - set(by_section), {"browser"})
+        for section, rows in uc._COMMAND_MAP.items():
+            if section == "browser":
+                continue
+            for key, (dest, _coerce) in rows.items():
+                with self.subTest(section=section, key=key):
+                    self.assertIn(dest, by_section[section])
+
+    def test_every_global_row_reaches_at_least_one_surface(self):
+        parsers = _top_level_parsers(cli.build_parser())
+        option_dests = set().union(*(
+            _optional_dests(parsers[name]) for name in _CONFIG_SURFACES
+        ))
+        for key, (dest, _coerce) in uc._GLOBAL_MAP.items():
+            with self.subTest(key=key):
+                self.assertIn(dest, option_dests)
+
+    def test_guard_rejects_a_new_unclassified_option(self):
+        errors = _classification_errors(
+            {"mapped", "per_run", "new"}, {"mapped"}, {"per_run"}, set()
+        )
+        self.assertEqual(errors, ["unclassified destinations: ['new']"])
+
+    def test_guard_rejects_a_removed_map_row(self):
+        errors = _classification_errors({"mapped"}, set(), set(), set())
+        self.assertEqual(errors, ["unclassified destinations: ['mapped']"])
+
+
 _CLASS_A_CASES = [
     dict(
         mod=image, argv=["image"], key="image",
