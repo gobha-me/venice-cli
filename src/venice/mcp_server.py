@@ -1,4 +1,4 @@
-"""FastMCP wiring for `venice mcp-serve` -- the ONLY module that imports the mcp SDK.
+"""MCPServer wiring for `venice mcp-serve` -- the ONLY module that imports the mcp SDK.
 
 Imported lazily from `commands.mcp_serve._run`, and only after the `[mcp]` extra is
 confirmed present, so the base (stdlib-only) install and Python 3.9 never load it.
@@ -6,14 +6,14 @@ Each registered `venice_*` tool is a thin, typed wrapper that delegates 1:1 to t
 matching `commands._mcp.*_tool` implementation -- the wrapper carries the MCP schema
 and the LLM-facing docstring; the impl carries the (print-free, unit-tested) logic.
 
-Do NOT add `from __future__ import annotations` here: FastMCP builds each tool's
+Do NOT add `from __future__ import annotations` here: MCPServer builds each tool's
 input schema via typing.get_type_hints, so the annotations must stay concrete
 (`typing.Optional[int]`, not stringized `int | None`).
 """
 import os
 from typing import Annotated, List, Literal, Optional
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from pydantic import Field
 
 from . import userconfig
@@ -22,22 +22,22 @@ from .commands import _mcp, _shared, upscale as _upscale
 
 def _merged(defaults: dict, host: dict) -> dict:
     """Layer config `defaults` UNDER host-supplied args (#58): an explicit (non-None)
-    host value wins; where the host omitted an arg (FastMCP fills the wrapper's None
+    host value wins; where the host omitted an arg (MCPServer fills the wrapper's None
     default) the config default applies; keys the wrapper never exposes (e.g. image
     safe_mode/hide_watermark) come purely from config. Same precedence as
     `_agent._make_paid`'s `{**defaults, **_clean(arguments)}`."""
     return {**defaults, **{k: v for k, v in host.items() if v is not None}}
 
 
-def build_server(client, doc=None, root=None) -> FastMCP:
-    """Build a FastMCP server exposing venice tools, all bound to `client`.
+def build_server(client, doc=None, root=None) -> MCPServer:
+    """Build an MCPServer exposing venice tools, all bound to `client`.
 
     `doc` is a userconfig document (issue #58): `defaults.<section>.*` values are
     layered UNDER each host-supplied tool arg, so an explicit arg still wins
     (precedence: host arg > config default > tool hardcoded default) -- the same
     contract `venice chat`/`code` already honor. `doc=None` loads the config file.
     """
-    server = FastMCP("venice")
+    server = MCPServer("venice")
     path_authority = _shared.MediaPathAuthority(
         os.path.realpath(root or os.getcwd())
     )

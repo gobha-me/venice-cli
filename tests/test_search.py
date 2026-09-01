@@ -184,13 +184,13 @@ class TestSearchTLS(_Base):
     backend base_url comes from stored index meta (a local-backed index)."""
 
     def _search_tls(self, *, env=None, stderr=None, **ov):
-        """search_index against the local-backed store with httpx.Client patched
+        """search_index with the SDK HTTP-client factory patched
         to a sentinel; returns (Hx_mock, OAI_mock)."""
         fake, _ = fake_openai()
         base_env = _no_key_env()
         if env:
             base_env.update(env)
-        with mock.patch("httpx.Client", return_value="httpx-sentinel") as Hx, \
+        with mock.patch("openai.DefaultHttpxClient", return_value="httpx-sentinel") as Hx, \
              mock.patch("openai.OpenAI", return_value=fake) as OAI, \
              mock.patch.dict(os.environ, base_env, clear=True), \
              mock.patch.object(sys, "stderr", stderr or io.StringIO()):
@@ -231,7 +231,7 @@ class TestSearchTLS(_Base):
         self.addCleanup(os.chdir, cwd)
         os.chdir(self.root)
         fake, _ = fake_openai()
-        with mock.patch("httpx.Client", return_value="httpx-sentinel") as Hx, \
+        with mock.patch("openai.DefaultHttpxClient", return_value="httpx-sentinel") as Hx, \
              mock.patch("openai.OpenAI", return_value=fake), \
              mock.patch.dict(os.environ, {**_no_key_env(),
                                           "VENICE_EMBED_CA_BUNDLE": "/env-ca.pem"},

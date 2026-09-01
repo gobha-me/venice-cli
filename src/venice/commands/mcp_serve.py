@@ -48,7 +48,7 @@ def _run(args) -> int:
         print(str(e), file=sys.stderr)
         return 2
 
-    from ..mcp_server import serve  # lazy: only import FastMCP after the probe passes
+    from ..mcp_server import serve  # lazy: only import MCPServer after the probe passes
 
     doc = userconfig.load_config()  # #58: honor defaults.<section>.* in exposed tools
 
