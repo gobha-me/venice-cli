@@ -251,7 +251,10 @@ class TestDriveCharge(_DriveCase):
             d.expect("image: estimated cost $0.0100 is over the auto-approve cap")
             d.expect("Proceed? [y]es / [a]ll (accept rest) / [N]o ")
             d.send("y")
-            d.expect('"content": "TOOL-LOOP-COMPLETE"')
+            d.expect('"final": "TOOL-LOOP-COMPLETE"')
+            d.expect('"prompt_tokens": 22')
+            d.expect('"completion_tokens": 6')
+            d.expect('"turns": 1')
             self.assertEqual(d.wait(), 0)
 
         outputs = list(self.project.glob("venice-image-*.png"))

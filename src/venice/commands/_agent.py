@@ -3557,6 +3557,7 @@ def run_loop(
     ledger: Optional[CostLedger] = None,
     steer_drain: Optional[Callable[[], List[str]]] = None,
     parallel: bool = False,
+    final_emitter: Optional[Callable[[object], int]] = None,
 ) -> int:
     """Drive the function-calling loop until the model stops (or the cap is hit).
 
@@ -3587,6 +3588,10 @@ def run_loop(
     results were all appended -- and each message is appended as a tagged user turn
     so the model consumes it exactly as if the operator had typed it. Draining does
     NOT reset the spend/tool-call budgets (a steer is additive input, not a reset).
+
+    `final_emitter` is an internal output seam. By default the loop prints the final
+    response according to `json_out`; callers that need to build an envelope only
+    after their own accounting is finalized can capture the response instead.
     """
     oai_tools = to_openai_tools(tools)
     dispatch = dispatch_map(tools)
@@ -3605,6 +3610,12 @@ def run_loop(
         # Install the thread-local stdout router on the MAIN thread before any subagent
         # worker starts, so workers only ever push/pop a target and never race on install.
         _install_router()
+
+    emit_final = (
+        final_emitter
+        if final_emitter is not None
+        else lambda response: _emit_final(response, json_out)
+    )
 
     def _force_final(reason: str) -> int:
         print(reason, file=sys.stderr)
@@ -3625,7 +3636,7 @@ def run_loop(
                           seconds=time.monotonic() - _t0)
         msg = resp.choices[0].message if getattr(resp, "choices", None) else None
         messages.append(_assistant_dict(msg))
-        return _emit_final(resp, json_out)
+        return emit_final(resp)
 
     while True:
         # Mid-run steering (#78): drain any queued steers at the checkpoint boundary
@@ -3701,7 +3712,7 @@ def run_loop(
                     f"{cache_event.message}; response is already final",
                     file=sys.stderr,
                 )
-            return _emit_final(resp, json_out)
+            return emit_final(resp)
 
         # Every tool_call in the turn must get a result (message-contract), even
         # ones past the budget -- those are reported not-executed rather than run.

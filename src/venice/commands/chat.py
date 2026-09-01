@@ -383,7 +383,7 @@ def _print_usage(usage) -> None:
         print(f"usage: prompt={pt} completion={ct} total={tt}", file=sys.stderr)
 
 
-def _finish(ledger, t0) -> None:
+def _finish(ledger, t0, *, quiet: bool = False) -> None:
     """Close the tool-loop run's wall-clock window, once, and print the footer (#86).
 
     A one-shot `venice chat --tools` reported neither time nor cost: the ledger was
@@ -402,11 +402,9 @@ def _finish(ledger, t0) -> None:
     * No `human` accumulator. Chat has no plan/edit prompt to subtract, and the
       paid-tool confirm gate lives inside `run_loop` where this can't see it -- the
       same hole `code` has, so not a regression.
-    * Not suppressed under `--json`. `code` has an envelope to carry the number;
-      chat's `--json` is the raw SDK object, written by `_agent._emit_final` *inside*
-      `run_loop`, so anything threaded in there would be stamped 0.0s by construction.
-      stderr is the only surface left, and this path already writes to it unguarded
-      (the MCP-attached notice above). stdout stays byte-identical.
+    * `quiet=True` stamps without printing when a successful `--json` run is about to
+      carry this ledger in its envelope. Error and Ctrl+C paths still call the normal
+      form from `finally`, so a failed run with no envelope does not lose its cost.
 
     Idempotent via `ledger.turns`: a non-zero turn count means "already stamped".
     Sound here because a one-shot ledger is never `restore()`d -- `_agent.wants_interactive`
@@ -417,13 +415,25 @@ def _finish(ledger, t0) -> None:
     if ledger is None or ledger.turns:
         return
     ledger.record_turn(time.monotonic() - t0)
-    # cache=True (#100): same reasoning as `code._finish` -- and more load-bearing here,
-    # since chat's `--json` has no envelope to carry the number instead (#88). The same
-    # goes for tools_fragment (#82): this footer is the ONLY surface carrying it here.
-    # It reads `elapsed_seconds` for its "concurrent" check, so it must render after the
-    # `record_turn` above.
+    if quiet:
+        return
+    # cache=True (#100): the human footer and the JSON ledger must report the same
+    # aggregate. The same goes for tools_fragment (#82). It reads `elapsed_seconds`
+    # for its "concurrent" check, so it must render after the `record_turn` above.
     print(f"chat: {_agent.format_duration(ledger.elapsed_seconds)} wall"
           f"{ledger.tools_fragment()} -- {ledger.summary(cache=True)}", file=sys.stderr)
+
+
+def _agent_json_envelope(resp, ledger) -> dict:
+    """The aggregate machine contract for one `chat --tools` run (#88)."""
+    content = ""
+    if getattr(resp, "choices", None):
+        content = resp.choices[0].message.content or ""
+    return {
+        "final": content,
+        "usage": ledger.to_dict(),
+        "venice_parameters": _as_dict(getattr(resp, "venice_parameters", None)),
+    }
 
 
 def _run(args) -> int:
@@ -638,6 +648,12 @@ def _run_agent(args, oai, openai, client, models, model, kwargs) -> Optional[int
     # operator spent waiting on us, and `_finish` is inert until a ledger exists.
     t0 = time.monotonic()
     ledger = None
+    final_response = []
+
+    def _capture_final(resp) -> int:
+        final_response.append(resp)
+        return 0
+
     try:
         with _tools_session(args, client, models, model) as (tools, rc):
             if tools is None:
@@ -656,7 +672,7 @@ def _run_agent(args, oai, openai, client, models, model, kwargs) -> Optional[int
             # gating: `_build_ledger` leaves max_tokens None and both `over()` and
             # `over_tokens()` short-circuit on a None cap. --session-max-spend still caps.
             ledger = _agent.usage_ledger(args, models, model)  # #66 spend cap, #86 metering
-            return _agent.run_loop(
+            result = _agent.run_loop(
                 oai, model, messages, kwargs, tools,
                 max_tool_calls=(args.max_tool_calls if args.max_tool_calls is not None
                                 else PROFILE.default_max_tool_calls),
@@ -664,7 +680,24 @@ def _run_agent(args, oai, openai, client, models, model, kwargs) -> Optional[int
                 json_out=args.json,
                 budget=_compact.budget_from_args(args),  # #48 auto-compact parity
                 ledger=ledger,
+                final_emitter=_capture_final if args.json else None,
             )
+            if args.json and result == 0:
+                if len(final_response) != 1:
+                    print("chat: final response was not captured", file=sys.stderr)
+                    return 2
+                # The aggregate must be stamped before serialization; otherwise its
+                # elapsed_seconds and turns fields would still describe an open run.
+                _finish(ledger, t0, quiet=True)
+                json.dump(
+                    _agent_json_envelope(final_response[0], ledger),
+                    sys.stdout,
+                    indent=2,
+                    default=str,
+                    allow_nan=False,
+                )
+                sys.stdout.write("\n")
+            return result
     except openai.OpenAIError as e:
         return _openai.status_to_exit(openai, e, "chat")
     except KeyboardInterrupt:
@@ -674,10 +707,9 @@ def _run_agent(args, oai, openai, client, models, model, kwargs) -> Optional[int
         print("\nchat: aborted", file=sys.stderr)
         return 130
     finally:
-        # After the error handlers so their message lands first, and after `run_loop`
-        # has written its output. If a future ticket gives chat a `to_dict()` envelope
-        # or a session save, this placement becomes wrong -- the stamp has to precede
-        # the snapshot or the blob carries turns=0.
+        # After the error handlers so their message lands first. A successful JSON run
+        # stamps before its envelope above; idempotence makes this a no-op there. Error
+        # and Ctrl+C paths have no envelope, so they still report their partial cost.
         _finish(ledger, t0)
 
 
