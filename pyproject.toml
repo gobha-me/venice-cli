@@ -49,17 +49,14 @@ dependencies = []
 
 [project.optional-dependencies]
 openai = ["openai>=1.40"]
-# The MCP server (`venice mcp-serve`) uses the FastMCP server from the `mcp` SDK.
+# The MCP server (`venice mcp-serve`) uses MCPServer from the `mcp` SDK.
 # The SDK requires Python >=3.10, so the dep is gated by an environment marker:
 # on 3.9 the extra resolves to nothing (the CLI stays 3.9-compatible; only this
 # one optional command needs 3.10+). Imported lazily, like the openai extra.
-# Upper-bounded as of 2026-07-29 (#95): mcp 2.0.0, published 2026-07-28, deletes
-# `mcp.server.fastmcp` -- `mcp.server` now exposes `mcpserver` instead. The old
-# unbounded `mcp>=1.2` turned that into a red CI on every branch within the hour,
-# on 3.10-3.14 only (2.0 declares requires-python >=3.10, so the 3.9 job kept
-# resolving 1.x and stayed green). 1.29.0 is the current 1.x and still ships
-# FastMCP. Lift this when `mcp_serve.py` is ported to the 2.x server API.
-mcp = ["mcp>=1.2,<2; python_version>='3.10'"]
+# Keep the major bound explicit: SDK 2.x renamed FastMCP to MCPServer and moved
+# protocol-model attributes to snake_case, so a future major must be reviewed
+# deliberately rather than becoming an ambient resolver break like #95.
+mcp = ["mcp>=2,<3; python_version>='3.10'"]
 # Test-only: `pexpect` drives the real CLI on a pty in tests/test_drive_cli.py.
 # Deliberately NOT in `all` -- `all` is a *runtime* install, and the CI `package`
 # job's "a base install pulls in nothing third-party" proof must stay meaningful.

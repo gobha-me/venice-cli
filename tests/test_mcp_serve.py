@@ -1,13 +1,15 @@
-"""Tests for the `venice mcp-serve` subcommand and FastMCP wiring.
+"""Tests for the `venice mcp-serve` subcommand and MCPServer wiring.
 
 Two layers: the missing-`mcp`-extra path runs everywhere (it patches the SDK out);
 the `build_server` wiring test is skipped unless the `mcp` SDK is importable (it is
 absent on Python 3.9, where the extra's environment marker excludes it).
 """
 import argparse
+import asyncio
 import importlib.util
 import inspect
 import io
+import json
 import sys
 import tempfile
 import unittest
@@ -47,6 +49,43 @@ class TestServerWiring(unittest.TestCase):
         server = build_server(FakeClient())
         names = {t.name for t in server._tool_manager.list_tools()}
         self.assertEqual(names, EXPECTED_TOOLS)
+
+    def test_v2_client_lists_and_calls_the_public_server_surface(self):
+        from mcp import Client
+
+        from venice.commands import _mcp
+        from venice.mcp_server import build_server
+
+        class FakeClient:
+            api_key = "fake"
+            base_url = "https://api.venice.ai/api/v1"
+
+        server = build_server(FakeClient(), doc={})
+
+        async def exercise():
+            async with Client(server) as client:
+                listed = await client.list_tools()
+                names = {tool.name for tool in listed.tools}
+                chat = next(tool for tool in listed.tools if tool.name == "venice_chat")
+                result = await client.call_tool("venice_chat", {"message": "ping"})
+                return names, chat.input_schema, result
+
+        with mock.patch.object(
+            _mcp,
+            "chat_tool",
+            return_value={"status": "ok", "content": "pong"},
+        ) as impl:
+            names, schema, result = asyncio.run(exercise())
+
+        self.assertEqual(names, EXPECTED_TOOLS)
+        self.assertEqual(schema["required"], ["message"])
+        self.assertFalse(result.is_error)
+        self.assertIsNone(result.structured_content)
+        self.assertEqual(
+            json.loads(result.content[0].text),
+            {"status": "ok", "content": "pong"},
+        )
+        impl.assert_called_once()
 
     def test_server_captures_startup_root_for_media_authority(self):
         from venice.mcp_server import build_server

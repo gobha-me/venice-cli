@@ -350,7 +350,7 @@ class TestIndexCLI(unittest.TestCase):
     # --- #42: TLS override reaches the SDK through CLI env/config layering ---
 
     def _run_tls(self, *, env=None, doc=None, **arg_ov):
-        """Drive index._run against the local backend with httpx.Client patched to
+        """Drive index._run with the SDK HTTP-client factory patched to
         a sentinel; returns (rc, Hx_mock) so a test can assert the verify value."""
         from venice.commands import index
         tmp = tempfile.TemporaryDirectory()
@@ -360,7 +360,7 @@ class TestIndexCLI(unittest.TestCase):
         if env:
             base_env.update(env)
         fake, _ = fake_openai()
-        with mock.patch("httpx.Client", return_value="httpx-sentinel") as Hx, \
+        with mock.patch("openai.DefaultHttpxClient", return_value="httpx-sentinel") as Hx, \
              mock.patch("openai.OpenAI", return_value=fake), \
              mock.patch("venice.userconfig.load_config",
                         return_value=doc or _clean_doc()), \
@@ -398,13 +398,13 @@ class TestIndexTLS(_EngineBase):
     """#42: TLS escape hatch on the local embedding backend (engine level)."""
 
     def _build(self, *, stderr=None, **ov):
-        """build_index on self.root via the local backend, httpx.Client patched to
+        """build_index on self.root with the SDK HTTP-client factory patched to
         a sentinel. Returns (Hx_mock, OAI_mock); propagates IndexingError."""
         write(self.root, "a.txt", "alpha\n")
         fake, _ = fake_openai()
         kw = dict(embed_base_url="http://local/v1", embed_model="m")
         kw.update(ov)
-        with mock.patch("httpx.Client", return_value="httpx-sentinel") as Hx, \
+        with mock.patch("openai.DefaultHttpxClient", return_value="httpx-sentinel") as Hx, \
              mock.patch("openai.OpenAI", return_value=fake) as OAI, \
              mock.patch.dict(os.environ, _no_key_env(), clear=True), \
              mock.patch.object(sys, "stderr", stderr or io.StringIO()):

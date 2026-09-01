@@ -3,7 +3,7 @@
 Import-clean by design: this module must NOT import `mcp` (or `openai`) at module
 scope, so `venice --help` and the base, stdlib-only install keep working, and the
 tests here run on Python 3.9 where the `mcp` SDK cannot even be installed. The thin
-FastMCP wiring lives in `venice.mcp_server`; everything with real logic lives here:
+MCPServer wiring lives in `venice.mcp_server`; everything with real logic lives here:
 the lazy `import_mcp` probe, the spend gate, the output-dir resolver, and the
 print-free `*_tool` functions the server delegates to.
 

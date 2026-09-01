@@ -91,15 +91,15 @@ def build_openai(module, client=None, *, base_url=None, api_key=None, verify=Non
 
     `verify` overrides TLS verification for that alternate backend (a CA-bundle
     path to trust a private CA, or False to disable checks for a self-signed
-    cert). It is opt-in and only reaches non-Venice endpoints. When set we hand
-    the SDK an httpx client (httpx ships transitively with the openai SDK). The
+    cert). It is opt-in and only reaches non-Venice endpoints. When set we use
+    the SDK's own HTTP-client factory, which follows the transport bundled by
+    that SDK version (`httpx` on older releases, `httpx2` on newer ones). The
     client is not explicitly closed -- fine for a one-shot CLI process that exits
     right after; don't copy this into a long-lived caller without closing it.
     """
     extra = {}
     if verify is not None:
-        import httpx
-        extra["http_client"] = httpx.Client(verify=verify)
+        extra["http_client"] = module.DefaultHttpxClient(verify=verify)
     if base_url is not None:
         return module.OpenAI(
             api_key=api_key or "not-needed", base_url=base_url, **extra

@@ -6,14 +6,14 @@ read-only hint). The leading underscore keeps unittest's discovery from importin
 this module (its ``import mcp`` would fail on Python 3.9), so it is only ever
 launched as a subprocess by a test already gated on the `mcp` SDK being present.
 """
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 
 # Quiet the SDK's per-request INFO logging so it doesn't clutter test output.
-server = FastMCP("fake", log_level="WARNING")
+server = MCPServer("fake", log_level="WARNING")
 
 
-@server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+@server.tool(annotations=ToolAnnotations(read_only_hint=True))
 def echo(text: str) -> str:
     """Return the text unchanged (read-only)."""
     return f"echo: {text}"

@@ -77,8 +77,9 @@ Extras are per-feature and additive, so the pattern holds as the CLI grows:
 | `venice-cli[mcp]` | MCP server/client transport; needs Python ≥ 3.10, and does not itself provide `[openai]` |
 | `venice-cli[all]` | every extra (`openai` + `mcp`) |
 
-The `[mcp]` extra pulls in the [`mcp`](https://pypi.org/project/mcp/) SDK, which
-requires Python ≥ 3.10. The base CLI still supports 3.9 — on 3.9 the extra
+The `[mcp]` extra pulls in version 2.x of the
+[`mcp`](https://pypi.org/project/mcp/) SDK, which requires Python ≥ 3.10. The
+base CLI still supports 3.9 — on 3.9 the extra
 resolves to nothing and only `venice mcp-serve` and `venice chat --mcp` are
 unavailable.
 

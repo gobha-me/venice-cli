@@ -10,7 +10,7 @@ changes -- it consumes a `list[Tool]`; we just append more entries.
 Two hard problems shape the design:
 
 1. **Async vs sync.** The `mcp` SDK client (`ClientSession`, `stdio_client`,
-   `streamablehttp_client`, `sse_client`) is entirely async/anyio-based, while
+   `streamable_http_client`, `sse_client`) is entirely async/anyio-based, while
    `run_loop` and the `openai` SDK it drives are synchronous. We bridge with a
    dedicated **background thread running its own asyncio loop**. A single
    "supervisor" coroutine owns every session for the whole `venice chat` (or REPL)
@@ -142,15 +142,15 @@ def _is_side_effecting(annotations) -> bool:
     """
     if annotations is None:
         return True
-    return getattr(annotations, "readOnlyHint", None) is not True
+    return getattr(annotations, "read_only_hint", None) is not True
 
 
 def _translate_result(result) -> dict:
     """Turn an MCP ``CallToolResult`` into the loop's JSON-serializable result dict.
 
-    Joins text blocks; marks (never inlines) non-text content; maps ``isError`` to
+    Joins text blocks; marks (never inlines) non-text content; maps ``is_error`` to
     a ``{"status": "error"}`` dict the model can recover from; carries
-    ``structuredContent`` through when present.
+    ``structured_content`` through when present.
     """
     parts: List[str] = []
     for block in getattr(result, "content", None) or []:
@@ -161,13 +161,13 @@ def _translate_result(result) -> dict:
             btype = getattr(block, "type", None) or type(block).__name__
             parts.append(f"[non-text content: {btype}]")
     joined = "\n".join(parts)
-    is_error = bool(getattr(result, "isError", False))
+    is_error = bool(getattr(result, "is_error", False))
     out: dict = {"status": "error" if is_error else "ok"}
     if is_error:
         out["message"] = joined or "tool call failed"
     else:
         out["content"] = joined
-    structured = getattr(result, "structuredContent", None)
+    structured = getattr(result, "structured_content", None)
     if structured is not None:
         out["structured"] = structured
     return out
@@ -325,7 +325,7 @@ class _Bridge:
                         "real": t.name,
                         "description": t.description
                         or f"{t.name} (via MCP server {name!r})",
-                        "parameters": t.inputSchema
+                        "parameters": t.input_schema
                         or {"type": "object", "properties": {}},
                         "side_effecting": _is_side_effecting(
                             getattr(t, "annotations", None)
@@ -367,13 +367,21 @@ class _Bridge:
             )
             return read, write
 
-        from mcp.client.streamable_http import streamablehttp_client
-
-        # streamablehttp yields (read, write, get_session_id); drop the third.
-        transport = await stack.enter_async_context(
-            streamablehttp_client(url, headers=headers)
+        from mcp.client.streamable_http import (
+            create_mcp_http_client,
+            streamable_http_client,
         )
-        return transport[0], transport[1]
+
+        # v2 moved headers off the transport helper and onto a caller-owned
+        # httpx2 client. Enter both contexts on the supervisor's one stack so
+        # sockets and anyio scopes still unwind in the same task.
+        http_client = await stack.enter_async_context(
+            create_mcp_http_client(headers)
+        )
+        read, write = await stack.enter_async_context(
+            streamable_http_client(url, http_client=http_client)
+        )
+        return read, write
 
     async def _serve(self, sessions) -> None:
         assert self._request_q is not None

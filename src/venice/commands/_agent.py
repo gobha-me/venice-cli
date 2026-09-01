@@ -6,7 +6,7 @@ own endpoints as **in-process** function tools and the completion runs in a loop
 the self-contained-agent foundation for the vcoder epic (#25).
 
 Import discipline: this module reuses the print-free `*_tool` primitives in
-``commands._mcp`` but NEVER imports the ``mcp``/FastMCP SDK -- the whole point of
+``commands._mcp`` but NEVER imports the ``mcp``/MCPServer SDK -- the whole point of
 #15 is that the agent loop needs only the ``[openai]`` extra. (`_mcp` is itself
 import-clean, so pulling it in at CLI startup is cheap and mcp-free.)
 

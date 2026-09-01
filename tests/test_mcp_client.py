@@ -8,6 +8,8 @@ Three layers:
 - A real end-to-end `attach()` test spawns a tiny stdio MCP server subprocess; it is
   skipped unless the `mcp` SDK is importable (absent on Python 3.9).
 """
+import asyncio
+import contextlib
 import importlib.util
 import os
 import subprocess
@@ -24,8 +26,8 @@ _FAKE_SERVER = os.path.join(os.path.dirname(__file__), "_mcp_fake_server.py")
 # --- duck-typed stand-ins for the mcp SDK's result/annotation objects --------
 
 class _Ann:
-    def __init__(self, readOnlyHint=None):
-        self.readOnlyHint = readOnlyHint
+    def __init__(self, read_only_hint=None):
+        self.read_only_hint = read_only_hint
 
 
 class _Block:
@@ -35,10 +37,10 @@ class _Block:
 
 
 class _CallResult:
-    def __init__(self, content=None, isError=False, structuredContent=None):
+    def __init__(self, content=None, is_error=False, structured_content=None):
         self.content = content or []
-        self.isError = isError
-        self.structuredContent = structuredContent
+        self.is_error = is_error
+        self.structured_content = structured_content
 
 
 class TestPureHelpers(unittest.TestCase):
@@ -128,9 +130,9 @@ class TestPureHelpers(unittest.TestCase):
 
     def test_is_side_effecting_defaults_true(self):
         self.assertTrue(mc._is_side_effecting(None))
-        self.assertTrue(mc._is_side_effecting(_Ann(readOnlyHint=None)))
-        self.assertTrue(mc._is_side_effecting(_Ann(readOnlyHint=False)))
-        self.assertFalse(mc._is_side_effecting(_Ann(readOnlyHint=True)))
+        self.assertTrue(mc._is_side_effecting(_Ann(read_only_hint=None)))
+        self.assertTrue(mc._is_side_effecting(_Ann(read_only_hint=False)))
+        self.assertFalse(mc._is_side_effecting(_Ann(read_only_hint=True)))
 
     def test_translate_ok_joins_text(self):
         r = mc._translate_result(_CallResult([_Block(text="hi"), _Block(text="yo")]))
@@ -142,13 +144,13 @@ class TestPureHelpers(unittest.TestCase):
         self.assertIn("non-text content: image", r["content"])
 
     def test_translate_error(self):
-        r = mc._translate_result(_CallResult([_Block(text="boom")], isError=True))
+        r = mc._translate_result(_CallResult([_Block(text="boom")], is_error=True))
         self.assertEqual(r["status"], "error")
         self.assertEqual(r["message"], "boom")
 
     def test_translate_carries_structured(self):
         r = mc._translate_result(
-            _CallResult([_Block(text="x")], structuredContent={"a": 1})
+            _CallResult([_Block(text="x")], structured_content={"a": 1})
         )
         self.assertEqual(r["structured"], {"a": 1})
 
@@ -203,6 +205,45 @@ class TestAttachIntegration(unittest.TestCase):
 
     def _specs(self):
         return [("fake", {"command": sys.executable, "args": [_FAKE_SERVER]})]
+
+    def test_streamable_http_uses_v2_client_and_preserves_headers(self):
+        class AsyncCM:
+            def __init__(self, value):
+                self.value = value
+
+            async def __aenter__(self):
+                return self.value
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        async def exercise():
+            bridge = mc._Bridge([], connect_timeout=20, call_timeout=20)
+            http_client = object()
+            with mock.patch(
+                "mcp.client.streamable_http.create_mcp_http_client",
+                return_value=AsyncCM(http_client),
+            ) as create_client, mock.patch(
+                "mcp.client.streamable_http.streamable_http_client",
+                return_value=AsyncCM(("read", "write")),
+            ) as connect:
+                async with contextlib.AsyncExitStack() as stack:
+                    streams = await bridge._open_transport(
+                        stack,
+                        {
+                            "url": "https://mcp.example.test/rpc",
+                            "headers": {"Authorization": "Bearer fake-token"},
+                        },
+                    )
+                create_client.assert_called_once_with(
+                    {"Authorization": "Bearer fake-token"}
+                )
+                connect.assert_called_once_with(
+                    "https://mcp.example.test/rpc", http_client=http_client
+                )
+                return streams
+
+        self.assertEqual(asyncio.run(exercise()), ("read", "write"))
 
     def test_lists_namespaces_and_calls(self):
         with mc.attach(self._specs(), connect_timeout=20, call_timeout=20) as tools:

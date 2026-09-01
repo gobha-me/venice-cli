@@ -419,7 +419,7 @@ class TestEmbed(unittest.TestCase):
     # --- TLS override for the alternate backend (#28) ---
 
     def test_ca_bundle_reaches_sdk_on_alt_path(self):
-        with mock.patch("httpx.Client", return_value="httpx-sentinel") as Hx:
+        with mock.patch("openai.DefaultHttpxClient", return_value="httpx-sentinel") as Hx:
             rc, built, captured, urlopen = self._run_alt(
                 _args(text="hi", embed_base_url="https://embed.local/v1",
                       embed_model="local-embed", embed_ca_bundle="/ca.pem"),
@@ -431,7 +431,7 @@ class TestEmbed(unittest.TestCase):
 
     def test_insecure_disables_verification_and_warns(self):
         err = io.StringIO()
-        with mock.patch("httpx.Client", return_value="httpx-sentinel") as Hx:
+        with mock.patch("openai.DefaultHttpxClient", return_value="httpx-sentinel") as Hx:
             rc, built, captured, urlopen = self._run_alt(
                 _args(text="hi", embed_base_url="https://embed.local/v1",
                       embed_model="local-embed", embed_insecure=True),
@@ -443,7 +443,7 @@ class TestEmbed(unittest.TestCase):
         self.assertIn("TLS verification disabled", err.getvalue())
 
     def test_ca_bundle_from_env_on_alt_path(self):
-        with mock.patch("httpx.Client", return_value="httpx-sentinel") as Hx:
+        with mock.patch("openai.DefaultHttpxClient", return_value="httpx-sentinel") as Hx:
             rc, built, captured, urlopen = self._run_alt(
                 _args(text="hi", embed_base_url="https://embed.local/v1",
                       embed_model="local-embed"),
@@ -456,7 +456,7 @@ class TestEmbed(unittest.TestCase):
     def test_ca_bundle_from_config_on_alt_path(self):
         doc = {"version": 1, "mcpServers": {}, "defaults": {"embed": {
             "embed_ca_bundle": "/cfg-ca.pem"}}}
-        with mock.patch("httpx.Client", return_value="httpx-sentinel") as Hx:
+        with mock.patch("openai.DefaultHttpxClient", return_value="httpx-sentinel") as Hx:
             rc, built, captured, urlopen = self._run_alt(
                 _args(text="hi", embed_base_url="https://embed.local/v1",
                       embed_model="local-embed"),
