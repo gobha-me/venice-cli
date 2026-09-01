@@ -101,19 +101,19 @@ PYTHONPATH=src python3 -m venice --help
 For an editable install: `pip install -e ".[openai]"`.
 
 Alternatively `./install.sh` puts `venice` on your PATH without pip, by creating
-two symlinks:
+one symlink:
 - `~/.local/bin/venice` -> `<repo>/bin/venice`
-- `~/.local/lib/venice` -> `<repo>/src/venice`
 
 and `~/.config/venice/` (mode 0700) for the credentials file. The installer
 resolves the repo path itself, so the clone can live wherever you like.
 `~/.local/bin` should be on your PATH.
 
 > **Don't mix pip and `./install.sh`.** Both own `~/.local/bin/venice`. If pip
-> got there first, `install.sh` refuses to clobber the real file and exits 1. If
-> `install.sh` got there first, pip silently replaces the symlink — your repo
-> edits stop taking effect with no error. Pick one; `pip uninstall venice-cli`
-> or `./uninstall.sh` to back the other out.
+> got there first, `install.sh` identifies the pip wrapper, refuses to clobber
+> it, and prints the uninstall/editable-install choices. If `install.sh` got
+> there first, pip silently replaces the symlink — your repo edits stop taking
+> effect with no error. Pick one; `pip uninstall venice-cli` or `./uninstall.sh`
+> to back the other out.
 
 ### Shell completion
 

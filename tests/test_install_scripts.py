@@ -84,9 +84,9 @@ class InstallScriptTests(unittest.TestCase):
         bin_link = self.home / ".local/bin/venice"
         lib_link = self.home / ".local/lib/venice"
         self.assertTrue(bin_link.is_symlink())
-        self.assertTrue(lib_link.is_symlink())
         self.assertEqual(os.readlink(bin_link), str(ROOT / "bin/venice"))
-        self.assertEqual(os.readlink(lib_link), str(ROOT / "src/venice"))
+        self.assertFalse(lib_link.exists())
+        self.assertFalse(lib_link.parent.exists())
         config_dir = self.home / ".config/venice"
         self.assertEqual(stat.S_IMODE(config_dir.stat().st_mode), 0o700)
         self.assertEqual(
@@ -94,9 +94,21 @@ class InstallScriptTests(unittest.TestCase):
             f"# venice source completion owner: {ROOT}",
         )
 
+        reinstalled = self.run_script("install.sh")
+        self.assertEqual(reinstalled.returncode, 0, reinstalled.stderr)
+        self.assertIn(
+            f"ok       {bin_link} -> {ROOT / 'bin/venice'}",
+            reinstalled.stdout,
+        )
+        self.assertFalse(lib_link.parent.exists())
+
         credentials = config_dir / "credentials"
         credentials.write_text("test-fake-key\n", encoding="utf-8")
         credentials.chmod(0o600)
+
+        # uninstall.sh retains exact-target cleanup for pre-#20 installs.
+        lib_link.parent.mkdir(parents=True)
+        lib_link.symlink_to(ROOT / "src/venice")
 
         uninstalled = self.run_script("uninstall.sh", through_symlink=True)
         self.assertEqual(uninstalled.returncode, 0, uninstalled.stderr)
@@ -158,6 +170,65 @@ class InstallScriptTests(unittest.TestCase):
         self.assertNotEqual(installed.returncode, 0)
         self.assertEqual(bin_dst.read_text(encoding="utf-8"), "user managed\n")
         self.assertIn("exists and is not a symlink", installed.stderr)
+
+    def test_install_identifies_modern_pip_console_script(self):
+        bin_dst = self.home / ".local/bin/venice"
+        bin_dst.parent.mkdir(parents=True)
+        content = (
+            "#!/usr/bin/python3\n"
+            "import sys\n"
+            "from venice.cli import main\n"
+            "if __name__ == '__main__':\n"
+            "    sys.exit(main())\n"
+        )
+        bin_dst.write_text(content, encoding="utf-8")
+
+        installed = self.run_script("install.sh")
+        self.assertNotEqual(installed.returncode, 0)
+        self.assertEqual(bin_dst.read_text(encoding="utf-8"), content)
+        self.assertIn("pip-installed venice-cli command", installed.stderr)
+        self.assertIn("pip uninstall venice-cli", installed.stderr)
+        self.assertIn("pip install -e .", installed.stderr)
+
+    def test_install_identifies_legacy_pip_console_script(self):
+        bin_dst = self.home / ".local/bin/venice"
+        bin_dst.parent.mkdir(parents=True)
+        content = (
+            "#!/usr/bin/python3\n"
+            "from pkg_resources import load_entry_point\n"
+            "load_entry_point('venice-cli==0.14.0', 'console_scripts', 'venice')\n"
+        )
+        bin_dst.write_text(content, encoding="utf-8")
+
+        installed = self.run_script("install.sh")
+        self.assertNotEqual(installed.returncode, 0)
+        self.assertEqual(bin_dst.read_text(encoding="utf-8"), content)
+        self.assertIn("pip-installed venice-cli command", installed.stderr)
+
+    def test_install_does_not_misclassify_partial_wrapper_markers(self):
+        bin_dst = self.home / ".local/bin/venice"
+        bin_dst.parent.mkdir(parents=True)
+        content = "#!/usr/bin/python3\nfrom venice.cli import main\n"
+        bin_dst.write_text(content, encoding="utf-8")
+
+        installed = self.run_script("install.sh")
+        self.assertNotEqual(installed.returncode, 0)
+        self.assertEqual(bin_dst.read_text(encoding="utf-8"), content)
+        self.assertIn("exists and is not a symlink", installed.stderr)
+        self.assertNotIn("pip-installed", installed.stderr)
+
+    def test_install_does_not_inspect_special_file(self):
+        if not hasattr(os, "mkfifo"):
+            self.skipTest("mkfifo is unavailable")
+        bin_dst = self.home / ".local/bin/venice"
+        bin_dst.parent.mkdir(parents=True)
+        os.mkfifo(bin_dst)
+
+        installed = self.run_script("install.sh")
+        self.assertNotEqual(installed.returncode, 0)
+        self.assertTrue(stat.S_ISFIFO(bin_dst.stat().st_mode))
+        self.assertIn("exists and is not a symlink", installed.stderr)
+        self.assertNotIn("pip-installed", installed.stderr)
 
     def test_uninstall_preserves_links_that_point_elsewhere(self):
         bin_dst = self.home / ".local/bin/venice"

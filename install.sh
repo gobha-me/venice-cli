@@ -33,7 +33,6 @@ REPO="$(CDPATH= cd -P "$(dirname "$SCRIPT")" && pwd)"
 BIN_SRC="$REPO/bin/venice"
 PKG_SRC="$REPO/src/venice"
 BIN_DST="$HOME/.local/bin/venice"
-LIB_DST="$HOME/.local/lib/venice"
 CFG_DIR="$HOME/.config/venice"
 
 [ -f "$BIN_SRC" ] || { echo "missing: $BIN_SRC" >&2; exit 1; }
@@ -41,7 +40,6 @@ CFG_DIR="$HOME/.config/venice"
 [ -x "$BIN_SRC" ] || chmod +x "$BIN_SRC"
 
 mkdir -p "$HOME/.local/bin"
-mkdir -p "$HOME/.local/lib"
 
 if [ ! -d "$CFG_DIR" ]; then
     mkdir -p "$CFG_DIR"
@@ -50,6 +48,25 @@ if [ ! -d "$CFG_DIR" ]; then
 else
     chmod 700 "$CFG_DIR"
 fi
+
+is_pip_console_script() {
+    candidate="$1"
+    [ -f "$candidate" ] || return 1
+    # Modern pip wrappers import the configured entry point directly.  Older
+    # setuptools wrappers resolve the same distribution/entry-point tuple at
+    # runtime.  Inspect fixed markers only: executing the destination, its
+    # shebang interpreter, or ambient pip would not prove who owns this file.
+    if grep -F "from venice.cli import main" "$candidate" >/dev/null 2>&1 \
+       && grep -F "sys.exit(main())" "$candidate" >/dev/null 2>&1; then
+        return 0
+    fi
+    if grep -F "load_entry_point(" "$candidate" >/dev/null 2>&1 \
+       && grep -F "venice-cli" "$candidate" >/dev/null 2>&1 \
+       && grep -F "'console_scripts', 'venice'" "$candidate" >/dev/null 2>&1; then
+        return 0
+    fi
+    return 1
+}
 
 link() {
     src="$1"; dst="$2"
@@ -63,7 +80,13 @@ link() {
         ln -s "$src" "$dst"
         echo "updated  $dst -> $src  (was: $current)"
     elif [ -e "$dst" ]; then
-        echo "REFUSE   $dst exists and is not a symlink -- remove it manually" >&2
+        if is_pip_console_script "$dst"; then
+            echo "REFUSE   $dst looks like the pip-installed venice-cli command" >&2
+            echo "Remove it first: pip uninstall venice-cli" >&2
+            echo "Or use pip for development: pip install -e ." >&2
+        else
+            echo "REFUSE   $dst exists and is not a symlink -- remove it manually" >&2
+        fi
         return 1
     else
         ln -s "$src" "$dst"
@@ -72,7 +95,6 @@ link() {
 }
 
 link "$BIN_SRC" "$BIN_DST"
-link "$PKG_SRC" "$LIB_DST"
 
 # Bash completion (best-effort; source installs only). pip users instead run
 # `source <(venice completion bash)`. Never fatal: a missing dir or unwritable
