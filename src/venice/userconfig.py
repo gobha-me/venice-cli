@@ -384,6 +384,12 @@ def _one_of(module: str, attr: str, cast=str):
 
 # config key -> (argparse dest, coercer). Globals apply to any command that
 # declares the flag; a per-command section overrides them.
+#
+# These maps are deliberately an explicit, fail-closed allow-list. Do not derive
+# them from argparse actions: a newly added per-run input, output mode, path, or
+# spend-sensitive flag must not silently become persistent configuration. The
+# parser-inventory guard in tests/test_config.py requires each new command/flag
+# to be classified, so map drift fails CI without granting config authority.
 _GLOBAL_MAP = {
     "output_dir": ("output", _as_path),
     "max_spend": ("max_spend", _numeric.non_negative_float),

@@ -123,6 +123,12 @@ distinction is invisible until you run the suite from a venv, where
   command, extract it instead.
 - **Exit codes are part of the interface.** See the table in the README; don't
   change what an existing condition returns without saying so.
+- **Config enrollment is explicit and fail-closed.** A new optional flag does
+  not automatically become a persistent `defaults.*` key. Add a typed row to
+  `userconfig._GLOBAL_MAP` / `_COMMAND_MAP` when it is a standing preference,
+  or classify it as per-invocation in `TestExplicitConfigEnrollment`. The parser
+  inventory must stay complete so a new command or flag cannot drift through CI
+  without that policy decision.
 - **Interactive surfaces need a drive test.** If you add or change a prompt, a
   slash-command, a confirm gate, or a signal handler, add a case to
   `tests/test_drive_cli.py`. A unit test that patches `input()` proves the
