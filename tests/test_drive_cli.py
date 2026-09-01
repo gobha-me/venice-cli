@@ -146,6 +146,24 @@ class TestDriveHttp(_DriveCase):
         self.assertEqual(self.api.paths, ["/api_keys/rate_limits"])
         self.assertTrue(self.api.requests[0]["has_auth"])
 
+    @needs_openai
+    def test_plain_streaming_chat_ctrl_c_reports_partial_output(self):
+        release = self.api.reply_paused_stream("PARTIAL-FROM-FAKE")
+        self.addCleanup(release.set)
+
+        with self.cli("chat", "Say something") as d:
+            # Seeing the first delta proves the child is inside the plain streaming
+            # handler before SIGINT is delivered; the fake holds the SSE connection
+            # open, so this synchronization has no sleep or timing race.
+            d.expect("PARTIAL-FROM-FAKE")
+            d.ctrl_c()
+            d.expect("chat: aborted (partial output may appear above)")
+            self.assertEqual(d.wait(), 130)
+            self.assertNotIn("Traceback", d.transcript)
+
+        release.set()
+        self.assertEqual(self.api.paths, ["/models", "/chat/completions"])
+
 
 # --------------------------------------------------------------------------
 # C. the charge-confirmation gate (_shared.confirm_or_exit)

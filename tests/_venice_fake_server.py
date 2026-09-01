@@ -159,6 +159,17 @@ class FakeVenice:
         with self._lock:
             self._chat.append({"deltas": list(deltas), "usage": _USAGE})
 
+    def reply_paused_stream(self, first_delta: str) -> threading.Event:
+        """Queue one SSE delta, then hold the connection open until released."""
+        release = threading.Event()
+        with self._lock:
+            self._chat.append({
+                "deltas": [first_delta],
+                "usage": _USAGE,
+                "pause_after_first": release,
+            })
+        return release
+
     def reply_tool_call(self, name: str, arguments: dict) -> None:
         """Queue one non-streamed assistant turn containing one tool call."""
         self.reply_tool_calls([(name, arguments)])
@@ -387,9 +398,13 @@ def _make_handler(api: FakeVenice):
             # ordering, so artificial delay would only buy flake.
             frame([{"index": 0, "delta": {"role": "assistant"},
                     "finish_reason": None}])
-            for piece in scripted["deltas"]:
+            for index, piece in enumerate(scripted["deltas"]):
                 frame([{"index": 0, "delta": {"content": piece},
                         "finish_reason": None}])
+                release = scripted.get("pause_after_first")
+                if index == 0 and release is not None:
+                    release.wait()
+                    return
             frame([{"index": 0, "delta": {}, "finish_reason": "stop"}])
             # `venice chat` always sends stream_options={"include_usage": true},
             # so the final usage frame (empty `choices`) is what produces the

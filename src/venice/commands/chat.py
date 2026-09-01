@@ -500,6 +500,12 @@ def _run(args) -> int:
         return _run_once(oai, kwargs, args.json)
     except openai.OpenAIError as e:
         return _openai.status_to_exit(openai, e, "chat")
+    except KeyboardInterrupt:
+        notice = "chat: aborted"
+        if stream:
+            notice += " (partial output may appear above)"
+        print(f"\n{notice}", file=sys.stderr)
+        return 130
 
 
 def _tools_for(args, client, models, model):
