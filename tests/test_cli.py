@@ -16,7 +16,15 @@ def _capture(fn, *args):
     out, err = io.StringIO(), io.StringIO()
     with mock.patch.object(sys, "stdout", out), mock.patch.object(sys, "stderr", err):
         rc = fn(*args)
+        replacement = sys.stdout
+    if replacement is not out:
+        replacement.close()
     return rc, out.getvalue(), err.getvalue()
+
+
+class _BrokenOnFlush(io.StringIO):
+    def flush(self):
+        raise BrokenPipeError
 
 
 class TestDispatcher(unittest.TestCase):
@@ -53,6 +61,24 @@ class TestDispatcher(unittest.TestCase):
         with mock.patch("venice.commands.models._run", side_effect=RuntimeError("boom")):
             with self.assertRaises(RuntimeError):
                 _capture(cli.main, ["models"])
+
+    def test_broken_pipe_from_a_handler_is_quiet_exit_141(self):
+        with mock.patch("venice.commands.models._run", side_effect=BrokenPipeError):
+            rc, out, err = _capture(cli.main, ["models"])
+        self.assertEqual(rc, 141)
+        self.assertEqual(out, "")
+        self.assertEqual(err, "")
+
+    def test_broken_pipe_from_the_final_flush_is_quiet_exit_141(self):
+        out, err = _BrokenOnFlush(), io.StringIO()
+        with mock.patch.object(sys, "stdout", out), mock.patch.object(sys, "stderr", err):
+            with mock.patch("venice.commands.models._run", return_value=0):
+                rc = cli.main(["models"])
+            replacement = sys.stdout
+        if replacement is not out:
+            replacement.close()
+        self.assertEqual(rc, 141)
+        self.assertEqual(err.getvalue(), "")
 
 
 if __name__ == "__main__":
