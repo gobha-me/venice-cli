@@ -228,9 +228,11 @@ class TestChat(unittest.TestCase):
         _cfg.start()
         self.addCleanup(_cfg.stop)
 
-    def _run(self, args, result, stdout=None, stderr=None):
+    def _run(self, args, result, stdout=None, stderr=None, side_effect=None):
         from venice.commands import chat
         fake, captured = _fake_openai(result)
+        if side_effect is not None:
+            fake.chat.completions.create.side_effect = side_effect
         with mock.patch.dict(os.environ, {"VENICE_API_KEY": "fake"}), \
              mock.patch("venice.client.urllib.request.urlopen", _urlopen_ok()), \
              mock.patch("openai.OpenAI", return_value=fake), \
@@ -420,6 +422,43 @@ class TestChat(unittest.TestCase):
         self.assertEqual(out.getvalue().strip(), "Hello")
         self.assertTrue(captured["stream"])
         self.assertEqual(captured["stream_options"], {"include_usage": True})
+
+    def test_non_stream_interrupt_prints_command_notice_and_exits_130(self):
+        for args in (
+            _args(message="hi", stream=False),
+            _args(message="hi", json=True),
+        ):
+            with self.subTest(json=args.json):
+                out, err = io.StringIO(), io.StringIO()
+                rc, _fake, _captured = self._run(
+                    args,
+                    FakeCompletion("unused"),
+                    stdout=out,
+                    stderr=err,
+                    side_effect=KeyboardInterrupt,
+                )
+                self.assertEqual(rc, 130)
+                self.assertEqual(out.getvalue(), "")
+                self.assertEqual(err.getvalue(), "\nchat: aborted\n")
+
+    def test_stream_interrupt_warns_that_stdout_may_be_partial(self):
+        def interrupted_stream():
+            yield FakeChunk("PARTIAL-FROM-FAKE")
+            raise KeyboardInterrupt
+
+        out, err = io.StringIO(), io.StringIO()
+        rc, _fake, _captured = self._run(
+            _args(message="hi", stream=True),
+            interrupted_stream(),
+            stdout=out,
+            stderr=err,
+        )
+        self.assertEqual(rc, 130)
+        self.assertEqual(out.getvalue(), "PARTIAL-FROM-FAKE")
+        self.assertEqual(
+            err.getvalue(),
+            "\nchat: aborted (partial output may appear above)\n",
+        )
 
     def test_venice_parameters_extra_body(self):
         rc, fake, captured = self._run(

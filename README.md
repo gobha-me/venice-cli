@@ -594,6 +594,10 @@ git log --oneline -20 | venice chat - --system "Group these into release notes."
 venice chat "ping" --json | jq '.choices[0].message.content'
 ```
 
+Ctrl+C during a one-shot chat prints `chat: aborted` and exits 130. Because the
+default streamed form may already have written part of the reply to stdout, its
+notice is `chat: aborted (partial output may appear above)`.
+
 ### Interactive mode
 
 With `-i`/`--interactive` — or simply no message on a terminal — `venice chat`
