@@ -1463,6 +1463,31 @@ The run footer names the off-loop share too, but stays short: one or two buckets
 listed (`[incl. $0.0031 compaction]`), and past that it collapses to
 `[incl. $0.0180 off-loop]` and defers to `/usage` for the per-rail breakdown.
 
+To distinguish "the cache stopped working" from "the provider stopped reporting
+it," run a controlled live probe with synthetic content rather than project or user
+data:
+
+```bash
+# Configured chat model plus a cache-advertising model from another family.
+venice cache-probe
+
+# Explicit bounded threshold sweep; six-digit prefixes are never a default.
+venice cache-probe --model kimi-k3 \
+  --prefix-tokens 8192 --prefix-tokens 64000 \
+  --prefix-tokens 112000 --prefix-tokens 120000 --prefix-tokens 128000
+
+# Machine-readable result, with a hard cap for the complete matrix.
+venice cache-probe --model kimi-k3 --repeat 3 --json --yes --max-spend 0.50
+```
+
+The command prints a conservative all-uncached estimate before making any paid
+completion call, then requires confirmation (or `--yes`). `--max-spend` fails
+closed if the catalog price is absent or the complete matrix exceeds the cap.
+Each call reports the raw `prompt_tokens_details` object unchanged; each model/size
+is classified as `warms`, `never warms`, or `field absent`. Repeating
+`--prefix-tokens` makes warming below a threshold and failure above it visible,
+while size-specific prefixes prevent one sweep row from warming another.
+
 ```bash
 # what has compaction cost this session?
 jq '.usage.buckets.compaction' ~/.config/venice/sessions/<id>.json
@@ -2131,6 +2156,7 @@ The player list (`paplay` -> `aplay` -> `ffplay` -> `mpg123` -> `play`
 | `venice secret set/ls/rm NAME` | manage named secrets in `~/.config/venice/secrets.json` (0600); values never printed, `ls` shows lengths only |
 | `venice balance [--verbose\|--json\|--min N]` | current USD + DIEM balance |
 | `venice models [--type T] [--detail] [SLUG]` | browse the catalog |
+| `venice cache-probe [--model M ...] [--prefix-tokens N ...] [--repeat N] [--json] [--max-spend USD]` | controlled live prefix-cache diagnostic with raw usage details and a pre-spend confirmation gate |
 | `venice sfx PROMPT [--duration N] [--max-spend USD] [...]` | generate a sound effect |
 | `venice sfx-status QUEUE_ID` | fetch a backgrounded SFX job |
 | `venice tts TEXT [--voice V] [--format F] [--speed N] [...]` | synthesize speech (sync) |

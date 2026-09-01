@@ -56,7 +56,7 @@ import threading
 import time
 from typing import Dict, List, Optional, Tuple
 
-from . import _agent, _code, _exec, _openai
+from . import _agent, _code, _exec, _models, _openai
 from ._exec import (  # shared exec rails (#33): one gate for every git shell-out
     DEFAULT_EXEC_TIMEOUT,
     MAX_OUTPUT_CHARS,
@@ -538,9 +538,7 @@ def _family(model_id: str) -> str:
     `qwen3-4b` and `qwen-2.5-coder` share family `qwen`, so picking a different *id*
     is not by itself decorrelation -- same family, largely the same blind spots.
     """
-    # `maxsplit=` by keyword: 3.13 deprecates passing it positionally, and the
-    # keyword form has been valid since long before the 3.9 floor.
-    return re.split(r"[-._0-9]", (model_id or "").strip().lower(), maxsplit=1)[0]
+    return _models.model_family(model_id)
 
 
 def resolve_reviewer_model(models, requested: Optional[str],

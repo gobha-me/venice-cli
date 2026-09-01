@@ -563,8 +563,8 @@ _CONFIG_SURFACES = {
 # command requires an explicit choice here or in `_CONFIG_SURFACES`; otherwise
 # the inventory test fails instead of silently choosing a policy.
 _NO_CONFIG_COMMANDS = frozenset({
-    "completion", "config", "login", "mcp-serve", "memory", "models",
-    "secret", "sessions",
+    "cache-probe", "completion", "config", "login", "mcp-serve", "memory",
+    "models", "secret", "sessions",
 })
 
 

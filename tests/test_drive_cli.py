@@ -183,6 +183,52 @@ class TestDriveHttp(_DriveCase):
 
 @needs_pty
 class TestDriveCharge(_DriveCase):
+    def test_cache_probe_confirms_before_two_paid_calls(self):
+        self.api.reply_usage(
+            {"cached_tokens": 0, "cache_creation_input_tokens": 8},
+            prompt_tokens=12,
+        )
+        self.api.reply_usage(
+            {"cached_tokens": 8, "provider_extension": "preserved"},
+            prompt_tokens=12,
+        )
+
+        with self.cli(
+            "cache-probe", "--model", "llama-3.3-70b",
+            "--prefix-tokens", "8",
+        ) as d:
+            d.expect("Estimated maximum cost:")
+            d.expect("Proceed? [y/N] ")
+            # The free catalog lookup happened, but no paid completion can precede
+            # the operator's answer.
+            self.assertEqual(self.api.paths, ["/models"])
+            d.send("y")
+            d.expect(
+                'prompt_tokens_details={"cached_tokens":0,'
+                '"cache_creation_input_tokens":8}'
+            )
+            d.expect(
+                'prompt_tokens_details={"cached_tokens":8,'
+                '"provider_extension":"preserved"}'
+            )
+            d.expect("llama-3.3-70b: warms=8")
+            self.assertEqual(d.wait(), 0)
+
+        self.assertEqual(
+            self.api.paths,
+            ["/models", "/chat/completions", "/chat/completions"],
+        )
+        bodies = self.api.bodies("/chat/completions")
+        self.assertEqual(len(bodies), 2)
+        self.assertEqual(bodies[0], bodies[1])
+        self.assertEqual(bodies[0]["max_tokens"], 1)
+        self.assertFalse(bodies[0]["stream"])
+        self.assertTrue(
+            bodies[0]["messages"][0]["content"].startswith(
+                "CACHE-PROBE-V1 SIZE=8\n"
+            )
+        )
+
     def test_image_confirm_accept_writes_the_file(self):
         with self.cli("image", "a cat", "--name", "drive-test") as d:
             d.expect("Estimated cost: $0.0100 USD (1 image, model=venice-sd35)")
