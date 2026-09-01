@@ -15,7 +15,7 @@ class _Allowed(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/ok":
             body = b"BOUNDARY_OK"
-        elif self.path == "/redirect":
+        elif self.path in ("/redirect", "/download"):
             self.send_response(302)
             self.send_header(
                 "Location", f"http://127.0.0.2:{self.blocked_port}/redirected"
@@ -31,7 +31,7 @@ class _Allowed(http.server.BaseHTTPRequestHandler):
 <script src='{target}/script.js'></script></head><body>
 <img src='{target}/image.png'><img src='http://{alternate}:{self.blocked_port}/alternate.png'>
 <iframe src='{target}/frame'></iframe><iframe src='/redirect'></iframe>
-<a id=d download href='{target}/download'>download</a><div id=result>waiting</div>
+<iframe src='/download'></iframe><div id=result>waiting</div>
 <script>
 fetch('/ok').then(r => r.text()).then(t => document.querySelector('#result').textContent=t);
 fetch('{target}/fetch').catch(()=>{{}});
@@ -40,7 +40,6 @@ try {{ let x=new XMLHttpRequest(); x.open('GET','{target}/xhr'); x.send(); }} ca
 try {{ new Worker('{target}/worker.js'); }} catch(e) {{}}
 try {{ navigator.serviceWorker.register('{target}/sw.js'); }} catch(e) {{}}
 try {{ new WebSocket('ws://127.0.0.2:{self.blocked_port}/socket'); }} catch(e) {{}}
-document.querySelector('#d').click();
 </script></body></html>""".encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
