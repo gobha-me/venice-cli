@@ -46,6 +46,8 @@ unlink_if_ours() {
 }
 
 unlink_if_ours "$HOME/.local/bin/venice" "$REPO/bin/venice"
+# install.sh stopped creating this vestigial link in #20.  Keep exact-target
+# cleanup so older source installs can still be removed safely.
 unlink_if_ours "$HOME/.local/lib/venice" "$REPO/src/venice"
 
 # Remove the bash completion install.sh wrote, but only when its checkout-
