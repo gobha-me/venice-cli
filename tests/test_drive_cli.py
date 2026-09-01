@@ -26,6 +26,7 @@ import shutil
 import site
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -251,6 +252,41 @@ class TestDriveCharge(_DriveCase):
 # --------------------------------------------------------------------------
 
 class TestDriveNonInteractive(_DriveCase):
+    def test_broken_stdout_pipe_is_quiet_exit_141(self):
+        # More than a pipe buffer makes the EPIPE deterministic: `head` exits
+        # after its first line while the real CLI still has output left to write.
+        self.api.set_models("all", [
+            {"id": "pipe-model-%05d" % i, "type": "text"}
+            for i in range(10_000)
+        ])
+        producer = subprocess.Popen(
+            [sys.executable, "-m", "venice", "models", "--type", "all"],
+            env=_drive.build_env(self.home, base_url=self.base_url),
+            cwd=str(self.project),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.addCleanup(lambda: producer.kill() if producer.poll() is None else None)
+        self.assertIsNotNone(producer.stdout)
+        self.assertIsNotNone(producer.stderr)
+        head = subprocess.run(
+            ["head", "-1"],
+            stdin=producer.stdout,
+            capture_output=True,
+            text=True,
+            timeout=_drive.DEFAULT_TIMEOUT,
+        )
+        producer.stdout.close()
+        self.assertEqual(producer.wait(timeout=_drive.DEFAULT_TIMEOUT), 141)
+        producer_err = producer.stderr.read()
+        producer.stderr.close()
+
+        self.assertEqual(head.returncode, 0, head.stderr)
+        self.assertEqual(head.stdout, "### text (10000)\n")
+        self.assertEqual(producer_err, "")
+
     def test_image_non_interactive_requires_yes(self):
         cp = self.run_cli("image", "a cat", "--name", "drive-test")
         self.assertEqual(cp.returncode, 1)

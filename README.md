@@ -2071,6 +2071,7 @@ The catalog is live and may add or retire models without a CLI release. Use
 | 9 | disk write error |
 | 10 | verdict unparseable / ambiguous — acceptance (`venice code`) or review (`venice review`) |
 | 130 | Ctrl-C |
+| 141 | stdout pipe closed by the downstream reader (SIGPIPE-equivalent producer exit) |
 
 `venice review` also uses **1** for "findings at or above `--fail-on` were reported".
 That reports what a run found; it is not a certification — see

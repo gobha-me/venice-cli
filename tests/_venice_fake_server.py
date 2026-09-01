@@ -104,6 +104,7 @@ class FakeVenice:
         self._lock = threading.Lock()
         self.requests = []  # [{"method", "path", "query", "body", "has_auth"}]
         self._chat = collections.deque()
+        self._model_overrides = {}
         self._next_tool_call_id = 0
         self._httpd = None
         self._thread = None
@@ -201,6 +202,20 @@ class FakeVenice:
                 })
             self._chat.append({"tool_calls": scripted, "usage": _USAGE})
 
+    def set_models(self, kind: str, rows) -> None:
+        """Override one ``/models?type=`` response for a process-level test."""
+        with self._lock:
+            self._model_overrides[kind] = list(rows)
+
+    def _models(self, kind: str):
+        with self._lock:
+            if kind in self._model_overrides:
+                return list(self._model_overrides[kind])
+        return {
+            "text": TEXT_MODELS,
+            "image": IMAGE_MODELS,
+        }.get(kind, [])
+
     def _next_chat(self) -> dict:
         with self._lock:
             if self._chat:
@@ -215,6 +230,7 @@ class FakeVenice:
         with self._lock:
             self.requests = []
             self._chat.clear()
+            self._model_overrides.clear()
             self._next_tool_call_id = 0
 
     @property
@@ -293,7 +309,7 @@ def _make_handler(api: FakeVenice):
             path, query, _ = self._dispatch("GET")
             if path == "/models":
                 kind = (query.get("type") or ["text"])[0]
-                data = {"text": TEXT_MODELS, "image": IMAGE_MODELS}.get(kind, [])
+                data = api._models(kind)
                 self._send_json({"object": "list", "data": data})
             elif path == "/api_keys/rate_limits":
                 self._send_json(RATE_LIMITS)
