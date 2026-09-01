@@ -199,19 +199,23 @@ def shell_policy(doc: dict) -> dict:
 
 
 def browser_policy(doc: dict) -> dict:
-    """Read the retained top-level ``browser`` allow/deny configuration.
+    """Read operator-owned browser network authority.
 
     Mirrors :func:`shell_policy` (a non-`defaults` top-level section with its own reader);
     ``venice config set browser.deny '["*.internal"]'`` round-trips through the generic
-    dotted-key store with no extra plumbing. Browser tools are security-disabled for
-    GHSA-mqjr-2vh8-6fvg; retaining this reader avoids destructive config migrations.
+    dotted-key store with no extra plumbing. Private access requires both an exact
+    hostname and an address range, keeping the two grants independently auditable.
     """
     section = doc.get("browser")
     if not isinstance(section, dict):
-        return {"allow": [], "deny": []}
+        return {"allow": [], "deny": [], "private_hosts": [], "private_ranges": []}
     return {
         "allow": _as_list(section["allow"]) if section.get("allow") else [],
         "deny": _as_list(section["deny"]) if section.get("deny") else [],
+        "private_hosts": _as_list(section["private_hosts"])
+        if section.get("private_hosts") else [],
+        "private_ranges": _as_list(section["private_ranges"])
+        if section.get("private_ranges") else [],
     }
 
 
@@ -694,9 +698,7 @@ _COMMAND_MAP = {
         "scale": ("scale", _numeric.finite_float),
         "creativity": ("creativity", _numeric.finite_float),
     },
-    # #71 compatibility-only browser defaults. The tools are security-disabled for
-    # GHSA-mqjr-2vh8-6fvg, but these keys remain readable so existing configs survive and
-    # a future egress-isolated replacement does not require a migration.
+    # #71/#127 browser resource defaults; hard caps remain in the implementation.
     "browser": {
         "wait_ms": ("wait_ms", int),
         "timeout": ("timeout", int),

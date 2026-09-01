@@ -508,7 +508,8 @@ _CONFIG_SURFACES = {
         "chat",
         ["chat", "p"],
         {
-            "browser", "browser_allow", "browser_deny", "cont", "ephemeral",
+            "browser", "browser_allow", "browser_deny", "browser_private_host",
+            "browser_private_range", "cont", "ephemeral",
             "interactive", "json", "memory", "no_mcp", "no_thinking",
             "no_venice_system_prompt", "resume", "shell", "shell_allow",
             "shell_deny", "shell_unrestricted", "stream", "strip_thinking",
@@ -541,7 +542,8 @@ _CONFIG_SURFACES = {
         "code",
         ["code", "task"],
         {
-            "allow_root", "browser", "browser_allow", "browser_deny", "cont",
+            "allow_root", "browser", "browser_allow", "browser_deny",
+            "browser_private_host", "browser_private_range", "cont",
             "deny_root", "ephemeral", "interactive", "json", "manual",
             "max_tokens", "memory", "no_plan", "no_verify", "plan_only",
             "resume", "shell_allow", "shell_deny", "temperature",
@@ -607,6 +609,8 @@ _CLI_ONLY_REASONS = {
     "browser": "runtime capability enablement",
     "browser_allow": "runtime network authority",
     "browser_deny": "runtime network authority",
+    "browser_private_host": "runtime private network authority",
+    "browser_private_range": "runtime private network authority",
     "cont": "session identity",
     "deny_root": "runtime path authority",
     "dry_run": "one-run execution mode",
@@ -1905,20 +1909,30 @@ class TestBrowserPolicy(_Base):
     """The top-level `browser` URL allow/deny reader (#71), mirroring shell_policy."""
 
     def test_missing_and_malformed_are_empty(self):
-        self.assertEqual(uc.browser_policy({}), {"allow": [], "deny": []})
-        self.assertEqual(uc.browser_policy({"browser": "nope"}), {"allow": [], "deny": []})
+        empty = {"allow": [], "deny": [], "private_hosts": [], "private_ranges": []}
+        self.assertEqual(uc.browser_policy({}), empty)
+        self.assertEqual(uc.browser_policy({"browser": "nope"}), empty)
 
     def test_reads_lists_and_coerces_scalar(self):
-        doc = {"browser": {"allow": ["example.com"], "deny": "*.internal"}}
+        doc = {"browser": {
+            "allow": ["example.com"], "deny": "*.internal",
+            "private_hosts": "dev.internal",
+            "private_ranges": ["10.20.0.0/16"],
+        }}
         self.assertEqual(
             uc.browser_policy(doc),
-            {"allow": ["example.com"], "deny": ["*.internal"]},
+            {"allow": ["example.com"], "deny": ["*.internal"],
+             "private_hosts": ["dev.internal"],
+             "private_ranges": ["10.20.0.0/16"]},
         )
 
     def test_dotted_key_set_roundtrips(self):
         doc = uc.load_config()
         uc.set_value(doc, "browser.deny", ["*.internal"])
-        self.assertEqual(uc.browser_policy(doc), {"allow": [], "deny": ["*.internal"]})
+        self.assertEqual(uc.browser_policy(doc), {
+            "allow": [], "deny": ["*.internal"],
+            "private_hosts": [], "private_ranges": [],
+        })
 
 
 class TestRootsPolicy(_Base):

@@ -10,6 +10,24 @@ permissions:
   contents: read
 
 jobs:
+  browser-egress:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install project
+        run: pip install -e .
+      - name: Verify real Chromium egress containment
+        env:
+          VENICE_BROWSER_REQUIRED: "1"
+          VENICE_API_KEY: test-fake-key
+        run: python -m unittest -v tests.test_browser_integration
+
   test:
     runs-on: ubuntu-latest
     # The drive suite waits on a child process, so a genuine hang would

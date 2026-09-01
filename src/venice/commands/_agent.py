@@ -2867,13 +2867,51 @@ def _tool_section(name: str) -> str:
     return name[len("venice_"):] if name.startswith("venice_") else name
 
 
-def browser_tools(*, allow=(), deny=(), output_dir=None, config=None) -> List[Tool]:
-    """Return no browser tools while the browser rail is security-disabled.
+def _browser_args(arguments) -> dict:
+    controlled = ("allow", "deny", "private_hosts", "private_ranges")
+    return {key: value for key, value in _clean(arguments).items() if key not in controlled}
 
-    Keep this compatibility seam so callers cannot accidentally re-expose the direct
-    tool implementations while GHSA-mqjr-2vh8-6fvg is contained.
-    """
-    return []
+
+def browser_tools(
+    *, allow=(), deny=(), private_hosts=(), private_ranges=(), output_dir=None,
+    config=None,
+) -> List[Tool]:
+    """Build browser tools with all network authority bound by the operator."""
+    fetch_defaults = userconfig.config_defaults_for("browser", _mcp.web_fetch_tool, config)
+    capture_defaults = userconfig.config_defaults_for(
+        "browser", _mcp.browser_capture_tool, config
+    )
+
+    def invoke_fetch(arguments, *, confirm: bool = False):
+        return _mcp.web_fetch_tool(
+            allow=allow, deny=deny, private_hosts=private_hosts,
+            private_ranges=private_ranges,
+            **{**fetch_defaults, **_browser_args(arguments)},
+        )
+
+    def invoke_capture(arguments, *, confirm: bool = False):
+        return _mcp.browser_capture_tool(
+            allow=allow, deny=deny, private_hosts=private_hosts,
+            private_ranges=private_ranges, output_dir=output_dir,
+            **{**capture_defaults, **_browser_args(arguments)},
+        )
+
+    return [
+        Tool(
+            "web_fetch",
+            "Fetch an HTTP(S) URL through a DNS-pinned egress boundary and return "
+            "text or HTML. Redirects are revalidated; operator policy cannot be widened.",
+            _WEB_FETCH_SCHEMA, invoke_fetch, paid=False, category="web",
+            tags=("read", "network"),
+        ),
+        Tool(
+            "browser_capture",
+            "Render an HTTP(S) URL in sandboxed disposable Chromium through an "
+            "enforcing proxy; return DOM/text and/or a screenshot path.",
+            _BROWSER_CAPTURE_SCHEMA, invoke_capture, paid=False, category="web",
+            tags=("read", "network"),
+        ),
+    ]
 
 
 def memory_tools() -> List[Tool]:
@@ -3000,6 +3038,8 @@ def builtin_tools(
     browser: bool = False,
     browser_allow=(),
     browser_deny=(),
+    browser_private_hosts=(),
+    browser_private_ranges=(),
     browser_output_dir: Optional[str] = None,
     memory: bool = False,
     exec_timeout: int = _exec.DEFAULT_EXEC_TIMEOUT,
@@ -3025,8 +3065,7 @@ def builtin_tools(
     rail, not a venice API tool, so it isn't part of the selectable `_BUILTINS`
     set) and is never exposed via `mcp-serve`, which builds its own wrappers.
 
-    `browser` (issue #71) is retained as a compatibility argument but appends no tools
-    while GHSA-mqjr-2vh8-6fvg is contained (see `browser_tools`).
+    `browser` appends the pinned `web_fetch` and sandboxed `browser_capture` rails.
 
     `memory` (issue #49) appends the persistent memory + task rails (`memory_tools`):
     free, local notes (two tiers) + a project task list. Also a rail (added after the
@@ -3152,6 +3191,8 @@ def builtin_tools(
     if browser:
         tools.extend(browser_tools(
             allow=browser_allow, deny=browser_deny,
+            private_hosts=browser_private_hosts,
+            private_ranges=browser_private_ranges,
             output_dir=browser_output_dir, config=config,
         ))
 

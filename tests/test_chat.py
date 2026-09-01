@@ -31,8 +31,9 @@ def _args(**ov):
         max_spend=None, yes=None, output=None,
         # --- shell exec tool (#33) ---
         shell=None, shell_allow=None, shell_deny=None, shell_unrestricted=None,
-        # --- browser compatibility flags (#71; security-disabled) ---
+        # --- browser egress rail (#71/#127) ---
         browser=None, browser_allow=None, browser_deny=None,
+        browser_private_host=None, browser_private_range=None,
         # --- external MCP client (#21) ---
         mcp=None, no_mcp=False,
         # --- interactive / REPL (#22) ---
@@ -244,20 +245,14 @@ class TestChat(unittest.TestCase):
             rc = chat._run(args)
         return rc, fake, captured
 
-    def test_browser_flag_fails_before_sdk_auth_or_network(self):
+    def test_browser_flag_implies_agent_tools(self):
         from venice.commands import chat
-        err = io.StringIO()
-        with mock.patch.object(chat._openai, "import_openai") as import_openai, \
-                mock.patch.object(chat, "build_client_from_auth") as build_client, \
-                mock.patch("venice.client.urllib.request.urlopen") as urlopen, \
-                mock.patch.object(sys, "stderr", err):
-            rc = chat._run(_args(message="fetch a page", browser=True, stream=False))
-        self.assertEqual(rc, 2)
-        self.assertIn("temporarily disabled for security", err.getvalue())
-        self.assertIn("GHSA-mqjr-2vh8-6fvg", err.getvalue())
-        import_openai.assert_not_called()
-        build_client.assert_not_called()
-        urlopen.assert_not_called()
+        args = _args(message="fetch a page", browser=True, stream=False)
+        with mock.patch.object(chat, "_run_agent", return_value=0) as agent_loop:
+            rc, _fake, _captured = self._run(args, FakeCompletion("unused"))
+        self.assertEqual(rc, 0)
+        self.assertTrue(args.tools)
+        agent_loop.assert_called_once()
 
     def test_reply_printed_non_stream(self):
         out = io.StringIO()

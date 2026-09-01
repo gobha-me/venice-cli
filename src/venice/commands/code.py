@@ -41,7 +41,7 @@ from typing import List, Optional
 
 from .. import _numeric, auth, config, userconfig
 from ..client import build_client_from_auth
-from . import (_agent, _browser, _code, _compact, _mailbox, _models, _openai,
+from . import (_agent, _code, _compact, _mailbox, _models, _openai,
                _repl, _review, _session, _steer)
 
 _DEFAULT_MAX_TOOL_CALLS = 25
@@ -261,20 +261,29 @@ def register(subparsers) -> None:
     )
     grp.add_argument(
         "--browser", action="store_true", dest="browser", default=None,
-        help="Reserved browser rail flag. Temporarily unavailable for security; "
-        "fails closed before any API or network access.",
+        help="Add DNS-pinned web_fetch and sandboxed browser_capture tools.",
     )
     grp.add_argument(
         "--browser-allow", action="append", dest="browser_allow", default=None,
         metavar="HOST",
-        help="Retained browser.allow config compatibility option; inert while the "
-        "browser rail is security-disabled.",
+        help="Restrict browser destinations to matching host globs (repeatable).",
     )
     grp.add_argument(
         "--browser-deny", action="append", dest="browser_deny", default=None,
         metavar="PATTERN",
-        help="Retained browser.deny config compatibility option; inert while the "
-        "browser rail is security-disabled.",
+        help="Deny matching browser hosts or URLs; repeatable and deny wins.",
+    )
+    grp.add_argument(
+        "--browser-private-host", action="append", dest="browser_private_host",
+        default=None, metavar="HOST",
+        help="Authorize this exact private/loopback hostname (repeatable; also "
+        "requires --browser-private-range).",
+    )
+    grp.add_argument(
+        "--browser-private-range", action="append", dest="browser_private_range",
+        default=None, metavar="CIDR",
+        help="Authorize a loopback, RFC1918, or IPv6 ULA CIDR (repeatable; also "
+        "requires --browser-private-host).",
     )
     grp.add_argument(
         "--memory", action="store_true", dest="memory", default=None,
@@ -758,10 +767,6 @@ def _run(args) -> int:
     _session.apply_to_args(args, session, "code")
     userconfig.apply_defaults(args, "code")
     userconfig.apply_literals(args, cache_guard="warn")
-    if getattr(args, "browser", None):
-        print(f"code: {_browser.UNAVAILABLE_MESSAGE}", file=sys.stderr)
-        return 2
-
     # Faithful root restore: an explicit --root/$VENICE_CODE_ROOT still wins, else a
     # resumed session re-sandboxes to where it left off (tools + system prompt rebind
     # to this root below), else the cwd.
@@ -821,6 +826,10 @@ def _run(args) -> int:
     bpol = userconfig.browser_policy(doc)  # #71 retained compatibility config
     browser_allow = list(bpol["allow"]) + list(getattr(args, "browser_allow", None) or [])
     browser_deny = list(bpol["deny"]) + list(getattr(args, "browser_deny", None) or [])
+    browser_private_hosts = list(bpol["private_hosts"]) + list(
+        getattr(args, "browser_private_host", None) or [])
+    browser_private_ranges = list(bpol["private_ranges"]) + list(
+        getattr(args, "browser_private_range", None) or [])
     rpol = userconfig.roots_policy(doc)  # #76 extra writable / read-only roots
     allow_root = list(rpol["allow"]) + list(getattr(args, "allow_root", None) or [])
     deny_root = list(rpol["deny"]) + list(getattr(args, "deny_root", None) or [])
@@ -843,6 +852,8 @@ def _run(args) -> int:
         browser=bool(getattr(args, "browser", None)),  # #71
         browser_allow=browser_allow,
         browser_deny=browser_deny,
+        browser_private_hosts=browser_private_hosts,
+        browser_private_ranges=browser_private_ranges,
         memory=bool(getattr(args, "memory", None)),  # #49
     )
     # gen_kwargs is built BEFORE the scout tool (its nested loop needs these per-turn

@@ -1697,29 +1697,38 @@ class TestReindexTool(_ToolTest):
 
 
 class TestWebFetchTool(_ToolTest):
-    """The retained MCP implementation seam fails closed without network access."""
+    """The MCP seam delegates to the pinned implementation."""
 
-    def test_always_errors_without_calling_backend(self):
-        with mock.patch.object(_mcp._browser, "web_fetch") as backend, \
+    def test_delegates_policy_and_shapes_success(self):
+        with mock.patch.object(
+                _mcp._browser, "web_fetch",
+                return_value={"ok": True, "text": "hello", "final_url": "https://example.com/", "content_type": "text/plain"},
+        ) as backend, \
                 self.stdout_guard():
-            r = _mcp.web_fetch_tool("https://example.com/")
-        self.assertEqual(r["status"], "error")
-        self.assertIn("temporarily disabled for security", r["message"])
-        backend.assert_not_called()
+            r = _mcp.web_fetch_tool(
+                "https://example.com/", private_hosts=["host"],
+                private_ranges=["10.0.0.0/8"],
+            )
+        self.assertEqual(r["status"], "ok")
+        self.assertEqual(r["text"], "hello")
+        self.assertEqual(backend.call_args.kwargs["private_hosts"], ["host"])
 
 
 class TestBrowserCaptureTool(_ToolTest):
-    """The retained capture implementation seam fails closed without side effects."""
+    """The capture seam delegates and keeps output authority host-owned."""
 
-    def test_always_errors_without_calling_backend_or_writing(self):
-        with mock.patch.object(_mcp._browser, "capture") as backend, \
+    def test_delegates_to_browser_backend(self):
+        with mock.patch.object(
+                _mcp._browser, "capture",
+                return_value={"ok": True, "browser": "chromium", "family": "chromium", "dom": "ok"},
+        ) as backend, \
                 self.stdout_guard():
             r = _mcp.browser_capture_tool(
-                "https://example.com/", mode="screenshot", output_dir=self.td)
-        self.assertEqual(r["status"], "error")
-        self.assertIn("temporarily disabled for security", r["message"])
+                "https://example.com/", mode="dom", output_dir=self.td)
+        self.assertEqual(r["status"], "ok")
+        self.assertEqual(r["dom"], "ok")
         self.assertEqual(list(Path(self.td).iterdir()), [])
-        backend.assert_not_called()
+        backend.assert_called_once()
 
 
 if __name__ == "__main__":
