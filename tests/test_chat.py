@@ -1063,25 +1063,36 @@ class TestChatUsageSurface(unittest.TestCase):
         self.assertEqual(self._out.getvalue().strip(), "final answer")
         self.assertNotIn("wall", self._out.getvalue())
 
-    def test_footer_still_printed_under_json(self):
-        """Chat diverges from code here on purpose -- see `_finish`'s docstring."""
+    def test_json_envelope_totals_every_turn_and_stamps_window(self):
+        """The aggregate replaces the misleading final-turn SDK usage (#88)."""
+        seq = self._tool_seq(1, 2, 4)
+        seq[-1].venice_parameters = {"enable_web_search": "on"}
         with self._stub_tool():
             rc, _f, _c = self._run(
                 _args(message="hi", tools=True, stream=False, json=True),
-                self._tool_seq(1, 2))
+                seq)
         self.assertEqual(rc, 0)
-        self.assertRegex(self._err, r"chat: .*wall")
-        json.loads(self._out.getvalue())  # stdout still parses
-
-    def test_json_stdout_shape_is_unchanged(self):
-        """No envelope, no new key: `--json` stays the raw SDK dump."""
-        with self._stub_tool():
-            self._run(_args(message="hi", tools=True, stream=False, json=True),
-                      self._tool_seq(1, 2))
         doc = json.loads(self._out.getvalue())
-        self.assertIn("choices", doc)
-        self.assertNotIn("final", doc)   # not code.py's envelope
-        self.assertNotIn("venice_usage", doc)
+        self.assertEqual(set(doc), {"final", "usage", "venice_parameters"})
+        self.assertEqual(doc["final"], "final answer")
+        self.assertEqual(doc["venice_parameters"], {"enable_web_search": "on"})
+        self.assertEqual(doc["usage"]["prompt_tokens"], 700)
+        self.assertEqual(doc["usage"]["completion_tokens"], 7)
+        self.assertEqual(doc["usage"]["api_calls_total"], 3)
+        self.assertEqual(doc["usage"]["turns"], 1)
+        self.assertGreaterEqual(doc["usage"]["elapsed_seconds"], 0)
+        self.assertNotRegex(self._err, r"chat: .*wall")
+
+    def test_json_envelope_uses_null_for_absent_venice_parameters(self):
+        with self._stub_tool():
+            rc, _f, _c = self._run(
+                _args(message="hi", tools=True, stream=False, json=True),
+                self._tool_seq(1, 2),
+            )
+        self.assertEqual(rc, 0)
+        doc = json.loads(self._out.getvalue())
+        self.assertIsNone(doc["venice_parameters"])
+        self.assertNotIn("choices", doc)
 
     # --- the cache hit rate on the footer (#100) ---
 
@@ -1096,8 +1107,7 @@ class TestChatUsageSurface(unittest.TestCase):
         self.assertNotIn("0.0% hit", self._err)
 
     def test_footer_reports_a_real_hit_rate(self):
-        # 150 cached of 300 prompt. This footer is the ONLY cache surface chat has:
-        # its `--json` is the raw SDK dump with nowhere to carry a number (#88).
+        # 150 cached of 300 prompt. The human footer and #88's JSON ledger must agree.
         seq = self._tool_seq(1, 2)
         for turn, cached in zip(seq, (50, 100)):
             turn.usage["prompt_tokens_details"] = {"cached_tokens": cached}
@@ -1155,6 +1165,16 @@ class TestChatUsageSurface(unittest.TestCase):
         self.assertEqual(rc, 5)
         self.assertRegex(self._err, r"chat: .*wall")
 
+    def test_json_api_error_emits_no_partial_envelope_and_reports_time(self):
+        import openai
+        rc, _f, _c = self._run(
+            _args(message="hi", tools=True, stream=False, json=True), [],
+            side_effect=openai.OpenAIError("boom"),
+        )
+        self.assertEqual(rc, 5)
+        self.assertEqual(self._out.getvalue(), "")
+        self.assertRegex(self._err, r"chat: .*wall")
+
     def test_ctrlc_reports_time_and_exits_130(self):
         # One paid tool-calling turn, then Ctrl+C mid-loop -- the run whose cost you
         # most want to see. Before #86 this was an uncaught traceback.
@@ -1172,6 +1192,25 @@ class TestChatUsageSurface(unittest.TestCase):
                                    [], side_effect=_create)
         self.assertEqual(rc, 130)
         self.assertIn("chat: aborted", self._err)
+        self.assertRegex(self._err, r"chat: .*wall")
+
+    def test_json_ctrlc_emits_no_partial_envelope_and_reports_time(self):
+        seq = [FakeToolCompletion(
+            tool_calls=[_FnCall("call_0", "venice_chat", '{"message": "hi"}')],
+            usage=self._usage(3))]
+
+        def _create(**kwargs):
+            if seq:
+                return seq.pop(0)
+            raise KeyboardInterrupt
+
+        with self._stub_tool():
+            rc, _f, _c = self._run(
+                _args(message="hi", tools=True, stream=False, json=True), [],
+                side_effect=_create,
+            )
+        self.assertEqual(rc, 130)
+        self.assertEqual(self._out.getvalue(), "")
         self.assertRegex(self._err, r"chat: .*wall")
         self.assertRegex(self._err, r"prompt=300\b")  # the turn you did pay for
 

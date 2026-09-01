@@ -917,18 +917,19 @@ Details and safety:
   Ctrl+C and API-error exits too, which are the runs most worth costing out. A run
   that never reaches a model call (an unknown `--tool`, a model that can't do
   function calling, a failed `--mcp` attach) prints nothing.
-  Unlike `venice code`, the line is **not** suppressed under `--json`: `code` has an
-  envelope to carry the numbers, whereas chat's `--json` is the raw completion object
-  written from inside the loop, so there is nowhere to put a run total that isn't
-  already stale. stdout under `--json` is unchanged. Beware that that object's own
-  `usage` key is the **final turn only** — it is not the run total, and on a
-  multi-turn tool run the two legitimately differ.
+  Under `--json`, the stderr line is suppressed and stdout is an aggregate envelope:
+  `{ "final": "...", "usage": {...}, "venice_parameters": {...} }`. Its `usage`
+  is the same whole-run ledger as the human footer, including every model turn,
+  wall/tool timing, cache accounting and off-loop spend. Before v0.83.36 this path
+  printed the raw final completion object, whose `usage` covered only the last turn;
+  the envelope is an intentional pre-1.0 contract break rather than retaining a
+  plausible-looking undercount.
   Before v0.77 a default `--tools` run metered nothing at all: the ledger only
   existed when `--session-max-spend` was set.
 - **Ctrl+C** during a `--tools` run prints `chat: aborted`, reports what the turns so
   far cost, and exits 130 (it used to raise a traceback).
 - **Non-streamed in v1.** The tool path buffers each turn, so `--stream` is ignored
-  when `--tools` is on; `--json` prints the final completion object.
+  when `--tools` is on; `--json` prints the aggregate envelope described above.
 
 | flag | effect |
 |---|---|

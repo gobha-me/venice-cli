@@ -2719,17 +2719,20 @@ class TestRunLoopSpendGate(unittest.TestCase):
         ledger = _agent.CostLedger(max_spend=0.001)
         ledger.bind_pricing({"input": {"usd": 1.0}, "output": {"usd": 1.0}})
         err = io.StringIO()
+        final = []
         with mock.patch.object(sys, "stdout", io.StringIO()), \
              mock.patch.object(sys, "stderr", err):
             rc = _agent.run_loop(
                 fake, "m", [{"role": "user", "content": "go"}], {},
                 [self._tool()], max_tool_calls=0, yes=True, json_out=False,
                 ledger=ledger,
+                final_emitter=lambda response: final.append(response) or 0,
             )
         self.assertEqual(rc, 0)
         self.assertEqual(len(calls), 2)                      # turn 1 + forced final
         self.assertEqual(calls[-1]["tool_choice"], "none")   # forced, no tools
         self.assertTrue(ledger.over())
+        self.assertEqual(final, [seq[-1]])
         self.assertIn("reached --session-max-spend", err.getvalue())
         self.assertNotIn("chat: reached", err.getvalue())
         self.assertNotIn("reached --max-spend", err.getvalue())
