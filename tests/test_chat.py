@@ -82,13 +82,16 @@ class _Choice:
 
 
 class FakeCompletion:
-    def __init__(self, content, venice_parameters=None):
+    def __init__(self, content, venice_parameters=None, usage=None):
         self.choices = [_Choice(content)]
         self.venice_parameters = venice_parameters
+        self.usage = usage
         self._dump = {
             "choices": [{"message": {"content": content}}],
             "venice_parameters": venice_parameters,
         }
+        if usage is not None:
+            self._dump["usage"] = usage
 
     def model_dump(self):
         return self._dump
@@ -267,6 +270,32 @@ class TestChat(unittest.TestCase):
         self.assertEqual(captured["model"], "llama-3.3-70b")
         self.assertEqual(captured["messages"][-1], {"role": "user", "content": "hi"})
 
+    def test_non_stream_reports_usage_on_stderr(self):
+        out, err = io.StringIO(), io.StringIO()
+        rc, _fake, _captured = self._run(
+            _args(message="hi", stream=False),
+            FakeCompletion("hello", usage={
+                "prompt_tokens": 11,
+                "completion_tokens": 3,
+                "total_tokens": 14,
+            }),
+            stdout=out,
+            stderr=err,
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.getvalue(), "hello\n")
+        self.assertEqual(err.getvalue(), "usage: prompt=11 completion=3 total=14\n")
+
+    def test_non_stream_without_usage_keeps_stderr_quiet(self):
+        err = io.StringIO()
+        rc, _fake, _captured = self._run(
+            _args(message="hi", stream=False),
+            FakeCompletion("hello"),
+            stderr=err,
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(err.getvalue(), "")
+
     def test_config_default_model_applied(self):
         cfg = {"version": 1, "mcpServers": {},
                "defaults": {"chat": {"model": "venice-uncensored"}}}
@@ -395,16 +424,23 @@ class TestChat(unittest.TestCase):
         self.assertEqual(fake.chat.completions.create.call_count, 0)
 
     def test_json_dumps_raw_and_forces_non_stream(self):
-        out = io.StringIO()
+        out, err = io.StringIO(), io.StringIO()
         rc, fake, captured = self._run(
             _args(message="hi", json=True),  # stream default True
-            FakeCompletion("hello", venice_parameters={"enable_web_search": "on"}),
+            FakeCompletion(
+                "hello",
+                venice_parameters={"enable_web_search": "on"},
+                usage={"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+            ),
             stdout=out,
+            stderr=err,
         )
         self.assertEqual(rc, 0)
         doc = json.loads(out.getvalue())
         self.assertEqual(doc["choices"][0]["message"]["content"], "hello")
         self.assertEqual(doc["venice_parameters"], {"enable_web_search": "on"})
+        self.assertEqual(doc["usage"]["total_tokens"], 3)
+        self.assertEqual(err.getvalue(), "")
         # --json must not stream
         self.assertNotIn("stream", captured)
 

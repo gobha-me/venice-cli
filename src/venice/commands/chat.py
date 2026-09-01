@@ -694,6 +694,7 @@ def _run_once(oai, kwargs: dict, as_json: bool) -> int:
         content = resp.choices[0].message.content or ""
     print(content)
     _print_citations(getattr(resp, "venice_parameters", None))
+    _print_usage(getattr(resp, "usage", None))
     return 0
 
 
