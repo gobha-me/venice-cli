@@ -3648,7 +3648,7 @@ def run_loop(
             return 2
         if ledger is not None and ledger.over():
             return _force_final(
-                f"chat: reached --max-spend ({ledger.summary()}); "
+                f"reached --session-max-spend ({ledger.summary()}); "
                 "requesting a final answer"
             )
         # Token gate (#52): a per-subagent cumulative-token ceiling, orthogonal to the USD
