@@ -2718,8 +2718,9 @@ class TestRunLoopSpendGate(unittest.TestCase):
         fake, calls = _fake_oai(seq)
         ledger = _agent.CostLedger(max_spend=0.001)
         ledger.bind_pricing({"input": {"usd": 1.0}, "output": {"usd": 1.0}})
+        err = io.StringIO()
         with mock.patch.object(sys, "stdout", io.StringIO()), \
-             mock.patch.object(sys, "stderr", io.StringIO()):
+             mock.patch.object(sys, "stderr", err):
             rc = _agent.run_loop(
                 fake, "m", [{"role": "user", "content": "go"}], {},
                 [self._tool()], max_tool_calls=0, yes=True, json_out=False,
@@ -2729,6 +2730,9 @@ class TestRunLoopSpendGate(unittest.TestCase):
         self.assertEqual(len(calls), 2)                      # turn 1 + forced final
         self.assertEqual(calls[-1]["tool_choice"], "none")   # forced, no tools
         self.assertTrue(ledger.over())
+        self.assertIn("reached --session-max-spend", err.getvalue())
+        self.assertNotIn("chat: reached", err.getvalue())
+        self.assertNotIn("reached --max-spend", err.getvalue())
 
     def test_no_ledger_means_no_gate(self):
         usage = {"prompt_tokens": 10**9, "completion_tokens": 10**9}
@@ -2807,7 +2811,7 @@ class TestRunLoopSpendGate(unittest.TestCase):
         # warning nobody asked for. Both gates asserted -- one is not the other.
         usage = {"prompt_tokens": 900, "completion_tokens": 200}
         for kw, expect in ((dict(max_tokens=1000), "token cap"),
-                           (dict(max_spend=0.0001), "--max-spend")):
+                           (dict(max_spend=0.0001), "--session-max-spend")):
             with self.subTest(gate=expect):
                 seq = [
                     FakeToolCompletion(tool_calls=[_FnCall("c1", "t", "{}")],
