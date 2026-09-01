@@ -82,6 +82,18 @@ class TestFakeServerViaClient(_NoProxyCase):
         # The POST body is recorded for later assertions.
         self.assertEqual(self.api.bodies("/image/generate"), [{"prompt": "a cat"}])
 
+    def test_scripted_cache_usage_is_preserved(self):
+        self.api.reply_usage(
+            {"cached_tokens": 8000, "provider_extension": {"state": "warm"}},
+            prompt_tokens=8200,
+        )
+        doc = self.client.post_json("/chat/completions", {"model": "m"})
+        self.assertEqual(doc["usage"]["prompt_tokens"], 8200)
+        self.assertEqual(doc["usage"]["prompt_tokens_details"], {
+            "cached_tokens": 8000,
+            "provider_extension": {"state": "warm"},
+        })
+
     def test_authorization_presence_is_recorded_without_the_value(self):
         self.client.get_json("/models", params={"type": "text"})
         entry = self.api.requests[0]

@@ -159,6 +159,17 @@ class FakeVenice:
         with self._lock:
             self._chat.append({"deltas": list(deltas), "usage": _USAGE})
 
+    def reply_usage(self, prompt_tokens_details, *, prompt_tokens=11) -> None:
+        """Queue one non-streamed reply with an exact raw cache-usage block."""
+        usage = {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": 1,
+            "total_tokens": prompt_tokens + 1,
+            "prompt_tokens_details": prompt_tokens_details,
+        }
+        with self._lock:
+            self._chat.append({"deltas": ["."], "usage": usage})
+
     def reply_paused_stream(self, first_delta: str) -> threading.Event:
         """Queue one SSE delta, then hold the connection open until released."""
         release = threading.Event()

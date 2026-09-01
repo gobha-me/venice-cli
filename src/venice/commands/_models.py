@@ -12,10 +12,23 @@ The catalog GET is free, so commands call it before the paid request to validate
 """
 from __future__ import annotations
 
+import re
 import sys
 from typing import List, Optional, Tuple
 
 from ..client import VeniceAPIError
+
+
+def model_family(model_id: str) -> str:
+    """The leading vendor/family token of a model id.
+
+    ``qwen3-4b`` and ``qwen-2.5-coder`` share family ``qwen``.  Keeping the
+    heuristic beside the catalog helpers lets review decorrelation and the
+    cache-probe control selection agree without importing either command.
+    """
+    return re.split(
+        r"[-._0-9]", (model_id or "").strip().lower(), maxsplit=1
+    )[0]
 
 
 def catalog(client, model_type: str) -> Optional[List[dict]]:

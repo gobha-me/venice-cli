@@ -16,6 +16,7 @@
     "GET /models": {
       "consumers": [
         "cli:models",
+        "cli:cache-probe",
         "internal:model_validation",
         "mcp:model_backed_tools",
         "agent:model_backed_tools"
@@ -174,6 +175,7 @@
     },
     "POST /chat/completions": {
       "consumers": [
+        "cli:cache-probe",
         "cli:chat",
         "cli:code",
         "cli:review",
@@ -184,7 +186,7 @@
       "parameters": {
         "implemented": [],
         "intentional_omissions": {
-          "header:Accept-Encoding": "Compression negotiation is owned by the OpenAI SDK transport."
+          "header:Accept-Encoding": "Compression negotiation is transport-owned; SDK consumers handle it and stdlib consumers do not request it."
         }
       },
       "request_bodies": {
