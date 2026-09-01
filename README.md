@@ -594,6 +594,12 @@ git log --oneline -20 | venice chat - --system "Group these into release notes."
 venice chat "ping" --json | jq '.choices[0].message.content'
 ```
 
+Plain human-readable chat reports each response's token counts on stderr as
+`usage: prompt=N completion=N total=N`, for both streamed and `--no-stream`
+calls. `--json` keeps stderr quiet because the raw response on stdout already
+contains the same `usage` object. Tool-calling chat instead reports its distinct
+whole-run time and cost footer, including under `--json`.
+
 Ctrl+C during a one-shot chat prints `chat: aborted` and exits 130. Because the
 default streamed form may already have written part of the reply to stdout, its
 notice is `chat: aborted (partial output may appear above)`.

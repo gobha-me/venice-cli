@@ -147,6 +147,18 @@ class TestDriveHttp(_DriveCase):
         self.assertTrue(self.api.requests[0]["has_auth"])
 
     @needs_openai
+    def test_plain_non_stream_chat_reports_usage_on_stderr(self):
+        self.api.reply("HELLO-FROM-FAKE")
+        cp = self.run_cli("chat", "Say something", "--no-stream")
+        self.assertEqual(cp.returncode, 0, cp.stderr)
+        self.assertEqual(cp.stdout, "HELLO-FROM-FAKE\n")
+        self.assertEqual(
+            cp.stderr,
+            "usage: prompt=11 completion=3 total=14\n",
+        )
+        self.assertEqual(self.api.paths, ["/models", "/chat/completions"])
+
+    @needs_openai
     def test_plain_streaming_chat_ctrl_c_reports_partial_output(self):
         release = self.api.reply_paused_stream("PARTIAL-FROM-FAKE")
         self.addCleanup(release.set)
