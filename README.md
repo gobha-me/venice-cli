@@ -944,9 +944,11 @@ Details and safety:
 | `--shell-allow CMD` | allow only these commands for `--shell` (repeatable; adds to config `shell.allow`) |
 | `--shell-deny PATTERN` | refuse commands matching these globs (repeatable; adds to config `shell.deny`) |
 | `--shell-unrestricted` | acknowledge an empty allowlist under `--yes` (required for that combination) |
-| `--browser` | reserved; temporarily exits 2 without network access while the browser rail is security-disabled |
-| `--browser-allow HOST` | retained browser-policy config for compatibility; inert while `--browser` is disabled |
-| `--browser-deny PATTERN` | retained browser-policy config for compatibility; inert while `--browser` is disabled |
+| `--browser` | add pinned `web_fetch` and sandboxed Chromium `browser_capture`; implies `--tools` |
+| `--browser-allow HOST` | restrict destinations to matching host globs (repeatable; adds to `browser.allow`) |
+| `--browser-deny PATTERN` | deny matching hosts or URLs; deny wins (repeatable; adds to `browser.deny`) |
+| `--browser-private-host HOST` | authorize an exact private hostname (also requires a private range) |
+| `--browser-private-range CIDR` | authorize a loopback/RFC1918/IPv6-ULA range (also requires an exact host) |
 | `--memory` | add persistent memory + task tools (durable notes + a checklist); implies `--tools` (see [Memory & tasks](#memory--tasks---memory)) |
 | `--mcp NAME` | attach a registered external MCP server's tools (repeatable) |
 | `--no-mcp` | attach no MCP servers (overrides a configured default) |
@@ -987,16 +989,48 @@ venice config set shell.allow '["git", "gh", "ls", "cat"]'
 
 #### Web & browser tools (`--browser`)
 
-`web_fetch` and `browser_capture` are temporarily unavailable while
-[GHSA-mqjr-2vh8-6fvg](https://github.com/sirkitree/venice/security/advisories/GHSA-mqjr-2vh8-6fvg)
-is contained. In v0.83.2, passing `--browser` exits with status 2 before loading the SDK,
-credentials, or any network client. The direct implementation seams also return an error,
-and the agent does not advertise either tool.
+`--browser` opts into two read-only tools. `web_fetch` retrieves bounded HTTP(S) text or
+HTML. `browser_capture` renders post-JS DOM/text and/or a PNG with a Chromium-family
+browser. The browser runs non-root with its normal sandbox enabled, a disposable profile
+and home,
+an allowlisted environment, and no ambient credentials. Firefox is not used because its
+CLI cannot provide the same observable, proxy-enforced capture contract.
 
-The `--browser-allow`, `--browser-deny`, and `browser.*` config keys remain accepted only
-to preserve existing configuration. They do not enable network access. Restoring this rail
-requires an enforced egress boundary that covers redirects, DNS rebinding, browser
-subresources, and page scripts—not another URL-only filter.
+The network boundary is enforced at connection time. Each destination is resolved once,
+the complete answer set is checked, and the socket connects only to one of those numeric
+addresses. HTTPS retains the original hostname for SNI, certificate verification, and
+`Host`. Redirects are capped at five and rechecked. Chromium receives one loopback policy
+proxy for HTTP, HTTPS, WebSockets, redirects, frames, scripts, styles, images, fonts,
+fetch/XHR, workers, service workers, prefetches, and downloads; there is no direct fallback.
+QUIC and non-proxied WebRTC UDP are disabled. A capture is capped at 60 seconds, 128
+proxy connections, 16 concurrent connections, and 32 MiB total proxied traffic; `web_fetch`
+is capped at 2 MiB and 60 seconds.
+
+Public Internet addresses are allowed by default unless narrowed with `browser.allow` or
+denied with `browser.deny` (deny always wins). Loopback and private networks are denied by
+default. Private access needs two independent operator grants: the exact canonical host in
+`browser.private_hosts` and every resolved address inside `browser.private_ranges`.
+Ranges may only be loopback, RFC1918, or IPv6 ULA. Link-local, metadata, multicast,
+reserved, unspecified, and IPv4-mapped IPv6 destinations remain hard-blocked and cannot be
+reopened. The model schemas contain none of these authority fields.
+
+```sh
+venice chat --browser --browser-allow docs.example.com "Read the installation page"
+
+# Deliberate local development access: both grants are required.
+venice code --browser \
+  --browser-private-host 127.0.0.1 \
+  --browser-private-range 127.0.0.1/32 \
+  "Check the app at http://127.0.0.1:3000"
+
+venice config set browser.private_hosts '["dev.internal"]'
+venice config set browser.private_ranges '["10.20.0.0/16"]'
+```
+
+Threat model: pages, redirects, DNS answers, and model-supplied URLs are untrusted. The
+operator controls reachability; a model may use only the already-bound policy. This is a
+network and process-containment boundary, not a promise that page content is trustworthy.
+Do not run `browser_capture` as root, disable the Chromium sandbox, or reuse its profile.
 
 #### Web search (`--web-search`)
 
@@ -1007,8 +1041,7 @@ for (an API's docs, a library's usage, an error message).
 `venice_web_search(query)` makes **one** Venice web-search completion (server-side
 `enable_web_search` + `enable_web_citations`, the same feature behind `venice chat
 --web-search`) and returns a short **answer** plus the **cited URLs**. To then read a cited
-page in full, open it outside Venice: the direct `web_fetch` follow-up rail is temporarily
-disabled as described above.
+page in full, opt into `--browser` and use the pinned `web_fetch` follow-up rail.
 
 ```sh
 # discover: search returns an answer and its cited URLs
@@ -1512,7 +1545,7 @@ jq '.usage.billed_total' ~/.config/venice/sessions/<id>.json
 | `run` | run a shell command (`/bin/sh -c`) at the **active** root | yes |
 | `attach_root` | register another directory as a project root (for work spanning repos) and, by default, switch the active root into it so relative paths and `run`/`git` follow — writes outside the writable roots fail loudly | no |
 | `venice_image` / `venice_image_edit` / `venice_sfx` / `venice_music` / `venice_tts` / `venice_upscale` / `venice_bg_remove` / `venice_video` | generate/edit images, audio & video into the project — **opt-in with `--assets`** | yes |
-| `web_fetch` / `browser_capture` | temporarily unavailable for security; not advertised to the agent (see [Web & browser tools](#web--browser-tools---browser)) | no |
+| `web_fetch` / `browser_capture` | bounded pinned fetch / sandboxed Chromium render — **opt-in with `--browser`** (see [Web & browser tools](#web--browser-tools---browser)) | no |
 | `memory_write` / `memory_read` / `memory_search` / `memory_list` | durable notes the agent recalls across turns/sessions (two tiers: project + global) — **opt-in with `--memory`** (see [Memory & tasks](#memory--tasks---memory)) | no |
 | `task_add` / `task_update` / `task_list` | a project-only checklist the agent tracks (`pending`/`in_progress`/`done`) — **opt-in with `--memory`** | no |
 | `venice_scout` | delegate a read-only investigation to a disposable subagent with a fresh context; returns a structured report so exploration doesn't pollute the main context — **opt-in with `--scout`** (see [Scout subagent](#scout-subagent---scout)) | no |
@@ -1564,7 +1597,7 @@ external diff helpers. Use the confirmed `run` tool for other Git forms.
 | `--max-tool-calls N` | cap tool invocations before forcing a final answer (default 25) |
 | `--exec-timeout SECS` | timeout for `run`/`git` (default 120) |
 | `--shell-allow CMD` / `--shell-deny PATTERN` | scope the `run` tool with the shared allow/deny policy (repeatable; adds to config `shell.*`) |
-| `--browser` / `--browser-allow HOST` / `--browser-deny PATTERN` | compatibility flags for the security-disabled browser rail; `--browser` exits 2 without network access (see [Web & browser tools](#web--browser-tools---browser)) |
+| `--browser` / browser policy flags | expose pinned fetch and sandboxed Chromium tools; public by default, allow/deny globs optional, private access requires both `--browser-private-host` and `--browser-private-range` (see [Web & browser tools](#web--browser-tools---browser)) |
 | `--assets` | also expose the in-process asset-generation tools (image / image-edit / sfx / music / tts / upscale / bg-remove / video) so the agent can create images, audio & video in the project; paid — each confirms per call unless `--auto` |
 | `--scout` | expose `venice_scout`: delegate a read-only investigation to a disposable subagent with a fresh context; keeps exploration out of the main context (see [Scout subagent](#scout-subagent---scout)) |
 | `--spawn` | expose `venice_spawn`: delegate a bounded **write/paid** task to a disposable **worker** subagent with a fresh context and a role-scoped subset of your tools; edit churn stays quarantined and it returns a structured report to merge (see [Worker subagent](#worker-subagent---spawn)) |

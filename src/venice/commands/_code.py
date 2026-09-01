@@ -808,6 +808,8 @@ def code_tools(
     browser: bool = False,
     browser_allow=(),
     browser_deny=(),
+    browser_private_hosts=(),
+    browser_private_ranges=(),
     memory: bool = False,
 ) -> List[_agent.Tool]:
     """Build the coding tools bound to a realpath-resolved project `root`.
@@ -830,8 +832,7 @@ def code_tools(
     Empty lists leave `run` unrestricted (only the confirm gate), preserving the prior
     behavior of autonomous `venice code` runs.
 
-    `browser` (#71) is retained for call compatibility but appends no tools while
-    GHSA-mqjr-2vh8-6fvg is contained (see `_agent.browser_tools`).
+    `browser` (#71/#127) appends the pinned fetch and sandboxed browser rails.
 
     `memory` (#49) appends the persistent memory + task rails (`_agent.memory_tools`):
     free, local notes (two tiers) + a project task list the agent maintains across
@@ -986,10 +987,10 @@ def code_tools(
         ))
 
     if browser:
-        # Compatibility seam only: browser_tools returns [] while the rail is disabled
-        # for GHSA-mqjr-2vh8-6fvg.
         tools.extend(_agent.browser_tools(
             allow=browser_allow, deny=browser_deny,
+            private_hosts=browser_private_hosts,
+            private_ranges=browser_private_ranges,
             output_dir=os.environ.get("VENICE_MCP_OUTPUT_DIR") or root,
             config=config,
         ))

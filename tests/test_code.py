@@ -563,10 +563,10 @@ class TestCodeFactory(unittest.TestCase):
         self.assertNotIn("web_fetch", names)
         self.assertNotIn("browser_capture", names)
 
-    def test_browser_tools_absent_even_when_enabled(self):
+    def test_browser_tools_present_when_enabled(self):
         names = {t.name for t in _code.code_tools("/tmp", browser=True)}
-        self.assertNotIn("web_fetch", names)
-        self.assertNotIn("browser_capture", names)
+        self.assertIn("web_fetch", names)
+        self.assertIn("browser_capture", names)
 
 
 class TestRoots(unittest.TestCase):

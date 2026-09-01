@@ -3207,25 +3207,32 @@ class TestShellTool(unittest.TestCase):
 
 
 class TestBrowserTools(unittest.TestCase):
-    """GHSA containment: no agent path can advertise the browser rails."""
+    """Browser rails are opt-in and their authority is operator-bound."""
 
     def test_absent_by_default(self):
         names = {t.name for t in _agent.builtin_tools(object())}
         self.assertNotIn("web_fetch", names)
         self.assertNotIn("browser_capture", names)
 
-    def test_absent_even_when_enabled(self):
+    def test_present_only_when_enabled(self):
         names = {t.name for t in _agent.builtin_tools(object(), browser=True)}
-        self.assertNotIn("web_fetch", names)
-        self.assertNotIn("browser_capture", names)
+        self.assertIn("web_fetch", names)
+        self.assertIn("browser_capture", names)
 
-    def test_does_not_bypass_only_filter(self):
+    def test_rail_is_appended_after_only_filter(self):
         tools = _agent.builtin_tools(object(), only={"venice_chat"}, browser=True)
-        self.assertEqual({t.name for t in tools}, {"venice_chat"})
+        self.assertEqual({t.name for t in tools}, {"venice_chat", "web_fetch", "browser_capture"})
 
-    def test_browser_tools_seam_is_empty(self):
-        self.assertEqual(_agent.browser_tools(
-            allow=["example.com"], deny=["internal"], output_dir="/tmp", config={}), [])
+    def test_model_cannot_replace_operator_policy(self):
+        with mock.patch.object(_agent._mcp, "web_fetch_tool", return_value={"status": "ok"}) as impl:
+            tool = next(t for t in _agent.browser_tools(
+                allow=["example.com"], deny=["internal"],
+                private_hosts=["dev.local"], private_ranges=["10.0.0.0/8"],
+                output_dir="/tmp", config={}) if t.name == "web_fetch")
+            tool.invoke({"url": "https://example.com", "allow": ["evil"],
+                         "private_ranges": ["0.0.0.0/0"]})
+        self.assertEqual(impl.call_args.kwargs["allow"], ["example.com"])
+        self.assertEqual(impl.call_args.kwargs["private_ranges"], ["10.0.0.0/8"])
 
 
 class TestConfigDefaults(unittest.TestCase):

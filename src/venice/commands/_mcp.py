@@ -1436,19 +1436,62 @@ def task_list_tool(client, *, status=None) -> dict:
 
 def web_fetch_tool(
     url, *, mode: str = "text", max_bytes: Optional[int] = None,
-    timeout: Optional[int] = None, allow=(), deny=(),
+    timeout: Optional[int] = None, allow=(), deny=(), private_hosts=(),
+    private_ranges=(),
 ) -> dict:
-    """Fail closed while the browser rail has no enforced egress boundary."""
-    return _err(f"web_fetch: {_browser.UNAVAILABLE_MESSAGE}")
+    """Fetch through the pinned operator-owned HTTP(S) egress boundary."""
+    if not url or not str(url).strip():
+        return _err("web_fetch: url is required")
+    res = _browser.web_fetch(
+        str(url), mode=(mode or "text"), max_bytes=max_bytes, timeout=timeout,
+        allow=allow, deny=deny, private_hosts=private_hosts,
+        private_ranges=private_ranges,
+    )
+    if not res.get("ok"):
+        return _err(f"web_fetch: {res.get('error', 'failed')}")
+    out = {
+        "status": "ok", "url": str(url), "final_url": res.get("final_url"),
+        "content_type": res.get("content_type"),
+        "truncated": res.get("truncated", False),
+    }
+    for key in ("text", "html"):
+        if key in res:
+            out[key] = res[key]
+    return out
 
 
 def browser_capture_tool(
     url, *, mode: str = "dom", wait_ms: Optional[int] = None, timeout: Optional[int] = None,
     assert_contains: Optional[str] = None, output_dir: Optional[str] = None,
-    allow=(), deny=(),
+    allow=(), deny=(), private_hosts=(), private_ranges=(),
 ) -> dict:
-    """Fail closed while the browser rail has no enforced egress boundary."""
-    return _err(f"browser_capture: {_browser.UNAVAILABLE_MESSAGE}")
+    """Render through sandboxed Chromium and its enforced loopback proxy."""
+    if not url or not str(url).strip():
+        return _err("browser_capture: url is required")
+    selected = mode or "dom"
+    out_path = None
+    if selected in ("screenshot", "both"):
+        out_dir = resolve_output_dir(output_dir)
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            return _err(f"browser_capture: cannot create output dir {out_dir}: {exc}")
+        out_path = str(out_dir / _browser.capture_filename(url))
+    res = _browser.capture(
+        str(url), out_path=out_path, mode=selected, wait_ms=wait_ms,
+        timeout=timeout, assert_contains=assert_contains, allow=allow, deny=deny,
+        private_hosts=private_hosts, private_ranges=private_ranges,
+    )
+    if not res.get("ok"):
+        return _err(f"browser_capture: {res.get('error', 'failed')}")
+    out = {
+        "status": "ok", "url": str(url), "mode": selected,
+        "browser": res.get("browser"), "family": res.get("family"),
+    }
+    for key in ("screenshot_path", "dom", "truncated", "assert_contains", "contains"):
+        if key in res:
+            out[key] = res[key]
+    return out
 
 
 def models_tool(client, *, type: str) -> dict:

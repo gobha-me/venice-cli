@@ -52,6 +52,7 @@ def _code_args(**ov):
         review=None, review_model=None, review_rounds=None,   # #80 part 1a
         web_search=None, web_search_model=None,
         browser=None, browser_allow=None, browser_deny=None,
+        browser_private_host=None, browser_private_range=None,
     )
     base.update(ov)
     return argparse.Namespace(**base)
@@ -235,21 +236,19 @@ class TestCodeCommand(unittest.TestCase):
             rc = code._run(args)
         return rc, calls
 
-    def test_browser_flag_fails_before_sdk_auth_or_network(self):
+    def test_browser_policy_is_passed_to_code_tools(self):
         from venice.commands import code
-        err = io.StringIO()
-        with mock.patch.object(code._openai, "import_openai") as import_openai, \
-                mock.patch.object(code, "build_client_from_auth") as build_client, \
-                mock.patch("venice.client.urllib.request.urlopen") as urlopen, \
-                mock.patch.object(sys, "stderr", err):
-            rc = code._run(_code_args(
-                task="fetch a page", root=self.root, browser=True, auto=True))
-        self.assertEqual(rc, 2)
-        self.assertIn("temporarily disabled for security", err.getvalue())
-        self.assertIn("GHSA-mqjr-2vh8-6fvg", err.getvalue())
-        import_openai.assert_not_called()
-        build_client.assert_not_called()
-        urlopen.assert_not_called()
+        args = _code_args(
+            task="fetch a page", root=self.root, browser=True, auto=True,
+            browser_private_host=["dev.local"],
+            browser_private_range=["10.0.0.0/8"],
+        )
+        with mock.patch.object(code._code, "code_tools", return_value=[]) as build, \
+                mock.patch.object(code, "_run_oneshot", return_value=0):
+            rc, _calls = self._run(args, [FakeToolCompletion("plan")])
+        self.assertEqual(rc, 0)
+        self.assertEqual(build.call_args.kwargs["browser_private_hosts"], ["dev.local"])
+        self.assertEqual(build.call_args.kwargs["browser_private_ranges"], ["10.0.0.0/8"])
 
     # --- plan-only ---
     def test_plan_only_prints_and_exits_without_executing(self):

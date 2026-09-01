@@ -22,7 +22,7 @@ from typing import Optional
 from .. import _numeric, auth, userconfig
 from ..client import build_client_from_auth
 from . import (
-    _agent, _browser, _compact, _mcp, _mcp_client, _models, _openai, _persona,
+    _agent, _compact, _mcp, _mcp_client, _models, _openai, _persona,
     _repl, _session,
 )
 
@@ -222,20 +222,29 @@ def register(subparsers) -> None:
     )
     ag.add_argument(
         "--browser", action="store_true", dest="browser", default=None,
-        help="Reserved browser rail flag. Temporarily unavailable for security; "
-        "fails closed before any API or network access.",
+        help="Add DNS-pinned web_fetch and sandboxed browser_capture tools. Implies --tools.",
     )
     ag.add_argument(
         "--browser-allow", action="append", dest="browser_allow", default=None,
         metavar="HOST",
-        help="Retained browser.allow config compatibility option; inert while the "
-        "browser rail is security-disabled.",
+        help="Restrict browser destinations to matching host globs (repeatable).",
     )
     ag.add_argument(
         "--browser-deny", action="append", dest="browser_deny", default=None,
         metavar="PATTERN",
-        help="Retained browser.deny config compatibility option; inert while the "
-        "browser rail is security-disabled.",
+        help="Deny matching browser hosts or URLs; repeatable and deny wins.",
+    )
+    ag.add_argument(
+        "--browser-private-host", action="append", dest="browser_private_host",
+        default=None, metavar="HOST",
+        help="Explicitly authorize this exact private/loopback hostname (repeatable; "
+        "also requires --browser-private-range).",
+    )
+    ag.add_argument(
+        "--browser-private-range", action="append", dest="browser_private_range",
+        default=None, metavar="CIDR",
+        help="Authorize a loopback, RFC1918, or IPv6 ULA CIDR (repeatable; also "
+        "requires --browser-private-host).",
     )
     ag.add_argument(
         "--memory", action="store_true", dest="memory", default=None,
@@ -447,12 +456,9 @@ def _run(args) -> int:
         return 2
     _session.apply_to_args(args, session, "chat")
     userconfig.apply_defaults(args, "chat")
-    if getattr(args, "browser", None):
-        print(f"chat: {_browser.UNAVAILABLE_MESSAGE}", file=sys.stderr)
-        return 2
-    # --shell (#33) and --memory (#49) are tools, so they imply the agent loop. A
-    # requested --browser has already failed above.
-    if (getattr(args, "shell", None) or getattr(args, "memory", None)) \
+    # These are tools, so each opt-in implies the agent loop.
+    if (getattr(args, "shell", None) or getattr(args, "memory", None)
+            or getattr(args, "browser", None)) \
             and not getattr(args, "tools", None):
         args.tools = True
     # A startup persona (--persona or defaults.chat.persona) seeds the same lever
@@ -554,10 +560,15 @@ def _tools_for(args, client, models, model):
             return None, 2
     browser_on = bool(getattr(args, "browser", None))
     browser_allow, browser_deny = (), ()
+    browser_private_hosts, browser_private_ranges = (), ()
     if browser_on:
         bpol = userconfig.browser_policy(doc)  # #71 URL allow/deny policy
         browser_allow = list(bpol["allow"]) + list(getattr(args, "browser_allow", None) or [])
         browser_deny = list(bpol["deny"]) + list(getattr(args, "browser_deny", None) or [])
+        browser_private_hosts = list(bpol["private_hosts"]) + list(
+            getattr(args, "browser_private_host", None) or [])
+        browser_private_ranges = list(bpol["private_ranges"]) + list(
+            getattr(args, "browser_private_range", None) or [])
     try:
         tools = _agent.builtin_tools(
             client,
@@ -572,6 +583,8 @@ def _tools_for(args, client, models, model):
             browser=browser_on,
             browser_allow=browser_allow,
             browser_deny=browser_deny,
+            browser_private_hosts=browser_private_hosts,
+            browser_private_ranges=browser_private_ranges,
             browser_output_dir=str(args.output) if args.output else None,
             memory=bool(getattr(args, "memory", None)),
         )
