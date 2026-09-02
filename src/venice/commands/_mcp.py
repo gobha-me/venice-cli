@@ -77,7 +77,9 @@ def resolve_max_spend(max_spend: Optional[float]) -> float:
 
 
 def check_spend(
-    cost: Optional[float], *, confirm: bool, max_spend: Optional[float], label: str
+    cost: Optional[float], *, confirm: bool, max_spend: Optional[float], label: str,
+    hard_max_spend: Optional[float] = None,
+    require_confirmation: bool = False,
 ) -> Optional[dict]:
     """Gate a paid call. None => proceed; dict => the host must re-call with confirm.
 
@@ -94,20 +96,37 @@ def check_spend(
             cost = _numeric.non_negative_float(cost)
         except ValueError as e:
             return _err(f"{label}: invalid estimated cost: {e}")
+    if hard_max_spend is not None:
+        try:
+            hard_cap = _numeric.non_negative_float(hard_max_spend)
+        except ValueError as e:
+            return _err(f"{label}: invalid operator spend ceiling: {e}")
+        if cost is not None and _shared.over_budget(cost, hard_cap):
+            return _err(
+                f"{label}: estimated cost ${cost:.4f} exceeds the operator's "
+                f"hard per-call ceiling of ${hard_cap:.4f}"
+            )
     if confirm:
         return None
-    if cost is None or _shared.over_budget(cost, cap):
+    if require_confirmation or cost is None or _shared.over_budget(cost, cap):
         shown = f"${cost:.4f}" if cost is not None else "unknown"
-        return {
-            "status": "confirmation_required",
-            "estimated_cost_usd": cost,
-            "max_spend_usd": cap,
-            "message": (
+        if require_confirmation:
+            message = (
+                f"{label}: estimated cost {shown}; the operator requires explicit "
+                "confirmation for remote media. Re-call with confirm=true to proceed."
+            )
+        else:
+            message = (
                 f"{label}: estimated cost {shown} is over the auto-approve cap of "
                 f"${cap:.4f} (or could not be estimated). Re-call with confirm=true "
                 "to proceed, or raise the cap via the max_spend argument / "
                 "VENICE_MCP_MAX_SPEND."
-            ),
+            )
+        return {
+            "status": "confirmation_required",
+            "estimated_cost_usd": cost,
+            "max_spend_usd": cap,
+            "message": message,
         }
     return None
 
@@ -215,6 +234,8 @@ def image_tool(
     confirm: bool = False,
     max_spend: Optional[float] = None,
     path_authority=None,
+    hard_max_spend: Optional[float] = None,
+    require_confirmation: bool = False,
 ) -> dict:
     """Generate 1-4 image variants via /image/generate; write files, return paths."""
     if not prompt or not prompt.strip():
@@ -252,7 +273,11 @@ def image_tool(
         cost = _image._estimate_cost(price, variants)
     except ValueError as e:
         return _err(f"image: {e}")
-    gate = check_spend(cost, confirm=confirm, max_spend=max_spend, label="image")
+    gate = check_spend(
+        cost, confirm=confirm, max_spend=max_spend, label="image",
+        hard_max_spend=hard_max_spend,
+        require_confirmation=require_confirmation,
+    )
     if gate is not None:
         return gate
 
@@ -298,6 +323,8 @@ def tts_tool(
     output_dir: Optional[str] = None,
     confirm: bool = False,
     max_spend: Optional[float] = None,
+    hard_max_spend: Optional[float] = None,
+    require_confirmation: bool = False,
 ) -> dict:
     """Synthesize speech via /audio/speech; write an audio file, return its path."""
     if not text or not text.strip():
@@ -311,7 +338,11 @@ def tts_tool(
         cost = _tts._estimate_cost(len(text), resolved.price_per_million)
     except ValueError as e:
         return _err(f"tts: {e}")
-    gate = check_spend(cost, confirm=confirm, max_spend=max_spend, label="tts")
+    gate = check_spend(
+        cost, confirm=confirm, max_spend=max_spend, label="tts",
+        hard_max_spend=hard_max_spend,
+        require_confirmation=require_confirmation,
+    )
     if gate is not None:
         return gate
 
@@ -361,6 +392,8 @@ def _queue_media(
     # to sfx's cadence the moment anyone diverges them.
     poll_interval: float,
     background: bool = False,
+    hard_max_spend: Optional[float] = None,
+    require_confirmation: bool = False,
 ) -> dict:
     """Shared quote-gated queue -> poll -> save for sfx/music (print-free).
 
@@ -379,7 +412,11 @@ def _queue_media(
     except ValueError as e:
         return _err(f"{label}: {e}")
 
-    gate = check_spend(quote_value, confirm=confirm, max_spend=max_spend, label=label)
+    gate = check_spend(
+        quote_value, confirm=confirm, max_spend=max_spend, label=label,
+        hard_max_spend=hard_max_spend,
+        require_confirmation=require_confirmation,
+    )
     if gate is not None:
         return gate
 
@@ -446,6 +483,8 @@ def sfx_tool(
     max_spend: Optional[float] = None,
     max_wait: float = _sfx.config.SFX_POLL_MAX_WAIT_SEC,
     background: bool = False,
+    hard_max_spend: Optional[float] = None,
+    require_confirmation: bool = False,
 ) -> dict:
     """Generate a sound effect via the async audio queue; write a file, return path.
 
@@ -484,6 +523,8 @@ def sfx_tool(
         max_wait=max_wait,
         poll_interval=_sfx.config.SFX_POLL_INTERVAL_SEC,
         background=background,
+        hard_max_spend=hard_max_spend,
+        require_confirmation=require_confirmation,
     )
 
 
@@ -501,6 +542,8 @@ def music_tool(
     max_spend: Optional[float] = None,
     max_wait: float = _music.config.MUSIC_POLL_MAX_WAIT_SEC,
     background: bool = False,
+    hard_max_spend: Optional[float] = None,
+    require_confirmation: bool = False,
 ) -> dict:
     """Generate long-form music/ambience via the async audio queue; return the path.
 
@@ -551,19 +594,27 @@ def music_tool(
         max_wait=max_wait,
         poll_interval=_music.config.MUSIC_POLL_INTERVAL_SEC,
         background=background,
+        hard_max_spend=hard_max_spend,
+        require_confirmation=require_confirmation,
     )
 
 
 def _binary_op_tool(
     client, *, endpoint: str, body: dict, out_path: Path, label: str,
     confirm: bool, max_spend: Optional[float],
+    hard_max_spend: Optional[float] = None,
+    require_confirmation: bool = False,
 ) -> dict:
     """Shared dynamic-priced (always confirm) binary op for upscale/bg-remove.
 
     Cost is unknown up front, so `check_spend(None, ...)` forces `confirm=true`.
     Cannot reuse `_shared.post_binary_op` -- it prints the path to stdout.
     """
-    gate = check_spend(None, confirm=confirm, max_spend=max_spend, label=label)
+    gate = check_spend(
+        None, confirm=confirm, max_spend=max_spend, label=label,
+        hard_max_spend=hard_max_spend,
+        require_confirmation=require_confirmation,
+    )
     if gate is not None:
         return gate
     try:
@@ -593,6 +644,8 @@ def upscale_tool(
     confirm: bool = False,
     max_spend: Optional[float] = None,
     path_authority=None,
+    hard_max_spend: Optional[float] = None,
+    require_confirmation: bool = False,
 ) -> dict:
     """Upscale an image via /image/upscale (dynamic price -> needs confirm)."""
     resolved = _model_media_path(
@@ -613,6 +666,8 @@ def upscale_tool(
     return _binary_op_tool(
         client, endpoint=_upscale.ENDPOINT, body=body, out_path=out_path,
         label="upscale", confirm=confirm, max_spend=max_spend,
+        hard_max_spend=hard_max_spend,
+        require_confirmation=require_confirmation,
     )
 
 
@@ -625,6 +680,8 @@ def bg_remove_tool(
     confirm: bool = False,
     max_spend: Optional[float] = None,
     path_authority=None,
+    hard_max_spend: Optional[float] = None,
+    require_confirmation: bool = False,
 ) -> dict:
     """Remove an image background via /image/background-remove (dynamic -> confirm)."""
     if bool(input_path) == bool(image_url):
@@ -649,6 +706,8 @@ def bg_remove_tool(
     return _binary_op_tool(
         client, endpoint=_bg.ENDPOINT, body=body, out_path=out_path,
         label="bg-remove", confirm=confirm, max_spend=max_spend,
+        hard_max_spend=hard_max_spend,
+        require_confirmation=require_confirmation,
     )
 
 
@@ -869,6 +928,9 @@ def video_tool(
     max_wait: float = _video.config.VIDEO_POLL_MAX_WAIT_SEC,
     background: bool = False,
     path_authority=None,
+    job_store=None,
+    hard_max_spend: Optional[float] = None,
+    require_confirmation: bool = False,
 ) -> dict:
     """Generate a video via Venice's async /video queue; write a file, return path.
 
@@ -939,7 +1001,11 @@ def video_tool(
     except ValueError as e:
         return _err(f"video: {e}")
 
-    gate = check_spend(quote_value, confirm=confirm, max_spend=max_spend, label="video")
+    gate = check_spend(
+        quote_value, confirm=confirm, max_spend=max_spend, label="video",
+        hard_max_spend=hard_max_spend,
+        require_confirmation=require_confirmation,
+    )
     if gate is not None:
         return gate
 
@@ -956,9 +1022,10 @@ def video_tool(
     download_url = queued.get("download_url") or None
 
     if background:
+        private_jobs = job_store or _video_jobs
         if download_url:
             try:
-                _video_jobs.remember(queue_id, model, download_url)
+                private_jobs.remember(queue_id, model, download_url)
             except _video_jobs.VideoJobStoreError as e:
                 return _err(
                     f"video: queued as {queue_id}, but could not save private "
@@ -1103,6 +1170,9 @@ def job_result_tool(
     # `_COMMAND_MAP` section. A sweep that made every max_wait Optional would
     # silently turn this into a blocking call. Leave it.
     max_wait: float = 0.0,
+    output_dir: Optional[str] = None,
+    job_store=None,
+    complete: bool = True,
 ) -> dict:
     """Fetch a backgrounded media job's file (from a `background=True` call).
 
@@ -1138,14 +1208,15 @@ def job_result_tool(
             byte_count = len(data)
         else:  # video
             wait = max(0.0, min(max_wait, _video.config.VIDEO_POLL_MAX_WAIT_SEC))
+            private_jobs = job_store or _video_jobs
             try:
-                download_url = _video_jobs.lookup(queue_id, model)
+                download_url = private_jobs.lookup(queue_id, model)
             except _video_jobs.VideoJobStoreError as e:
                 return _err(
                     f"job_result: cannot read private retrieval metadata: {e}; "
                     f"{_job_retry_hint(queue_id, type=type, model=model)}"
                 )
-            output_root = resolve_output_dir(None)
+            output_root = resolve_output_dir(output_dir)
             try:
                 output_root.mkdir(parents=True, exist_ok=True)
             except OSError as e:
@@ -1180,7 +1251,7 @@ def job_result_tool(
         )
 
     out_path = _queue.resolve_output_path(
-        resolve_output_dir(None), queue_id, ext, prefix=name_prefix
+        resolve_output_dir(output_dir), queue_id, ext, prefix=name_prefix
     )
     if isinstance(data, Path):
         try:
@@ -1202,7 +1273,25 @@ def job_result_tool(
                 f"{_job_retry_hint(queue_id, type=type, model=model)}"
             )
 
-    try:  # best-effort cleanup; the file is already saved
+    if complete:
+        complete_job(
+            client, queue_id=queue_id, type=type, model=model, job_store=job_store
+        )
+    return {
+        "status": "ok",
+        "path": str(out_path.resolve()),
+        "bytes": byte_count,
+        "model": model,
+        "queue_id": queue_id,
+    }
+
+
+def complete_job(client, *, queue_id: str, type: str, model: str, job_store=None) -> None:
+    """Best-effort backend/private cleanup after an output is durably committed."""
+    base = _job_route(type)
+    if base is None:
+        return
+    try:
         body = (
             _audio.job_body(model, queue_id)
             if base == "audio"
@@ -1212,17 +1301,11 @@ def job_result_tool(
     except VeniceAPIError:
         pass
     if base == "video":
+        private_jobs = job_store or _video_jobs
         try:
-            _video_jobs.forget(queue_id, model)
+            private_jobs.forget(queue_id, model)
         except _video_jobs.VideoJobStoreError:
             pass
-    return {
-        "status": "ok",
-        "path": str(out_path.resolve()),
-        "bytes": byte_count,
-        "model": model,
-        "queue_id": queue_id,
-    }
 
 
 def image_edit_tool(
@@ -1244,6 +1327,8 @@ def image_edit_tool(
     confirm: bool = False,
     max_spend: Optional[float] = None,
     path_authority=None,
+    hard_max_spend: Optional[float] = None,
+    require_confirmation: bool = False,
 ) -> dict:
     """Edit/inpaint an image via /image/edit (dynamic price -> needs confirm).
 
@@ -1310,6 +1395,8 @@ def image_edit_tool(
     return _binary_op_tool(
         client, endpoint=endpoint, body=body, out_path=out_path,
         label="image-edit", confirm=confirm, max_spend=max_spend,
+        hard_max_spend=hard_max_spend,
+        require_confirmation=require_confirmation,
     )
 
 

@@ -8,6 +8,8 @@ data:
   VENICE_MCP_OAUTH_JWKS_URL: https://auth.example.com/.well-known/jwks.json
   VENICE_MCP_OAUTH_AUDIENCE: https://mcp.example.com
   VENICE_MCP_OAUTH_SCOPES: venice:mcp
+  VENICE_MCP_MEDIA_DIR: /srv/venice-media
+  VENICE_MCP_REMOTE_MAX_SPEND: "0.10"
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -23,9 +25,13 @@ spec:
       labels:
         app.kubernetes.io/name: venice-mcp
     spec:
+      # The SQLite/filesystem media store is deliberately single-writer.
+      # Keep replicas=1 and use a ReadWriteOnce volume.
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
         seccompProfile:
           type: RuntimeDefault
       containers:
@@ -72,10 +78,25 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            - name: media
+              mountPath: /srv/venice-media
       volumes:
         - name: tmp
           emptyDir:
             sizeLimit: 64Mi
+        - name: media
+          persistentVolumeClaim:
+            claimName: venice-mcp-media
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: venice-mcp-media
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 5Gi
 ---
 apiVersion: v1
 kind: Service

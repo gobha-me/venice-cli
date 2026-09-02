@@ -5,8 +5,11 @@ import importlib.util
 import io
 import json
 import sys
+import tempfile
 import time
 import unittest
+import urllib.parse
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
@@ -110,6 +113,26 @@ class TestRemoteConfig(unittest.TestCase):
                 with self.assertRaises(mcp_serve.RemoteConfigError):
                     mcp_serve.resolve_remote_config(args, {})
 
+    def test_media_config_is_bounded_and_dynamic_spend_is_fail_closed(self):
+        cfg = mcp_serve.resolve_remote_config(
+            _args(media_dir="/srv/venice-media", remote_max_spend=2.5),
+            {"VENICE_MCP_MEDIA_TTL_SECONDS": "3600"},
+        )
+        self.assertEqual(cfg.media_dir, "/srv/venice-media")
+        self.assertEqual(cfg.media_ttl_seconds, 3600)
+        self.assertEqual(cfg.remote_max_spend, 2.5)
+        self.assertFalse(cfg.allow_dynamic_spend)
+        with self.assertRaises(mcp_serve.RemoteConfigError):
+            mcp_serve.resolve_remote_config(
+                _args(media_dir="/srv/venice-media", allow_dynamic_spend=True), {}
+            )
+        with self.assertRaises(mcp_serve.RemoteConfigError):
+            mcp_serve.resolve_remote_config(
+                _args(media_dir=None), {"VENICE_MCP_MEDIA_MAX_OBJECTS": "0"}
+            )
+        with self.assertRaises(mcp_serve.RemoteConfigError):
+            mcp_serve.resolve_remote_config(_args(media_dir="relative/media"), {})
+
     def test_http_native_content_combination_fails_before_auth(self):
         with mock.patch.object(mcp_serve._mcp, "import_mcp", return_value=object()), \
              mock.patch.object(mcp_serve._openai, "import_openai", return_value=object()), \
@@ -159,6 +182,16 @@ class TestRemoteConfig(unittest.TestCase):
             audience="https://mcp.example.test",
             scopes=("venice:mcp",),
             allowed_origins=(),
+            media_dir=None,
+            media_ttl_seconds=24 * 60 * 60,
+            media_max_objects=100,
+            media_principal_max_bytes=1024 * 1024 * 1024,
+            media_global_max_bytes=4 * 1024 * 1024 * 1024,
+            media_max_pending_jobs=4,
+            media_global_max_pending_jobs=16,
+            media_mcp_read_max_bytes=32 * 1024 * 1024,
+            remote_max_spend=0.10,
+            allow_dynamic_spend=False,
         )
 
 
@@ -274,13 +307,13 @@ class TestHTTPServer(unittest.TestCase):
         async def verify_token(self, token):
             from mcp.server.auth.provider import AccessToken
 
-            if token != "good-token":
+            if token not in ("good-token", "other-token"):
                 return None
             return AccessToken(
                 token=token,
                 client_id="claude-client",
                 scopes=["venice:mcp"],
-                subject="user-1",
+                subject="user-2" if token == "other-token" else "user-1",
             )
 
     def _server(self):
@@ -296,6 +329,19 @@ class TestHTTPServer(unittest.TestCase):
             scopes=["venice:mcp"],
             token_verifier=self.StaticVerifier(),
         )
+
+    def _media_server(self, media_dir, **overrides):
+        from venice.mcp_server import build_http_server
+
+        values = dict(
+            doc={}, public_url="https://mcp.example.test/mcp",
+            issuer_url="https://auth.example.test",
+            jwks_url="https://auth.example.test/jwks", audience="venice-api",
+            scopes=["venice:mcp"], token_verifier=self.StaticVerifier(),
+            media_dir=media_dir,
+        )
+        values.update(overrides)
+        return build_http_server(self.FakeClient(), **values)
 
     @staticmethod
     def _app(server):
@@ -326,6 +372,205 @@ class TestHTTPServer(unittest.TestCase):
             self.assertIs(tool.annotations.read_only_hint, False)
             self.assertIs(tool.annotations.destructive_hint, False)
             self.assertIs(tool.annotations.open_world_hint, True)
+
+    def test_media_profile_exposes_only_uri_based_media_tools(self):
+        with tempfile.TemporaryDirectory() as media_dir:
+            server = self._media_server(media_dir)
+            tools = {tool.name: tool for tool in server._tool_manager.list_tools()}
+        self.assertEqual(set(tools), {
+            "venice_chat", "venice_vision", "venice_media_import",
+            "venice_media_delete", "venice_image", "venice_tts", "venice_sfx",
+            "venice_music", "venice_upscale", "venice_bg_remove",
+            "venice_image_edit", "venice_video", "venice_job_status",
+            "venice_job_result",
+        })
+        forbidden = {"input_path", "output_dir", "max_spend", "queue_id"}
+        for tool in tools.values():
+            self.assertTrue(forbidden.isdisjoint(tool.parameters["properties"]))
+        self.assertEqual(
+            set(tools["venice_job_result"].parameters["properties"]), {"job_id"}
+        )
+
+    def test_media_http_upload_range_owner_binding_and_delete(self):
+        import httpx2
+
+        png = b"\x89PNG\r\n\x1a\n" + b"x" * 64
+        with tempfile.TemporaryDirectory() as media_dir:
+            server = self._media_server(media_dir)
+            app = self._app(server)
+
+            async def exercise():
+                transport = httpx2.ASGITransport(app=app)
+                async with server.session_manager.run():
+                    async with httpx2.AsyncClient(
+                        transport=transport, base_url="https://mcp.example.test"
+                    ) as client:
+                        unauth = await client.post("/media", content=png)
+                        uploaded = await client.post(
+                            "/media", content=png,
+                            headers={
+                                "Authorization": "Bearer good-token",
+                                "Content-Type": "image/png",
+                                "X-Venice-Filename": "frame.png",
+                            },
+                        )
+                        uri = uploaded.json()["uri"]
+                        path = urllib.parse.urlsplit(uri).path
+                        full = await client.get(
+                            path, headers={"Authorization": "Bearer good-token"}
+                        )
+                        ranged = await client.get(
+                            path, headers={
+                                "Authorization": "Bearer good-token", "Range": "bytes=0-7",
+                            },
+                        )
+                        other = await client.get(
+                            path, headers={"Authorization": "Bearer other-token"}
+                        )
+                        deleted = await client.delete(
+                            path, headers={"Authorization": "Bearer good-token"}
+                        )
+                        gone = await client.get(
+                            path, headers={"Authorization": "Bearer good-token"}
+                        )
+                        return unauth, uploaded, full, ranged, other, deleted, gone
+
+            results = asyncio.run(exercise())
+        unauth, uploaded, full, ranged, other, deleted, gone = results
+        self.assertEqual(unauth.status_code, 401)
+        self.assertEqual(uploaded.status_code, 201)
+        self.assertEqual(uploaded.json()["name"], "frame.png")
+        self.assertEqual(full.content, png)
+        self.assertEqual(full.headers["cache-control"], "private, no-store")
+        self.assertEqual(ranged.status_code, 206)
+        self.assertEqual(ranged.content, png[:8])
+        self.assertEqual(other.status_code, 404)
+        self.assertEqual(deleted.status_code, 204)
+        self.assertEqual(gone.status_code, 404)
+
+    def test_media_resource_read_and_paid_tool_confirmation(self):
+        import base64
+        import httpx2
+        from mcp import Client
+        from mcp.client.streamable_http import streamable_http_client
+        from mcp.types import ResourceLink
+        from venice.commands import _mcp
+
+        png = b"\x89PNG\r\n\x1a\n" + b"generated"
+        with tempfile.TemporaryDirectory() as media_dir:
+            server = self._media_server(media_dir)
+            app = self._app(server)
+
+            def fake_image(_client, prompt, **kwargs):
+                self.assertTrue(kwargs["require_confirmation"])
+                self.assertEqual(kwargs["max_spend"], 0.10)
+                self.assertEqual(kwargs["hard_max_spend"], 0.10)
+                if not kwargs["confirm"]:
+                    return {
+                        "status": "confirmation_required",
+                        "estimated_cost_usd": 0.01,
+                    }
+                path = Path(kwargs["output_dir"]) / "generated.png"
+                path.write_bytes(png)
+                return {
+                    "status": "ok", "paths": [str(path)], "count": 1,
+                    "bytes": len(png), "cost_estimate_usd": 0.01,
+                }
+
+            async def exercise():
+                url = "https://mcp.example.test/mcp"
+                transport = httpx2.ASGITransport(app=app)
+                headers = {"Authorization": "Bearer good-token"}
+                async with server.session_manager.run():
+                    async with (
+                        httpx2.AsyncClient(
+                            transport=transport, base_url=url, headers=headers,
+                        ) as http_client,
+                        Client(streamable_http_client(url, http_client=http_client)) as client,
+                    ):
+                        gated = await client.call_tool(
+                            "venice_image", {"prompt": "test", "confirm": False}
+                        )
+                        made = await client.call_tool(
+                            "venice_image", {"prompt": "test", "confirm": True}
+                        )
+                        link = next(
+                            block for block in made.content if isinstance(block, ResourceLink)
+                        )
+                        read = await client.read_resource(link.uri)
+                        return gated, made, link, read
+
+            with mock.patch.object(_mcp, "image_tool", side_effect=fake_image):
+                gated, made, link, read = asyncio.run(exercise())
+        self.assertEqual(json.loads(gated.content[0].text)["status"], "confirmation_required")
+        self.assertEqual(json.loads(made.content[0].text)["status"], "ok")
+        self.assertEqual(link.mime_type, "image/png")
+        self.assertEqual(base64.b64decode(read.contents[0].blob), png)
+
+    def test_queued_media_uses_owner_bound_job_handle_and_stores_result(self):
+        import httpx2
+        from mcp import Client
+        from mcp.client.streamable_http import streamable_http_client
+        from mcp.types import ResourceLink
+        from venice.commands import _mcp
+
+        mp3 = b"ID3" + b"audio"
+        with tempfile.TemporaryDirectory() as media_dir:
+            server = self._media_server(media_dir)
+            app = self._app(server)
+
+            def fake_sfx(_client, prompt, **kwargs):
+                if not kwargs["confirm"]:
+                    return {
+                        "status": "confirmation_required", "estimated_cost_usd": 0.02,
+                    }
+                self.assertTrue(kwargs["background"])
+                return {
+                    "status": "queued", "queue_id": "private-backend-id",
+                    "type": "sfx", "model": "sfx-model", "cost_estimate_usd": 0.02,
+                }
+
+            def fake_result(_client, **kwargs):
+                self.assertEqual(kwargs["queue_id"], "private-backend-id")
+                self.assertEqual(kwargs["type"], "sfx")
+                self.assertFalse(kwargs["complete"])
+                path = Path(kwargs["output_dir"]) / "sound.mp3"
+                path.write_bytes(mp3)
+                return {"status": "ok", "path": str(path), "bytes": len(mp3)}
+
+            async def exercise():
+                url = "https://mcp.example.test/mcp"
+                transport = httpx2.ASGITransport(app=app)
+                headers = {"Authorization": "Bearer good-token"}
+                async with server.session_manager.run():
+                    async with (
+                        httpx2.AsyncClient(
+                            transport=transport, base_url=url, headers=headers,
+                        ) as http_client,
+                        Client(streamable_http_client(url, http_client=http_client)) as client,
+                    ):
+                        gated = await client.call_tool(
+                            "venice_sfx", {"prompt": "boom", "confirm": False}
+                        )
+                        queued = await client.call_tool(
+                            "venice_sfx", {"prompt": "boom", "confirm": True}
+                        )
+                        queued_doc = json.loads(queued.content[0].text)
+                        ready = await client.call_tool(
+                            "venice_job_result", {"job_id": queued_doc["job_id"]}
+                        )
+                        return gated, queued_doc, ready
+
+            with mock.patch.object(_mcp, "sfx_tool", side_effect=fake_sfx), \
+                 mock.patch.object(_mcp, "job_result_tool", side_effect=fake_result), \
+                 mock.patch.object(_mcp, "complete_job") as complete:
+                gated, queued, ready = asyncio.run(exercise())
+        self.assertEqual(json.loads(gated.content[0].text)["status"], "confirmation_required")
+        self.assertEqual(queued["status"], "queued")
+        self.assertNotIn("queue_id", queued)
+        link = next(block for block in ready.content if isinstance(block, ResourceLink))
+        self.assertEqual(link.mime_type, "audio/mpeg")
+        complete.assert_called_once()
 
     def test_remote_vision_forces_delegation_even_with_native_config(self):
         from venice.commands import _mcp

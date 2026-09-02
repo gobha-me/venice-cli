@@ -19,8 +19,7 @@ import sys
 import urllib.parse
 from dataclasses import dataclass
 
-from .. import auth
-from .. import userconfig
+from .. import _numeric, auth, remote_media, userconfig
 from ..client import build_client_from_auth
 from . import _mcp, _openai
 
@@ -40,6 +39,16 @@ class RemoteConfig:
     audience: str
     scopes: tuple[str, ...]
     allowed_origins: tuple[str, ...]
+    media_dir: str = ""
+    media_ttl_seconds: int = remote_media.DEFAULT_TTL_SECONDS
+    media_max_objects: int = remote_media.DEFAULT_MAX_OBJECTS
+    media_principal_max_bytes: int = remote_media.DEFAULT_PRINCIPAL_MAX_BYTES
+    media_global_max_bytes: int = remote_media.DEFAULT_GLOBAL_MAX_BYTES
+    media_max_pending_jobs: int = remote_media.DEFAULT_MAX_PENDING_JOBS
+    media_global_max_pending_jobs: int = remote_media.DEFAULT_GLOBAL_MAX_PENDING_JOBS
+    media_mcp_read_max_bytes: int = remote_media.DEFAULT_MCP_READ_MAX_BYTES
+    remote_max_spend: float = _mcp.DEFAULT_MCP_MAX_SPEND
+    allow_dynamic_spend: bool = False
 
 
 def _port(value: str) -> int:
@@ -106,6 +115,31 @@ def _origin(value: str) -> str:
     return f"{parsed.scheme}://{parsed.netloc}"
 
 
+def _positive_setting(environ, name: str, default: int) -> int:
+    raw = environ.get(name)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        value = int(str(raw).strip())
+    except ValueError:
+        raise RemoteConfigError(f"{name} must be an integer") from None
+    if value <= 0:
+        raise RemoteConfigError(f"{name} must be greater than zero")
+    return value
+
+
+def _boolean_setting(environ, name: str, default: bool = False) -> bool:
+    raw = environ.get(name)
+    if raw is None or not str(raw).strip():
+        return default
+    value = str(raw).strip().lower()
+    if value in ("1", "true", "yes", "on"):
+        return True
+    if value in ("0", "false", "no", "off"):
+        return False
+    raise RemoteConfigError(f"{name} must be true or false")
+
+
 def resolve_remote_config(args, environ=None) -> RemoteConfig:
     """Resolve the fail-closed OAuth resource-server settings for HTTP mode."""
     environ = os.environ if environ is None else environ
@@ -150,6 +184,31 @@ def resolve_remote_config(args, environ=None) -> RemoteConfig:
     )
     if len(allowed_origins) > 32:
         raise RemoteConfigError("at most 32 --allowed-origin values are accepted")
+    media_dir = _setting(args, "media_dir", "VENICE_MCP_MEDIA_DIR", environ)
+    if media_dir and not os.path.isabs(media_dir):
+        raise RemoteConfigError("--media-dir must be an absolute dedicated directory")
+    remote_max_spend = getattr(args, "remote_max_spend", None)
+    if remote_max_spend is None:
+        remote_max_spend = environ.get(
+            "VENICE_MCP_REMOTE_MAX_SPEND", _mcp.DEFAULT_MCP_MAX_SPEND
+        )
+    try:
+        remote_max_spend = _numeric.non_negative_float(remote_max_spend)
+    except (TypeError, ValueError) as exc:
+        raise RemoteConfigError(
+            f"VENICE_MCP_REMOTE_MAX_SPEND is invalid: {exc}"
+        ) from None
+    allow_dynamic = bool(getattr(args, "allow_dynamic_spend", False))
+    if not allow_dynamic:
+        allow_dynamic = _boolean_setting(
+            environ, "VENICE_MCP_REMOTE_ALLOW_DYNAMIC_SPEND"
+        )
+    if allow_dynamic and not media_dir:
+        raise RemoteConfigError("--allow-dynamic-spend requires --media-dir")
+    if allow_dynamic and remote_max_spend < 10.0:
+        raise RemoteConfigError(
+            "dynamic remote media spend requires --remote-max-spend of at least 10"
+        )
     return RemoteConfig(
         public_url=_https_url(fields["public_url"], "--public-url", endpoint_path="/mcp"),
         issuer_url=_https_url(fields["issuer_url"], "--oauth-issuer"),
@@ -157,6 +216,35 @@ def resolve_remote_config(args, environ=None) -> RemoteConfig:
         audience=fields["audience"],
         scopes=scopes,
         allowed_origins=allowed_origins,
+        media_dir=media_dir,
+        media_ttl_seconds=_positive_setting(
+            environ, "VENICE_MCP_MEDIA_TTL_SECONDS", remote_media.DEFAULT_TTL_SECONDS
+        ),
+        media_max_objects=_positive_setting(
+            environ, "VENICE_MCP_MEDIA_MAX_OBJECTS", remote_media.DEFAULT_MAX_OBJECTS
+        ),
+        media_principal_max_bytes=_positive_setting(
+            environ, "VENICE_MCP_MEDIA_PRINCIPAL_MAX_BYTES",
+            remote_media.DEFAULT_PRINCIPAL_MAX_BYTES,
+        ),
+        media_global_max_bytes=_positive_setting(
+            environ, "VENICE_MCP_MEDIA_GLOBAL_MAX_BYTES",
+            remote_media.DEFAULT_GLOBAL_MAX_BYTES,
+        ),
+        media_max_pending_jobs=_positive_setting(
+            environ, "VENICE_MCP_MEDIA_MAX_PENDING_JOBS",
+            remote_media.DEFAULT_MAX_PENDING_JOBS,
+        ),
+        media_global_max_pending_jobs=_positive_setting(
+            environ, "VENICE_MCP_MEDIA_GLOBAL_MAX_PENDING_JOBS",
+            remote_media.DEFAULT_GLOBAL_MAX_PENDING_JOBS,
+        ),
+        media_mcp_read_max_bytes=_positive_setting(
+            environ, "VENICE_MCP_MEDIA_MCP_READ_MAX_BYTES",
+            remote_media.DEFAULT_MCP_READ_MAX_BYTES,
+        ),
+        remote_max_spend=remote_max_spend,
+        allow_dynamic_spend=allow_dynamic,
     )
 
 
@@ -201,6 +289,18 @@ def register(subparsers) -> None:
         "--allowed-origin", action="append",
         help="allow one exact HTTPS browser Origin; repeat as needed",
     )
+    p.add_argument(
+        "--media-dir",
+        help="enable principal-bound remote media using this private storage directory",
+    )
+    p.add_argument(
+        "--remote-max-spend", type=_numeric.non_negative_float, metavar="USD",
+        help="hard per-call ceiling for authenticated remote media (default 0.10)",
+    )
+    p.add_argument(
+        "--allow-dynamic-spend", action="store_true", default=None,
+        help="enable unknown-price remote media calls (requires max spend >= 10)",
+    )
     p.set_defaults(handler=_run)
 
 
@@ -213,6 +313,7 @@ def _run(args) -> int:
     remote_only = (
         "host", "port", "public_url", "oauth_issuer", "oauth_jwks_url",
         "oauth_audience", "oauth_scope", "allowed_origin",
+        "media_dir", "remote_max_spend", "allow_dynamic_spend",
     )
     if not remote and any(getattr(args, name, None) is not None for name in remote_only):
         print(
@@ -260,6 +361,18 @@ def _run(args) -> int:
                 audience=remote_config.audience,
                 scopes=remote_config.scopes,
                 allowed_origins=remote_config.allowed_origins,
+                media_dir=remote_config.media_dir or None,
+                media_ttl_seconds=remote_config.media_ttl_seconds,
+                media_max_objects=remote_config.media_max_objects,
+                media_principal_max_bytes=remote_config.media_principal_max_bytes,
+                media_global_max_bytes=remote_config.media_global_max_bytes,
+                media_max_pending_jobs=remote_config.media_max_pending_jobs,
+                media_global_max_pending_jobs=(
+                    remote_config.media_global_max_pending_jobs
+                ),
+                media_mcp_read_max_bytes=remote_config.media_mcp_read_max_bytes,
+                remote_max_spend=remote_config.remote_max_spend,
+                allow_dynamic_spend=remote_config.allow_dynamic_spend,
             )
         else:
             print("venice mcp-serve: starting stdio MCP server (Ctrl-C to stop)",

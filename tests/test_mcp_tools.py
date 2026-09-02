@@ -1386,6 +1386,16 @@ class TestSpendHelpers(unittest.TestCase):
         self.assertEqual(gate["status"], "confirmation_required")
         gate2 = _mcp.check_spend(None, confirm=False, max_spend=0.10, label="x")
         self.assertEqual(gate2["status"], "confirmation_required")  # unknown -> confirm
+        forced = _mcp.check_spend(
+            0.01, confirm=False, max_spend=0.10, label="x",
+            require_confirmation=True,
+        )
+        self.assertEqual(forced["status"], "confirmation_required")
+        hard = _mcp.check_spend(
+            0.11, confirm=True, max_spend=999, label="x", hard_max_spend=0.10,
+        )
+        self.assertEqual(hard["status"], "error")
+        self.assertIn("operator's hard per-call ceiling", hard["message"])
 
     def test_non_finite_caps_are_errors_and_never_fall_through(self):
         for bad in (float("nan"), float("inf"), float("-inf")):
