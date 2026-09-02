@@ -6,6 +6,7 @@ absent on Python 3.9, where the extra's environment marker excludes it).
 """
 import argparse
 import asyncio
+import base64
 import importlib.util
 import inspect
 import io
@@ -21,7 +22,7 @@ _HAS_MCP = importlib.util.find_spec("mcp") is not None
 EXPECTED_TOOLS = {
     "venice_image", "venice_tts", "venice_sfx", "venice_music",
     "venice_upscale", "venice_bg_remove", "venice_chat",
-    "venice_video", "venice_image_edit",
+    "venice_video", "venice_image_edit", "venice_vision",
 }
 
 
@@ -37,9 +38,40 @@ class TestMissingExtra(unittest.TestCase):
         self.assertIn('venice-cli[mcp]', err.getvalue())
 
 
+class TestCommandWiring(unittest.TestCase):
+    def test_parser_defaults_to_text_only_and_accepts_declaration(self):
+        from venice import cli
+
+        parser = cli.build_parser()
+        self.assertFalse(parser.parse_args(["mcp-serve"]).host_image_content)
+        self.assertTrue(
+            parser.parse_args([
+                "mcp-serve", "--host-image-content"
+            ]).host_image_content
+        )
+
+    @unittest.skipUnless(_HAS_MCP, "mcp SDK not installed (expected on Python 3.9)")
+    def test_run_forwards_the_startup_declaration(self):
+        from venice.commands import mcp_serve
+        from venice import mcp_server
+
+        client = object()
+        doc = {"defaults": {}}
+        with mock.patch.object(mcp_serve._mcp, "import_mcp", return_value=object()), \
+             mock.patch.object(mcp_serve, "build_client_from_auth", return_value=client), \
+             mock.patch.object(mcp_serve.userconfig, "load_config", return_value=doc), \
+             mock.patch.object(mcp_server, "serve") as serve, \
+             mock.patch.object(sys, "stderr", io.StringIO()):
+            rc = mcp_serve._run(argparse.Namespace(host_image_content=True))
+        self.assertEqual(rc, 0)
+        serve.assert_called_once_with(
+            client, doc=doc, host_image_content=True
+        )
+
+
 @unittest.skipUnless(_HAS_MCP, "mcp SDK not installed (expected on Python 3.9)")
 class TestServerWiring(unittest.TestCase):
-    def test_build_server_exposes_exactly_nine_tools(self):
+    def test_build_server_exposes_exactly_ten_tools(self):
         from venice.mcp_server import build_server
 
         class FakeClient:
@@ -86,6 +118,205 @@ class TestServerWiring(unittest.TestCase):
             {"status": "ok", "content": "pong"},
         )
         impl.assert_called_once()
+
+    def test_native_vision_returns_prompt_then_exact_image_content(self):
+        from mcp import Client
+
+        from venice.commands import _mcp, _openai
+        from venice.mcp_server import build_server
+
+        class FakeClient:
+            api_key = "fake"
+            base_url = "https://api.venice.ai/api/v1"
+
+        png = b"\x89PNG\r\n\x1a\nexact-pixels"
+        with tempfile.TemporaryDirectory() as root:
+            Path(root, "frame.png").write_bytes(png)
+            server = build_server(
+                FakeClient(), doc={}, root=root, host_image_content=True
+            )
+
+            async def exercise():
+                async with Client(server) as client:
+                    return await client.call_tool("venice_vision", {
+                        "input_path": "frame.png",
+                        "prompt": "Inspect the alignment.",
+                    })
+
+            with mock.patch.object(_mcp, "vision_tool") as delegate, \
+                 mock.patch.object(_openai, "import_openai") as sdk_import:
+                result = asyncio.run(exercise())
+
+        self.assertFalse(result.is_error)
+        self.assertEqual([block.type for block in result.content], ["text", "image"])
+        self.assertEqual(result.content[0].text, "Inspect the alignment.")
+        self.assertEqual(result.content[1].mime_type, "image/png")
+        self.assertEqual(base64.b64decode(result.content[1].data), png)
+        delegate.assert_not_called()
+        sdk_import.assert_not_called()
+
+    def test_auto_without_declaration_delegates_as_text(self):
+        from mcp import Client
+
+        from venice.commands import _mcp
+        from venice.mcp_server import build_server
+
+        class FakeClient:
+            api_key = "fake"
+            base_url = "https://api.venice.ai/api/v1"
+
+        server = build_server(FakeClient(), doc={})
+
+        async def exercise():
+            async with Client(server) as client:
+                return await client.call_tool("venice_vision", {
+                    "input_path": "frame.png",
+                    "prompt": "Read it",
+                    "model": "vision-model",
+                    "max_tokens": 77,
+                })
+
+        delegated = {
+            "status": "ok", "content": "delegated answer", "model": "vision-model"
+        }
+        with mock.patch.object(_mcp, "vision_tool", return_value=delegated) as impl:
+            result = asyncio.run(exercise())
+
+        self.assertFalse(result.is_error)
+        self.assertEqual([block.type for block in result.content], ["text"])
+        self.assertEqual(json.loads(result.content[0].text), delegated)
+        impl.assert_called_once()
+        self.assertEqual(impl.call_args.kwargs["model"], "vision-model")
+        self.assertEqual(impl.call_args.kwargs["max_tokens"], 77)
+
+    def test_native_without_declaration_fails_closed(self):
+        from venice.commands import _mcp
+        from venice.mcp_server import build_server
+
+        class FakeClient:
+            api_key = "fake"
+            base_url = "https://api.venice.ai/api/v1"
+
+        with mock.patch.object(_mcp, "vision_tool") as impl:
+            result = build_server(FakeClient(), doc={})._tool_manager.get_tool(
+                "venice_vision"
+            ).fn(input_path="frame.png", mode="native")
+        self.assertTrue(result.is_error)
+        self.assertIn("--host-image-content", result.content[0].text)
+        impl.assert_not_called()
+
+    def test_explicit_delegate_wins_over_host_declaration(self):
+        from venice.commands import _mcp
+        from venice.mcp_server import build_server
+
+        class FakeClient:
+            api_key = "fake"
+            base_url = "https://api.venice.ai/api/v1"
+
+        delegated = {"status": "ok", "content": "text"}
+        with mock.patch.object(_mcp, "vision_tool", return_value=delegated) as impl:
+            result = build_server(
+                FakeClient(), doc={}, host_image_content=True
+            )._tool_manager.get_tool("venice_vision").fn(
+                input_path="frame.png", mode="delegate"
+            )
+        self.assertEqual(json.loads(result.content[0].text), delegated)
+        impl.assert_called_once()
+
+    def test_native_remote_url_is_rejected_without_fetch_or_delegate(self):
+        from venice.commands import _mcp
+        from venice.mcp_server import build_server
+
+        class FakeClient:
+            api_key = "fake"
+            base_url = "https://api.venice.ai/api/v1"
+
+        with mock.patch.object(_mcp, "vision_tool") as impl:
+            result = build_server(
+                FakeClient(), doc={}, host_image_content=True
+            )._tool_manager.get_tool("venice_vision").fn(
+                image_url="https://example.test/frame.png", mode="native"
+            )
+        self.assertTrue(result.is_error)
+        self.assertIn("only input_path", result.content[0].text)
+        impl.assert_not_called()
+
+    def test_auto_remote_url_delegates_even_for_image_content_host(self):
+        from venice.commands import _mcp
+        from venice.mcp_server import build_server
+
+        class FakeClient:
+            api_key = "fake"
+            base_url = "https://api.venice.ai/api/v1"
+
+        delegated = {"status": "ok", "content": "remote description"}
+        with mock.patch.object(_mcp, "vision_tool", return_value=delegated) as impl:
+            result = build_server(
+                FakeClient(), doc={}, host_image_content=True
+            )._tool_manager.get_tool("venice_vision").fn(
+                image_url="https://example.test/frame.png"
+            )
+        self.assertEqual(json.loads(result.content[0].text), delegated)
+        impl.assert_called_once()
+
+    def test_vision_config_defaults_and_explicit_overrides_reach_delegate(self):
+        from venice.commands import _mcp
+        from venice.mcp_server import build_server
+
+        class FakeClient:
+            api_key = "fake"
+            base_url = "https://api.venice.ai/api/v1"
+
+        doc = {"defaults": {"vision": {
+            "mode": "delegate", "model": "configured", "max_tokens": 44,
+        }}}
+        delegated = {"status": "ok", "content": "description"}
+        tool = build_server(
+            FakeClient(), doc=doc, host_image_content=True
+        )._tool_manager.get_tool("venice_vision").fn
+        with mock.patch.object(_mcp, "vision_tool", return_value=delegated) as impl:
+            tool(input_path="frame.png")
+            tool(
+                input_path="frame.png", mode="delegate",
+                model="explicit", max_tokens=55,
+            )
+        first, second = impl.call_args_list
+        self.assertEqual(first.kwargs["model"], "configured")
+        self.assertEqual(first.kwargs["max_tokens"], 44)
+        self.assertEqual(second.kwargs["model"], "explicit")
+        self.assertEqual(second.kwargs["max_tokens"], 55)
+
+    def test_native_vision_reuses_local_media_authority_failures(self):
+        from venice.commands import _shared
+        from venice.mcp_server import build_server
+
+        class FakeClient:
+            api_key = "fake"
+            base_url = "https://api.venice.ai/api/v1"
+
+        cases = {
+            "empty.png": b"",
+            "text.png": b"not an image",
+        }
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as out:
+            for name, data in cases.items():
+                Path(root, name).write_bytes(data)
+            outside = Path(out, "outside.png")
+            outside.write_bytes(b"\x89PNG\r\n\x1a\nbody")
+            Path(root, "escape.png").symlink_to(outside)
+            Path(root, "large.png").write_bytes(b"\x89PNG\r\n\x1a\nbody")
+            tool = build_server(
+                FakeClient(), doc={}, root=root, host_image_content=True
+            )._tool_manager.get_tool("venice_vision").fn
+            results = [tool(input_path=name) for name in cases]
+            results.append(tool(input_path="missing.png"))
+            results.append(tool(input_path=outside.as_posix()))
+            results.append(tool(input_path="escape.png"))
+            with mock.patch.object(_shared, "MAX_IMAGE_BYTES", 8):
+                results.append(tool(input_path="large.png"))
+        for result in results:
+            self.assertTrue(result.is_error)
+            self.assertEqual([block.type for block in result.content], ["text"])
 
     def test_server_captures_startup_root_for_media_authority(self):
         from venice.mcp_server import build_server
@@ -163,6 +394,26 @@ class TestServerWiring(unittest.TestCase):
             "quality", "disable_prompt_optimization_thinking", "enhance_prompt"
         ):
             self.assertIn(name, edit_props)
+
+    def test_vision_schema_exposes_only_the_declared_public_inputs(self):
+        from venice.mcp_server import build_server
+
+        class FakeClient:
+            api_key = "fake"
+            base_url = "https://api.venice.ai/api/v1"
+
+        tool = build_server(FakeClient(), doc={})._tool_manager.get_tool(
+            "venice_vision"
+        )
+        props = tool.parameters["properties"]
+        self.assertEqual(
+            set(props),
+            {"input_path", "image_url", "prompt", "model", "max_tokens", "mode"},
+        )
+        self.assertEqual(
+            props["mode"]["anyOf"][0]["enum"],
+            ["auto", "native", "delegate"],
+        )
 
     def test_retired_upscale_config_returns_error_without_delegating(self):
         from venice.mcp_server import build_server

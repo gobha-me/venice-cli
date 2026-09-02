@@ -2,17 +2,21 @@
 
 Imported lazily from `commands.mcp_serve._run`, and only after the `[mcp]` extra is
 confirmed present, so the base (stdlib-only) install and Python 3.9 never load it.
-Each registered `venice_*` tool is a thin, typed wrapper that delegates 1:1 to the
-matching `commands._mcp.*_tool` implementation -- the wrapper carries the MCP schema
-and the LLM-facing docstring; the impl carries the (print-free, unit-tested) logic.
+Most registered `venice_*` tools are thin, typed wrappers that delegate 1:1 to the
+matching `commands._mcp.*_tool` implementation. The vision wrapper additionally
+selects MCP-native content, but reuses the same pure input/delegation helpers. The
+wrappers carry MCP schemas and LLM-facing docstrings; the impls carry print-free,
+unit-tested logic.
 
 Do NOT add `from __future__ import annotations` here: MCPServer builds each tool's
 input schema via typing.get_type_hints, so the annotations must stay concrete
 (`typing.Optional[int]`, not stringized `int | None`).
 """
+import json
 import os
 from typing import Annotated, List, Literal, Optional
 
+from mcp import types
 from mcp.server.mcpserver import MCPServer
 from pydantic import Field
 
@@ -29,13 +33,52 @@ def _merged(defaults: dict, host: dict) -> dict:
     return {**defaults, **{k: v for k, v in host.items() if v is not None}}
 
 
-def build_server(client, doc=None, root=None) -> MCPServer:
+def _vision_text_result(result: dict) -> types.CallToolResult:
+    """Convert the existing delegated result envelope to one MCP text block."""
+    return types.CallToolResult(
+        content=[types.TextContent(text=json.dumps(result))],
+        is_error=result.get("status") == "error",
+    )
+
+
+def _native_vision_result(input_path, prompt, path_authority) -> types.CallToolResult:
+    """Return one authorized local image as prompt text plus MCP ImageContent."""
+    prepared = _mcp.prepare_vision_input(
+        input_path, path_authority=path_authority
+    )
+    if prepared.get("status") != "ok":
+        return _vision_text_result(prepared)
+
+    try:
+        header, data = prepared["image_url"].split(",", 1)
+        mime, encoding = header[len("data:"):].split(";", 1)
+        if (
+            not header.startswith("data:")
+            or encoding != "base64"
+            or not mime.startswith("image/")
+            or not data
+        ):
+            raise ValueError
+    except (AttributeError, ValueError):
+        return _vision_text_result({
+            "status": "error",
+            "message": "vision: authorized image could not be encoded",
+        })
+    return types.CallToolResult(content=[
+        types.TextContent(text=(prompt or _mcp.DEFAULT_VISION_PROMPT).strip()),
+        types.ImageContent(data=data, mime_type=mime),
+    ])
+
+
+def build_server(client, doc=None, root=None, host_image_content=False) -> MCPServer:
     """Build an MCPServer exposing venice tools, all bound to `client`.
 
     `doc` is a userconfig document (issue #58): `defaults.<section>.*` values are
     layered UNDER each host-supplied tool arg, so an explicit arg still wins
     (precedence: host arg > config default > tool hardcoded default) -- the same
     contract `venice chat`/`code` already honor. `doc=None` loads the config file.
+    `host_image_content` is an operator declaration fixed at server startup; an
+    absent declaration never permits an ImageContent result.
     """
     server = MCPServer("venice")
     path_authority = _shared.MediaPathAuthority(
@@ -53,6 +96,7 @@ def build_server(client, doc=None, root=None) -> MCPServer:
         "video": userconfig.config_defaults_for("video", _mcp.video_tool, doc),
         "image_edit": userconfig.config_defaults_for("image_edit", _mcp.image_edit_tool, doc),
         "chat": userconfig.config_defaults_for("chat", _mcp.chat_tool, doc),
+        "vision": userconfig.config_defaults_for("vision", _mcp.vision_tool, doc),
     }
     _retired_upscale_config = _upscale.retired_config_keys(doc)
 
@@ -257,6 +301,65 @@ def build_server(client, doc=None, root=None) -> MCPServer:
         )
 
     @server.tool()
+    def venice_vision(
+        input_path: Optional[str] = None,
+        image_url: Optional[str] = None,
+        prompt: Optional[str] = None,
+        model: Optional[str] = None,
+        max_tokens: Optional[int] = None,
+        mode: Optional[Literal["auto", "native", "delegate"]] = None,
+    ) -> types.CallToolResult:
+        """Inspect one image natively or through a delegated Venice vision model.
+
+        Exactly one of input_path or image_url is required. mode=auto returns a
+        validated local image as MCP ImageContent only when the operator started
+        this stdio server with --host-image-content; otherwise it delegates and
+        returns text. mode=native requires both that declaration and input_path.
+        mode=delegate always delegates. model and max_tokens configure only the
+        delegated path. Omitted args use defaults.vision.*, then mode=auto.
+        """
+        args = _merged(_defaults["vision"], dict(
+            input_path=input_path, image_url=image_url, prompt=prompt,
+            model=model, max_tokens=max_tokens, mode=mode,
+        ))
+        selected = args.pop("mode", None) or "auto"
+
+        if selected == "native":
+            if not host_image_content:
+                return _vision_text_result({
+                    "status": "error",
+                    "message": (
+                        "vision: native mode requires mcp-serve "
+                        "--host-image-content"
+                    ),
+                })
+            if args.get("image_url"):
+                return _vision_text_result({
+                    "status": "error",
+                    "message": (
+                        "vision: native MCP image content accepts only input_path; "
+                        "use mode=delegate for image_url"
+                    ),
+                })
+            return _native_vision_result(
+                args.get("input_path"), args.get("prompt"), path_authority
+            )
+
+        if (
+            selected == "auto"
+            and host_image_content
+            and args.get("input_path")
+        ):
+            return _native_vision_result(
+                args.get("input_path"), args.get("prompt"), path_authority
+            )
+
+        return _vision_text_result(_mcp.vision_tool(
+            client,
+            **{**args, "path_authority": path_authority},
+        ))
+
+    @server.tool()
     def venice_video(
         prompt: str,
         model: Optional[str] = None,
@@ -351,6 +454,8 @@ def build_server(client, doc=None, root=None) -> MCPServer:
     return server
 
 
-def serve(client, doc=None) -> None:
+def serve(client, doc=None, host_image_content=False) -> None:
     """Build the server and run it over stdio (blocks until the transport closes)."""
-    build_server(client, doc=doc).run(transport="stdio")
+    build_server(
+        client, doc=doc, host_image_content=host_image_content
+    ).run(transport="stdio")

@@ -845,8 +845,9 @@ produces a final answer. These run **in-process on the `[openai]` extra alone**
 
 `venice_image`, `venice_tts`, `venice_sfx`, `venice_music`, `venice_upscale`,
 `venice_bg_remove`, and `venice_chat` (a sub-completion / subagent primitive) —
-seven of the capabilities `venice mcp-serve` exposes (which adds `venice_video`
-and `venice_image_edit`) — plus `project_search`,
+seven capabilities also exposed by `venice mcp-serve`. The MCP server additionally
+adds `venice_video`, `venice_image_edit`, and its declared-host form of
+`venice_vision`. The in-process agent set also includes `project_search`,
 a read-only [semantic search](#semantic-search) over the project's local
 `venice index` for locating code by meaning before acting on it (a **snapshot** of
 the last index build — pair it with `reindex`, a paid tool that rebuilds the index
@@ -866,8 +867,8 @@ that model advertises `supportsVision`; otherwise it delegates to a separate
 vision model and returns that model's text. `mode=native` or `mode=delegate`
 forces either path. An optional `prompt` directs the question; `model` and
 `max_tokens` configure only delegation or the `auto` fallback. Not spend-gated.
-(`venice code` gets all three too; `venice_vision` is not exposed by
-`mcp-serve`.)
+(`venice code` gets all three too; `mcp-serve` uses the separate
+[`--host-image-content`](#mcp-server) declaration for native vision.)
 
 ```sh
 # One command, multiple steps: the model generates an image, then critiques it.
@@ -1906,18 +1907,22 @@ look" must never be able to masquerade as "we looked and found nothing".
 stdio, exposing venice's generators as tools that an MCP host (Claude Code, or
 any MCP client) can call directly instead of shelling out to the CLI. Starting
 the server needs the `[mcp]` extra (Python ≥ 3.10); its `venice_chat` tool also
-needs `[openai]`. Install `[all]` when the host should be able to call all nine
+needs `[openai]`. Delegated `venice_vision` calls need `[openai]` too; its local
+native path does not. Install `[all]` when the host should be able to call all ten
 tools:
 
 ```sh
 pip install "venice-cli[mcp]"
-pip install "venice-cli[all]"       # MCP transport + venice_chat
+pip install "venice-cli[all]"       # MCP transport + chat/delegated vision
 
 # Register it with Claude Code:
 claude mcp add venice -- venice mcp-serve
+
+# Affirm that this stdio host passes MCP ImageContent to a vision-capable model:
+claude mcp add venice-vision -- venice mcp-serve --host-image-content
 ```
 
-The server exposes nine tools:
+The server exposes ten tools:
 
 | Tool | Does | Paid? |
 | --- | --- | --- |
@@ -1930,6 +1935,7 @@ The server exposes nine tools:
 | `venice_bg_remove` | remove a background → transparent PNG | yes (dynamic) |
 | `venice_image_edit` | edit/inpaint an image (+ optional mask layers) → image file | yes (dynamic) |
 | `venice_chat` | one-shot chat completion → reply text (needs `[openai]`) | no |
+| `venice_vision` | inspect a local image natively or delegate image analysis | no |
 
 **Spend gating.** MCP is non-interactive, so instead of a `[y/N]` prompt the
 paid tools gate on cost. A tool call whose estimated cost is at or under the
@@ -1941,10 +1947,23 @@ host must re-call with `confirm=true` (or a higher `max_spend`). Nothing is
 spent and no file is written on a gated call. `venice_chat` is cheap and not
 gated.
 
-**Output.** Tools write their result to a file and return its **path** (never
-inline base64). Files land in `VENICE_MCP_OUTPUT_DIR` (default: the current
-working directory), or a per-call `output_dir`. The API key is read the usual
-way (`$VENICE_API_KEY` or the credentials file) and is never echoed.
+**Output.** Generation/editing tools write their result to a file and return its
+**path**. Files land in `VENICE_MCP_OUTPUT_DIR` (default: the current working
+directory), or a per-call `output_dir`. `venice_vision` is the exception: native
+mode returns the authorized local image inline as MCP ImageContent. The API key
+is read the usual way (`$VENICE_API_KEY` or the credentials file) and is never
+echoed.
+
+**Vision host declaration.** The default `venice mcp-serve` startup assumes a
+text-only host. `venice_vision` therefore delegates in `mode=auto`, preserving
+its `model` and `max_tokens` controls. `--host-image-content` is the operator's
+explicit assertion that this stdio host delivers MCP ImageContent to a
+vision-capable frontend: `auto` then returns a validated local `input_path`
+natively, while `mode=native` requires the assertion. Remote `image_url` inputs
+remain delegated; explicit native URL requests fail closed rather than adding a
+server-side downloader. `mode=delegate` always preserves the text-only path. The
+declaration is fixed for the process; restart or re-register the server to change
+it.
 
 **Local media inputs.** Paths supplied to image/video tools by an MCP host are
 confined to the server's startup working directory after resolving symlinks.
@@ -2102,9 +2121,9 @@ way, as do the generation knobs `defaults.image.{model,format,variants}`,
 the tool call still wins over config. `venice mcp-serve` threads the same
 defaults into its wrappers.
 
-`defaults.vision.*` applies to the in-process `venice_vision` tool in chat and
-code. It does not create a vision tool on `venice mcp-serve`, whose remote-host
-capability and image-content contract are tracked in [#222](https://github.com/gobha-me/venice-cli/issues/222).
+`defaults.vision.*` applies to `venice_vision` in chat, code, and `mcp-serve`.
+On the MCP server, explicit tool arguments still beat config, and native output
+still requires the process-level `--host-image-content` declaration.
 
 Not everything crosses over, and the gaps are deliberate: `poll_interval` is
 CLI-only because the tool implementations fix their own polling cadence, and
@@ -2219,7 +2238,7 @@ The player list (`paplay` -> `aplay` -> `ffplay` -> `mpg123` -> `play`
 | `venice index [PATH] [--model M] [--embed-base-url URL --embed-model M [--embed-ca-bundle PATH \| --embed-insecure]] [...]` / `venice search QUERY [-k N] [--json] [--embed-ca-bundle PATH \| --embed-insecure]` | build / query a local semantic index of a project tree (needs `[openai]`) |
 | `venice code [TASK] [--auto\|--manual] [--plan-only] [-i] [--root DIR] [--continue\|--resume ID\|FILE] [--ephemeral] [--json] [...]` | coding agent: plan → accept → edit/run a project (needs `[openai]` + tool-calling model) |
 | `venice review [FOCUS] [--base REF] [--rounds N] [--effort auto\|always\|never] [--fail-on LEVEL] [--json]` | cold-context review of the current diff (model-backed runs need `[openai]`; skipped/empty runs do not); **findings only — no gate, writes nothing** |
-| `venice mcp-serve` | run an MCP server (stdio) exposing venice tools (needs `[mcp]`; `venice_chat` additionally needs `[openai]`) |
+| `venice mcp-serve [--host-image-content]` | run an MCP server (stdio) exposing venice tools (needs `[mcp]`; delegated vision and `venice_chat` additionally need `[openai]`) |
 | `venice config add\|list\|remove\|show` | manage the MCP server registry |
 | `venice config get\|set\|unset KEY [VALUE]` | manage default flag values |
 | `venice completion bash\|zsh` | print a shell tab-completion script (generated from the parser) |
