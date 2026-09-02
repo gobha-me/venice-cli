@@ -50,6 +50,7 @@ class TestCommandWiring(unittest.TestCase):
             ]).host_image_content
         )
 
+    @unittest.skipUnless(_HAS_MCP, "mcp SDK not installed (expected on Python 3.9)")
     def test_run_forwards_the_startup_declaration(self):
         from venice.commands import mcp_serve
         from venice import mcp_server
