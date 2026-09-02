@@ -511,6 +511,16 @@ _COMMAND_MAP = {
         "subagent_max_tokens": ("subagent_max_tokens", int),
         "exec_timeout": ("exec_timeout", _positive),
     },
+    # Standing policy for the model-facing venice_vision tool. `prompt` remains
+    # per-call content rather than a durable preference.
+    "vision": {
+        "mode": (
+            "mode",
+            _one_of("venice.commands._agent", "VISION_MODE_CHOICES"),
+        ),
+        "model": ("model", str),
+        "max_tokens": ("max_tokens", int),
+    },
     "image": {
         # `--hide-watermark` / `--safe-mode` are tri-state (default None) so these
         # defaults can win; an explicit CLI flag still wins over config.

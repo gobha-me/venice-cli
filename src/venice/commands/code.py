@@ -1116,13 +1116,13 @@ def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task
                     _agent.run_loop(oai, model, messages, gen_kwargs, tools,
                                     max_tool_calls=max_calls, yes=yes, json_out=False,
                                     budget=budget, ledger=ledger, steer_drain=steer_drain,
-                                    parallel=parallel)
+                                    parallel=parallel, models=models)
                 final_text = buf.getvalue().strip()
             else:
                 _agent.run_loop(oai, model, messages, gen_kwargs, tools,
                                 max_tool_calls=max_calls, yes=yes, json_out=False,
                                 budget=budget, ledger=ledger, steer_drain=steer_drain,
-                                parallel=parallel)
+                                parallel=parallel, models=models)
     except openai.OpenAIError as e:
         _finish(ledger, t0, human, json_out=args.json)
         return _openai.status_to_exit(openai, e, "code")

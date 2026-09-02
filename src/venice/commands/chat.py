@@ -694,6 +694,7 @@ def _run_agent(args, oai, openai, client, models, model, kwargs) -> Optional[int
                 budget=_compact.budget_from_args(args),  # #48 auto-compact parity
                 ledger=ledger,
                 final_emitter=_capture_final if args.json else None,
+                models=models,
             )
             if args.json and result == 0:
                 if len(final_response) != 1:

@@ -2997,6 +2997,180 @@ class TestToolSection(unittest.TestCase):
         self.assertEqual(_agent._tool_section("project_search"), "project_search")
 
 
+class TestNativeVisionDispatch(unittest.TestCase):
+    @staticmethod
+    def _models(capability):
+        spec = {"capabilities": {"supportsVision": capability}}
+        return [{"id": "frontend", "model_spec": spec}]
+
+    @staticmethod
+    def _tool(config=None):
+        return next(t for t in _agent.builtin_tools(
+            object(), only={"venice_vision"}, config=config or {},
+            media_path_authority=object(),
+        ) if t.name == "venice_vision")
+
+    def _call(self, arguments, capability, *, config=None):
+        tool = self._tool(config)
+        runtime = _agent._ToolRuntime("frontend", self._models(capability))
+        return _agent._run_one_call(
+            _FnCall("vision-1", "venice_vision", json.dumps(arguments)),
+            {"venice_vision": tool}, {"auto": True}, runtime=runtime,
+        )
+
+    def test_model_facing_schema_exposes_only_the_three_modes(self):
+        props = self._tool().parameters["properties"]
+        self.assertEqual(props["mode"]["enum"], ["auto", "native", "delegate"])
+        self.assertNotIn("runtime", props)
+
+    def test_auto_known_capable_attaches_image_without_delegate(self):
+        with mock.patch.object(
+            _agent._mcp, "prepare_vision_input",
+            return_value={"status": "ok", "image_url": "data:image/png;base64,eA=="},
+        ) as prepare, mock.patch.object(_agent._mcp, "vision_tool") as delegate:
+            outcome = self._call(
+                {"image_url": "https://example.test/shot.png", "prompt": "Inspect"},
+                True,
+            )
+        self.assertIsInstance(outcome, _agent._ToolOutcome)
+        self.assertEqual(outcome.result["mode"], "native")
+        self.assertEqual(outcome.result["model"], "frontend")
+        self.assertEqual(outcome.followups, ({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Inspect"},
+                {"type": "image_url", "image_url": {
+                    "url": "data:image/png;base64,eA==",
+                }},
+            ],
+        },))
+        prepare.assert_called_once()
+        delegate.assert_not_called()
+
+    def test_auto_false_or_unknown_capability_delegates(self):
+        for capability in (False, None):
+            with self.subTest(capability=capability), mock.patch.object(
+                _agent._mcp, "vision_tool",
+                return_value={"status": "ok", "content": "delegate saw it", "model": "vl"},
+            ) as delegate, mock.patch.object(
+                _agent._mcp, "prepare_vision_input"
+            ) as prepare:
+                result = self._call(
+                    {"image_url": "https://example.test/shot.png", "model": "vl"},
+                    capability,
+                )
+            self.assertEqual(result["mode"], "delegate")
+            delegate.assert_called_once()
+            prepare.assert_not_called()
+
+    def test_explicit_native_fails_closed_on_false_or_unknown_capability(self):
+        for capability in (False, None):
+            with self.subTest(capability=capability), mock.patch.object(
+                _agent._mcp, "vision_tool"
+            ) as delegate, mock.patch.object(
+                _agent._mcp, "prepare_vision_input"
+            ) as prepare:
+                result = self._call(
+                    {"image_url": "https://example.test/shot.png", "mode": "native"},
+                    capability,
+                )
+            self.assertEqual(result["status"], "error")
+            self.assertIn("supportsVision", result["message"])
+            delegate.assert_not_called()
+            prepare.assert_not_called()
+
+    def test_explicit_delegate_wins_even_on_capable_frontend(self):
+        with mock.patch.object(
+            _agent._mcp, "vision_tool",
+            return_value={"status": "ok", "content": "delegate", "model": "vl"},
+        ) as delegate:
+            result = self._call(
+                {"image_url": "https://example.test/shot.png", "mode": "delegate"},
+                True,
+            )
+        self.assertEqual(result["mode"], "delegate")
+        delegate.assert_called_once()
+
+    def test_config_mode_is_lower_precedence_than_tool_argument(self):
+        config = {"defaults": {"vision": {"mode": "delegate", "model": "vl"}}}
+        with mock.patch.object(
+            _agent._mcp, "prepare_vision_input",
+            return_value={"status": "ok", "image_url": "https://example.test/shot.png"},
+        ), mock.patch.object(_agent._mcp, "vision_tool") as delegate:
+            outcome = self._call(
+                {"image_url": "https://example.test/shot.png", "mode": "native"},
+                True, config=config,
+            )
+        self.assertIsInstance(outcome, _agent._ToolOutcome)
+        delegate.assert_not_called()
+
+    def test_same_tool_uses_each_run_loops_current_frontend(self):
+        call = _FnCall(
+            "vision-1", "venice_vision",
+            json.dumps({"image_url": "https://example.test/shot.png"}),
+        )
+        with mock.patch.object(
+            _agent._mcp, "vision_tool",
+            return_value={"status": "ok", "content": "delegate", "model": "vl"},
+        ), mock.patch.object(
+            _agent._mcp, "prepare_vision_input",
+            return_value={"status": "ok", "image_url": "https://example.test/shot.png"},
+        ):
+            tool = self._tool()
+            delegated = _agent._run_one_call(
+                call, {"venice_vision": tool}, {"auto": True},
+                runtime=_agent._ToolRuntime("text-only", [{
+                    "id": "text-only", "model_spec": {
+                        "capabilities": {"supportsVision": False},
+                    },
+                }]),
+            )
+            native = _agent._run_one_call(
+                call, {"venice_vision": tool}, {"auto": True},
+                runtime=_agent._ToolRuntime("vision-front", [{
+                    "id": "vision-front", "model_spec": {
+                        "capabilities": {"supportsVision": True},
+                    },
+                }]),
+            )
+        self.assertEqual(delegated["mode"], "delegate")
+        self.assertIsInstance(native, _agent._ToolOutcome)
+        self.assertEqual(native.result["model"], "vision-front")
+
+    def test_run_loop_commits_all_tool_results_before_native_followup(self):
+        def vision(arguments, *, confirm=False, runtime=None):
+            self.assertEqual(runtime.model, "frontend")
+            return _agent._ToolOutcome(
+                {"status": "ok", "mode": "native"},
+                ({"role": "user", "content": [{"type": "text", "text": "image"}]},),
+            )
+
+        tools = [
+            _free_tool(),
+            _agent.Tool(
+                "venice_vision", "vision", {"type": "object", "properties": {}},
+                vision, contextual=True,
+            ),
+        ]
+        seq = [FakeToolCompletion(tool_calls=[
+            _FnCall("c1", "venice_vision", "{}"),
+            _FnCall("c2", "t", "{}"),
+        ]), FakeToolCompletion("done")]
+        fake, calls = _fake_oai(seq)
+        messages = [{"role": "user", "content": "go"}]
+        with mock.patch.object(sys, "stdout", io.StringIO()), \
+             mock.patch.object(sys, "stderr", io.StringIO()):
+            _agent.run_loop(
+                fake, "frontend", messages, {}, tools,
+                max_tool_calls=0, yes=True, json_out=False,
+                models=self._models(True),
+            )
+        roles = [m["role"] for m in calls[1]["messages"][-5:-1]]
+        self.assertEqual(roles, ["assistant", "tool", "tool", "user"])
+        self.assertEqual(calls[1]["messages"][-4]["tool_call_id"], "c1")
+        self.assertEqual(calls[1]["messages"][-3]["tool_call_id"], "c2")
+
+
 class TestAsyncJobSchemas(unittest.TestCase):
     """#62: background param on media schemas + the two async job-tool schemas."""
 
@@ -3672,6 +3846,39 @@ class TestParallelDispatch(unittest.TestCase):
         self.assertEqual(sorted(record), ["venice_spawn"] * 3)  # all three ran
         for m, tag in zip(tms, ["A", "B", "C"]):
             self.assertIn(tag, m["content"])
+
+    def test_mixed_batch_commits_native_followup_after_every_tool_result(self):
+        def vision(arguments, *, confirm=False, runtime=None):
+            return _agent._ToolOutcome(
+                {"status": "ok", "mode": "native"},
+                ({"role": "user", "content": [
+                    {"type": "text", "text": "image"},
+                ]},),
+            )
+
+        tools = [
+            _sub_tool(_agent.SPAWN_TOOL_NAME),
+            _agent.Tool(
+                "venice_vision", "vision", {"type": "object", "properties": {}},
+                vision, contextual=True,
+            ),
+        ]
+        turn = FakeToolCompletion(tool_calls=[
+            self._spawn_call("c1", "worker"),
+            _FnCall("c2", "venice_vision", "{}"),
+        ])
+        _messages, calls = self._run(
+            [turn, FakeToolCompletion("done")], tools,
+            max_tool_calls=0, parallel=True,
+        )
+        self.assertEqual(
+            [m["role"] for m in calls[1]["messages"][-5:-1]],
+            ["assistant", "tool", "tool", "user"],
+        )
+        self.assertEqual(
+            [m["tool_call_id"] for m in calls[1]["messages"][-4:-2]],
+            ["c1", "c2"],
+        )
 
     def test_budget_marks_overflow_not_executed_without_running(self):
         record = []
