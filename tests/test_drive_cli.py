@@ -699,7 +699,8 @@ class TestDriveChatRepl(_DriveCase):
         self.api.reply("THIRD-REPLY")
 
         with self.cli("chat", "-i", "--auto-compact",
-                      "--compact-threshold", "1", "--compact-keep-turns", "1") as d:
+                      "--compact-threshold", "1", "--compact-keep-turns", "1",
+                      "--compact-loss-policy", "evidence") as d:
             d.expect("you> ")
             d.send("One")
             d.expect("FIRST-REPLY")
@@ -711,17 +712,28 @@ class TestDriveChatRepl(_DriveCase):
             d.expect("auto-compacted history")
             d.expect("THIRD-REPLY")
             d.expect("you> ")
+            d.send("/context list")
+            d.expect("ctx-000001")
+            d.expect("you> ")
             d.send("/exit")
             self.assertEqual(d.wait(), 0)
 
-        usage = json.loads(self.sessions()[0].read_text(encoding="utf-8"))["usage"]
+        envelope = json.loads(self.sessions()[0].read_text(encoding="utf-8"))
+        self.assertEqual(envelope["venice_session"], 2)
+        self.assertEqual(
+            [entry["message"]["content"] for entry in envelope["context_archive"]],
+            ["One", "FIRST-REPLY"],
+        )
+        usage = envelope["usage"]
         events = usage["context_events"]
         self.assertEqual(len(events), 1)
         ev = events[0]
         self.assertEqual(ev["kind"], "compaction")
         self.assertEqual(ev["trigger"], "auto")
         self.assertEqual(ev["observed_tokens_before"], 11)
-        self.assertGreater(ev["messages_before"], ev["messages_after"])
+        # Evidence mode adds a live index message; tiny fixtures can preserve the
+        # message count even though the original prefix moved out of the prompt.
+        self.assertGreaterEqual(ev["messages_before"], ev["messages_after"])
         # #101: the summarization call is billed, and this tier is the only one that
         # proves it survives the real `_autosave` -> `to_dict` -> JSON round trip.
         self.assertIn("cost", ev)

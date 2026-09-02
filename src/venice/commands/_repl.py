@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from .. import config
-from . import _agent, _compact, _models, _persona, _session, _steer
+from . import _agent, _compact, _context_archive, _models, _persona, _session, _steer
 
 
 _PROMPT = "you> "
@@ -51,6 +51,9 @@ Commands:
   /auto            auto-accept paid/side-effecting tool calls for following turns
   /manual          confirm each paid/side-effecting tool call (undo /auto)
   /compact [N]     summarize older history to shrink the context (keeps last N turns)
+  /context list    list archived evidence metadata (up to 50 entries)
+  /context read ID [OFFSET]
+                   read up to 32 KiB of exact archived message JSON
   /cost            this session's estimated spend so far + cache hit rate (--session-max-spend caps it)
   /usage           token + cost breakdown for this session (cache-read/write split)
   /reset           clear the conversation (keeps the system prompt)
@@ -66,6 +69,7 @@ Anything else is sent to the model as your next message."""
 # only meaningful inside a /paste block, so they stay out of top-level completion.)
 _COMMANDS = (
     "/system", "/persona", "/model", "/models", "/auto", "/manual", "/compact",
+    "/context",
     "/cost", "/usage", "/reset", "/save", "/paste", "/edit", "/help", "/exit",
     "/quit",
 )
@@ -120,12 +124,11 @@ def _seed_messages(args) -> List[dict]:
     return []
 
 
-def _reset_messages(messages: List[dict]) -> None:
-    """Clear history in place, keeping only a leading system message if present."""
-    keep = messages[0] if messages and messages[0].get("role") == "system" else None
+def _reset_messages(messages: List[dict], system: Optional[str] = None) -> None:
+    """Clear history in place, restoring only the authoritative system prompt."""
     messages.clear()
-    if keep is not None:
-        messages.append(keep)
+    if system is not None:
+        messages.append({"role": "system", "content": system})
 
 
 def _set_system(messages: List[dict], text: str) -> None:
@@ -139,6 +142,14 @@ def _current_system(messages: List[dict]) -> Optional[str]:
     if messages and messages[0].get("role") == "system":
         return messages[0].get("content")
     return None
+
+
+def _set_protected_system_messages(state: dict, count: int) -> None:
+    """Keep structural system authority synchronized with auto-compaction."""
+    state["protected_system_messages"] = count
+    budget = state.get("budget")
+    if budget is not None:
+        budget.protected_system_messages = count
 
 
 # --------------------------------------------------------------------------- #
@@ -388,6 +399,9 @@ def _turn(oai, openai, chat, text, messages, gen_kwargs, state, args) -> bool:
         on_compact=lambda b, a: print(
             f"(auto-compacted history: {b} -> {a} messages)", file=sys.stderr,
         ),
+        on_blocked=lambda reason: print(
+            f"(auto-compaction refused: {reason})", file=sys.stderr,
+        ),
         ledger=ledger,  # #99
     )
     # Mid-run steering: a tool-loop turn drains this session's mailbox at each
@@ -455,13 +469,19 @@ def _autosave(state, messages, gen_kwargs) -> None:
     if sess is None:
         return
     sess.model = state.get("model", sess.model)
-    sess.system = _current_system(messages)
+    sess.system = state.get("system")
     sess.gen_kwargs = gen_kwargs
     sess.max_tool_calls = state.get("max_tool_calls", sess.max_tool_calls)
     ledger = state.get("ledger")
     if ledger is not None:
         sess.usage = ledger.to_dict()
     sess.messages = messages
+    archive = state.get("archive")
+    if archive is not None:
+        sess.context_archive = archive.to_envelope()
+    sess.protected_system_messages = state.get(
+        "protected_system_messages", sess.protected_system_messages
+    )
     try:
         _session.save(sess)
     except OSError as e:
@@ -474,6 +494,12 @@ def _autosave(state, messages, gen_kwargs) -> None:
 def _dispatch_slash(line, messages, state, args, models, oai=None, gen_kwargs=None) -> str:
     """Handle a ``/command``. Returns ``"exit"`` to leave the REPL, else
     ``"continue"``. `oai`/`gen_kwargs` are needed only by `/compact` (#48)."""
+    # Direct callers predating #74 may not carry this explicit authority bit.
+    # Infer it once, before any compaction-generated system message can appear.
+    state.setdefault("system", _current_system(messages))
+    state.setdefault(
+        "protected_system_messages", 1 if state["system"] is not None else 0
+    )
     parts = line[1:].split(maxsplit=1)
     cmd = parts[0].lower() if parts else ""
     rest = parts[1].strip() if len(parts) > 1 else ""
@@ -483,14 +509,28 @@ def _dispatch_slash(line, messages, state, args, models, oai=None, gen_kwargs=No
     if cmd == "help":
         print(_HELP, file=sys.stderr)
     elif cmd == "reset":
-        _reset_messages(messages)
+        _reset_messages(messages, state.get("system"))
+        _set_protected_system_messages(
+            state, 1 if state.get("system") is not None else 0
+        )
+        archive = state.get("archive")
+        if archive is not None:
+            archive.clear()
         print("(conversation cleared)", file=sys.stderr)
     elif cmd == "system":
         if rest:
-            _set_system(messages, rest)
+            if state.get("system") is None:
+                messages.insert(0, {"role": "system", "content": rest})
+                state["protected_system_messages"] += 1
+            else:
+                _set_system(messages, rest)
+            state["system"] = rest
+            _set_protected_system_messages(
+                state, state["protected_system_messages"]
+            )
             print("(system prompt set)", file=sys.stderr)
         else:
-            print(f"system: {_current_system(messages) or '(none)'}", file=sys.stderr)
+            print(f"system: {state.get('system') or '(none)'}", file=sys.stderr)
     elif cmd == "persona":
         if rest:
             try:
@@ -498,7 +538,15 @@ def _dispatch_slash(line, messages, state, args, models, oai=None, gen_kwargs=No
             except _persona.PersonaError as e:
                 print(f"/persona: {e}", file=sys.stderr)
             else:
-                _set_system(messages, text)
+                if state.get("system") is None:
+                    messages.insert(0, {"role": "system", "content": text})
+                    state["protected_system_messages"] += 1
+                else:
+                    _set_system(messages, text)
+                state["system"] = text
+                _set_protected_system_messages(
+                    state, state["protected_system_messages"]
+                )
                 print(f"(persona {rest!r} loaded)", file=sys.stderr)
         else:
             # Create the drop-dir lazily so a first-time user has somewhere to
@@ -563,6 +611,8 @@ def _dispatch_slash(line, messages, state, args, models, oai=None, gen_kwargs=No
             # a cache cliff on the next call, so it is traced like the automatic one --
             # `trigger` is what lets the operator tell the two apart afterwards.
             ledger=state.get("ledger"), budget=state.get("budget"), trigger="manual",
+            loss_policy=state["loss_policy"], archive=state.get("archive"),
+            protected_system_messages=state["protected_system_messages"],
         ):
             # #116: no budget reset here any more -- `compact_messages` owns it, so this
             # site cannot forget it and cannot disagree with `maybe_compact` about when
@@ -573,7 +623,30 @@ def _dispatch_slash(line, messages, state, args, models, oai=None, gen_kwargs=No
                 file=sys.stderr,
             )
         else:
-            print("(nothing to compact)", file=sys.stderr)
+            archive = state.get("archive")
+            if archive is not None and archive.last_error:
+                print(f"(/compact refused: {archive.last_error})", file=sys.stderr)
+            else:
+                print("(nothing to compact)", file=sys.stderr)
+    elif cmd == "context":
+        archive = state.get("archive")
+        if archive is None:
+            print("(no evidence archive for this session)", file=sys.stderr)
+        else:
+            words = rest.split()
+            try:
+                if words and words[0] == "list" and len(words) <= 2:
+                    cursor = int(words[1]) if len(words) == 2 else 0
+                    print(json.dumps(archive.list_page(cursor), indent=2), file=sys.stderr)
+                elif words and words[0] == "read" and len(words) in (2, 3):
+                    offset = int(words[2]) if len(words) == 3 else 0
+                    print(json.dumps(archive.read(words[1], offset), indent=2),
+                          file=sys.stderr)
+                else:
+                    print("usage: /context list [CURSOR] | /context read ID [OFFSET]",
+                          file=sys.stderr)
+            except (ValueError, _context_archive.ArchiveError) as e:
+                print(f"/context: {e}", file=sys.stderr)
     elif cmd == "cost":
         # Session spend so far (#66). The REPL ledger is always-on (#75), so this
         # reports the running total; `--session-max-spend` only adds the cap line.
@@ -615,7 +688,8 @@ def _dispatch_slash(line, messages, state, args, models, oai=None, gen_kwargs=No
 def run(args, oai, openai, client, models, model, initial=None, *,
         tools_session=None, gen_kwargs=None, label="venice chat",
         max_tool_calls=8, session=None, ephemeral=False, root=None,
-        system_reseed=False, ledger=None, resolved_models=None) -> int:
+        system_reseed=False, ledger=None, resolved_models=None,
+        context_archive=None) -> int:
     """Drive the interactive REPL until `/exit`, `/quit`, or EOF (Ctrl-D).
 
     `initial` is an already-resolved first message (e.g. `venice chat -i "hi"`);
@@ -656,6 +730,12 @@ def run(args, oai, openai, client, models, model, initial=None, *,
             print(f"chat: {e}", file=sys.stderr)
             return 2
 
+    archive = context_archive
+    if archive is None:
+        archive = _context_archive.ContextArchive.from_envelope(
+            session.context_archive if session is not None else None
+        )
+
     if gen_kwargs is None:
         gen_kwargs = chat._gen_kwargs(args)
     if session is not None:
@@ -676,6 +756,20 @@ def run(args, oai, openai, client, models, model, initial=None, *,
                 file=sys.stderr,
             )
         _set_system(messages, args.system)
+
+    if system_reseed and getattr(args, "system", None):
+        # Code can import a chat/legacy transcript with no protected system
+        # prefix. `_set_system` inserts the fresh root/safety prompt above; it
+        # becomes authoritative immediately and must survive compaction.
+        protected_system_messages = max(
+            1, session.protected_system_messages if session is not None else 0
+        )
+    else:
+        protected_system_messages = (
+            session.protected_system_messages
+            if session is not None
+            else _compact.leading_system_count(messages)
+        )
 
     # `--tools`/`--mcp` (or an injected `tools_session`) turns the REPL into an
     # agent session. Any MCP servers stay attached for the whole session via the
@@ -698,6 +792,9 @@ def run(args, oai, openai, client, models, model, initial=None, *,
                 if rc is not None:
                     return rc      # invalid --tool subset / MCP attach error
                 tools_on = False   # model lacks function calling -> plain chat
+        if (tools_on and getattr(args, "compact_loss_policy", "aggressive") == "evidence"
+                and not any(t.name == "venice_context_archive" for t in tools)):
+            tools.append(_context_archive.archive_tool(archive))
         cap = getattr(args, "max_tool_calls", None)
         if cap is None and session is not None and session.max_tool_calls is not None:
             cap = session.max_tool_calls
@@ -708,10 +805,23 @@ def run(args, oai, openai, client, models, model, initial=None, *,
             "tools_on": tools_on,
             "yes": bool(getattr(args, "yes", False)),  # /auto and /manual flip this
             "max_tool_calls": cap if cap is not None else max_tool_calls,
+            "archive": archive,
+            "loss_policy": getattr(args, "compact_loss_policy", "aggressive"),
+            "system": (
+                args.system
+                if system_reseed and getattr(args, "system", None)
+                else (session.system
+                      if session is not None and session.system is not None
+                      else _current_system(messages))
+            ),
+            "protected_system_messages": protected_system_messages,
         }
         # Auto-compaction (#48) is opt-in: `--auto-compact` or
         # `defaults.<cmd>.auto_compact` (it costs a summarization call).
         state["budget"] = _compact.budget_from_args(args)
+        if state["budget"] is not None:
+            state["budget"].archive = archive
+            state["budget"].protected_system_messages = protected_system_messages
         # Usage + spend ledger: always-on in the REPL so `/usage` and `/cost`
         # work in any session (#75); `--session-max-spend` (#66) only adds a cap.
         #
@@ -741,6 +851,7 @@ def run(args, oai, openai, client, models, model, initial=None, *,
                 gen_kwargs=gen_kwargs, root=root,
                 max_tool_calls=state["max_tool_calls"], messages=messages,
                 resolved_models=resolved_models,
+                context_archive=archive.to_envelope(),
             )
             active.resolved_models = dict(resolved_models or {})
             if root is not None:

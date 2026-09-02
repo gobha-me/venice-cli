@@ -436,7 +436,8 @@ def _code_args(**ov):
         plan_only=False, no_plan=False, no_verify=False, max_tool_calls=None,
         exec_timeout=None, interactive=False, resume=None, assets=None,
         scout=None, spawn=None, spawn_max_spend=None, auto_compact=None,
-        compact_threshold=None, compact_keep_turns=None, session_max_spend=None,
+        compact_threshold=None, compact_keep_turns=None, compact_loss_policy=None,
+        session_max_spend=None,
         cache_guard=None,
         cont=None, ephemeral=None, web_search=None, web_search_model=None,
     )

@@ -22,7 +22,7 @@ from typing import Optional
 from .. import _numeric, auth, userconfig
 from ..client import build_client_from_auth
 from . import (
-    _agent, _compact, _mcp, _mcp_client, _models, _openai, _persona,
+    _agent, _compact, _context_archive, _mcp, _mcp_client, _models, _openai, _persona,
     _repl, _session,
 )
 
@@ -121,6 +121,12 @@ def register(subparsers) -> None:
         metavar="N",
         help="Turns kept verbatim when compacting "
         f"(default {_compact.DEFAULT_KEEP_TURNS}); older ones are summarized.",
+    )
+    it.add_argument(
+        "--compact-loss-policy", choices=_compact.LOSS_POLICY_CHOICES, default=None,
+        dest="compact_loss_policy", metavar="POLICY",
+        help="Compaction loss policy: aggressive summarizes and discards older "
+        "messages; evidence archives them exactly (default: aggressive).",
     )
 
     # --- Venice extensions -> venice_parameters ---
@@ -456,6 +462,7 @@ def _run(args) -> int:
         return 2
     _session.apply_to_args(args, session, "chat")
     userconfig.apply_defaults(args, "chat")
+    userconfig.apply_literals(args, compact_loss_policy="aggressive")
     # These are tools, so each opt-in implies the agent loop.
     if (getattr(args, "shell", None) or getattr(args, "memory", None)
             or getattr(args, "browser", None)) \
@@ -685,13 +692,20 @@ def _run_agent(args, oai, openai, client, models, model, kwargs) -> Optional[int
             # gating: `_build_ledger` leaves max_tokens None and both `over()` and
             # `over_tokens()` short-circuit on a None cap. --session-max-spend still caps.
             ledger = _agent.usage_ledger(args, models, model)  # #66 spend cap, #86 metering
+            archive = _context_archive.ContextArchive()
+            if args.compact_loss_policy == "evidence":
+                tools.append(_context_archive.archive_tool(archive))
+            budget = _compact.budget_from_args(args)
+            if budget is not None:
+                budget.archive = archive
+                budget.protected_system_messages = _compact.leading_system_count(messages)
             result = _agent.run_loop(
                 oai, model, messages, kwargs, tools,
                 max_tool_calls=(args.max_tool_calls if args.max_tool_calls is not None
                                 else PROFILE.default_max_tool_calls),
                 yes=bool(args.yes),
                 json_out=args.json,
-                budget=_compact.budget_from_args(args),  # #48 auto-compact parity
+                budget=budget,  # #48/#74
                 ledger=ledger,
                 final_emitter=_capture_final if args.json else None,
                 models=models,

@@ -401,22 +401,38 @@ class TestApplyDefaults(_Base):
 
     def test_apply_compact_defaults_chat_and_code(self):
         doc = {"defaults": {
-            "chat": {"auto_compact": True, "compact_threshold": 80000},
-            "code": {"auto_compact": "yes", "compact_keep_turns": 6},
+            "chat": {"auto_compact": True, "compact_threshold": 80000,
+                     "compact_loss_policy": "aggressive"},
+            "code": {"auto_compact": "yes", "compact_keep_turns": 6,
+                     "compact_loss_policy": "evidence"},
         }}
         chat_args = argparse.Namespace(auto_compact=None, compact_threshold=None,
-                                       compact_keep_turns=None)
+                                       compact_keep_turns=None,
+                                       compact_loss_policy=None)
         uc.apply_defaults(chat_args, "chat", doc)
         self.assertIs(chat_args.auto_compact, True)
         self.assertEqual(chat_args.compact_threshold, 80000)
         self.assertIsNone(chat_args.compact_keep_turns)  # unset for chat
+        self.assertEqual(chat_args.compact_loss_policy, "aggressive")
 
         code_args = argparse.Namespace(auto_compact=None, compact_threshold=None,
-                                       compact_keep_turns=None)
+                                       compact_keep_turns=None,
+                                       compact_loss_policy=None)
         uc.apply_defaults(code_args, "code", doc)
         self.assertIs(code_args.auto_compact, True)      # coerced from "yes"
         self.assertEqual(code_args.compact_keep_turns, 6)
         self.assertIsNone(code_args.compact_threshold)
+        self.assertEqual(code_args.compact_loss_policy, "evidence")
+
+    def test_invalid_compact_loss_policy_is_skipped(self):
+        args = argparse.Namespace(compact_loss_policy=None)
+        _, _, err = _capture(
+            uc.apply_defaults, args, "code",
+            {"defaults": {"code": {"compact_loss_policy": "lossy-ish"}}},
+        )
+        self.assertIsNone(args.compact_loss_policy)
+        self.assertIn("aggressive", err)
+        self.assertIn("evidence", err)
 
     def test_apply_session_max_spend_chat_and_code(self):
         doc = {"defaults": {

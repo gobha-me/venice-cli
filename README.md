@@ -638,6 +638,8 @@ catalog), `/models` (list the available models, marking the current and the
 default), `/auto` and `/manual` (toggle auto-accepting paid/side-effecting tool
 calls for following turns), `/compact [N]` (summarize older history into one
 message, keeping the last `N` turns verbatim),
+`/context list [CURSOR]` (list archived evidence metadata) and
+`/context read ID [OFFSET]` (read up to 32 KiB of an exact archived message),
 `/cost` (this session's estimated spend so far, with the active model's
 current-run cache hit rate on the same line; `--session-max-spend` adds a
 cap), `/usage` (a token + cost breakdown for the session, keeping the
@@ -676,9 +678,19 @@ older prefix into one synthetic message once the prompt crosses
 the last `--compact-keep-turns` turns (default 10) verbatim. The trigger uses
 the server-reported `usage.prompt_tokens` when a turn provides it (falling
 back to a chars-per-token estimate otherwise), so it fires on the real prompt
-size rather than a guess. Compaction is best-effort — a failed summarization
-call leaves the history untouched — and never orphans a tool result from its
-assistant turn. It's off by default because it costs a summarization call.
+size rather than a guess. `--compact-loss-policy aggressive|evidence` controls
+what happens to the summarized prefix. Chat defaults to `aggressive`, preserving
+the original behavior. Code defaults to `evidence`: every removed user message,
+assistant tool call (including arguments), and tool result is copied exactly into
+the private session envelope before the live history is replaced. The model gets
+a bounded index plus the read-only `venice_context_archive` tool; operators can use
+the `/context` commands above even in a plain REPL. The archive is capped at 512
+entries and 8 MiB. If the next compaction would cross either cap, it is refused
+before the summary API call and both history and archive remain unchanged. Reads
+are paged at 32 KiB and list pages at 50 entries. Compaction is otherwise
+best-effort — a failed or empty summarization leaves both stores untouched — and
+never orphans a tool result from its assistant turn. It's off by default because
+it costs a summarization call.
 
 #### Sessions
 
@@ -687,7 +699,11 @@ each turn to `~/.config/venice/sessions/<id>.json` (mode 0600;
 `$VENICE_SESSIONS_DIR` overrides the location). Unlike a bare `/save` transcript,
 a session travels with its **settings** — model, system prompt, generation
 parameters, `max-tool-calls`, the `venice code` sandbox root, and the running
-token/cost usage — so resuming restores the whole context, not just the messages.
+token/cost usage — plus any bounded exact context archive — so resuming restores
+the whole context, not just the messages. Session envelope v2 adds
+`context_archive` plus the structural count of authoritative leading system
+messages; v1 envelopes remain readable, conservatively preserve their complete
+leading system prefix, and resume with an empty archive.
 The API key is never written to a session.
 
 `venice code` also assigns each session an opaque `prompt_cache_key`, sent as an
@@ -1557,6 +1573,7 @@ jq '.usage.billed_total' ~/.config/venice/sessions/<id>.json
 | `venice_scout` | delegate a read-only investigation to a disposable subagent with a fresh context; returns a structured report so exploration doesn't pollute the main context — **opt-in with `--scout`** (see [Scout subagent](#scout-subagent---scout)) | no |
 | `venice_web_search` | search the web to **discover** documentation you don't have a URL for; returns a short answer + cited URLs (billed, but bounded by the tool-call budget) — **opt-in with `--web-search`** (see [Web search](#web-search---web-search)) | no |
 | `venice_review` | hand the current diff to a **cold-context reviewer** — a disposable subagent with a fresh context, read-only tools and (where the catalog allows) a different model — and get back defects with `file:line` + a repro. Findings only: it approves and certifies nothing — **opt-in with `--review`** (see [Reviewer rail](#reviewer-rail---review)) | no |
+| `venice_context_archive` | list bounded metadata or page through exact messages removed by evidence-preserving compaction; current session only, with no filesystem, network, or process access | no |
 
 **Safety.** Every filesystem path is resolved and confined to the **writable roots** —
 the startup root (default: cwd, or `--root` / `$VENICE_CODE_ROOT`) plus any added with
@@ -1618,6 +1635,7 @@ external diff helpers. Use the confirmed `run` tool for other Git forms.
 | `--review-model MODEL` | model for `--review` (default: a function-calling model from a **different family** than the coding model; falls back to the coding model with a warning); config `defaults.code.review_model` |
 | `--review-rounds N` | passes `venice_review` makes over the same diff (default **1**, max 3); config `defaults.code.review_rounds` |
 | `--auto-compact` | summarize older history once the prompt crosses `--compact-threshold` tokens (default 100 000), keeping the last `--compact-keep-turns` turns (default 10); long runs stay in-context |
+| `--compact-loss-policy aggressive\|evidence` | discard summarized messages or retain their exact JSON in the bounded private session archive; default **evidence** for code and **aggressive** for chat; config `defaults.code.compact_loss_policy` / `defaults.chat.compact_loss_policy` |
 | `--cache-guard off\|warn\|stop` | react when a cache-priced model explicitly reports zero cached tokens after the cold first API call and a 2,000-token prompt; default **warn**, config `defaults.code.cache_guard` |
 | `-i`, `--json`, `--model`, `--system` | interactive REPL · JSON envelope · model · extra system instructions |
 | `--persona NAME` | load `~/.config/venice/personas/NAME.md` as the system prompt at launch (`/persona` in the REPL) |
@@ -1636,7 +1654,8 @@ model and a sane `--max-tool-calls` when running unattended.
 
 Per-flag config defaults live under `defaults.code.*` (e.g. `model`, `root`, `auto`,
 `assets`, `scout`, `spawn`, `spawn_max_spend`, `subagent_max_tokens`, `planner`,
-`max_tool_calls`, `review`, `review_model`, `review_rounds`, `cache_guard`).
+`max_tool_calls`, `review`, `review_model`, `review_rounds`, `cache_guard`,
+`compact_loss_policy`).
 
 #### Scout subagent (`--scout`)
 

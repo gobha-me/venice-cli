@@ -42,6 +42,7 @@ def _args(**ov):
         cont=None, ephemeral=None,
         # --- auto-compaction (#48) ---
         auto_compact=None, compact_threshold=None, compact_keep_turns=None,
+        compact_loss_policy=None,
         # --- session spend cap (#66) ---
         session_max_spend=None,
     )

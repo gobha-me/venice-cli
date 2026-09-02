@@ -3779,6 +3779,8 @@ def run_loop(
     oai_tools = to_openai_tools(tools)
     dispatch = dispatch_map(tools)
     runtime = _ToolRuntime(model=model, models=models)
+    if budget is not None and budget.protected_system_messages is None:
+        budget.protected_system_messages = _compact.leading_system_count(messages)
     calls_made = 0
     gate = {"auto": bool(yes)}  # mutable so an `a`/`all` confirm flips the run to auto
     # #82: the per-tool timing sink, bound ONCE so both dispatch paths -- and every pool
@@ -3859,6 +3861,9 @@ def run_loop(
             oai, model, messages, budget, base_kwargs,
             on_compact=lambda b, a: _progress(
                 f"(auto-compacted history: {b} -> {a} messages)", enabled=show,
+            ),
+            on_blocked=lambda reason: print(
+                f"auto-compaction refused: {reason}", file=sys.stderr,
             ),
             ledger=ledger,  # #99: log the event; #101: and bill the summary call
         )
@@ -3959,6 +3964,9 @@ def run_loop(
                 oai, model, messages, budget, base_kwargs,
                 on_compact=lambda b, a: _progress(
                     f"(auto-compacted history: {b} -> {a} messages)", enabled=show,
+                ),
+                on_blocked=lambda reason: print(
+                    f"auto-compaction refused: {reason}", file=sys.stderr,
                 ),
                 ledger=ledger,  # #99
             )

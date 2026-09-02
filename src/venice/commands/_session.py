@@ -28,9 +28,9 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from .. import _numeric, config
-from . import _index
+from . import _context_archive, _index
 
-SESSION_VERSION = 1
+SESSION_VERSION = 2
 
 
 class SessionError(Exception):
@@ -88,6 +88,8 @@ class Session:
     usage: Optional[dict] = None
     resolved_models: dict = field(default_factory=dict)
     messages: list = field(default_factory=list)
+    context_archive: list = field(default_factory=list)
+    protected_system_messages: int = 0
 
     def to_envelope(self) -> dict:
         return {
@@ -105,6 +107,8 @@ class Session:
             "usage": self.usage,
             "resolved_models": self.resolved_models,
             "messages": self.messages,
+            "context_archive": self.context_archive,
+            "protected_system_messages": self.protected_system_messages,
         }
 
     @classmethod
@@ -112,6 +116,20 @@ class Session:
         """Hydrate from an envelope dict, tolerant of missing/foreign keys."""
         now = _now_iso()
         gk = d.get("gen_kwargs")
+        try:
+            archive = _context_archive.ContextArchive.from_envelope(
+                d.get("context_archive")
+            ).to_envelope()
+        except _context_archive.ArchiveError as e:
+            raise SessionError(f"invalid context archive: {e}") from None
+        messages = _validate_messages(d.get("messages") or [])
+        leading = _leading_system_count(messages)
+        protected = d.get("protected_system_messages")
+        if protected is None:  # v1 / early v2: preserve every leading system safely
+            protected = leading
+        if (not isinstance(protected, int) or isinstance(protected, bool)
+                or protected < 0 or protected > leading):
+            raise SessionError("protected_system_messages is invalid")
         return cls(
             id=str(d.get("id") or new_id()),
             command=d.get("command") or "chat",
@@ -128,21 +146,26 @@ class Session:
                 dict(d.get("resolved_models"))
                 if isinstance(d.get("resolved_models"), dict) else {}
             ),
-            messages=_validate_messages(d.get("messages") or []),
+            messages=messages,
+            context_archive=archive,
+            protected_system_messages=protected,
         )
 
 
 def new_session(command: str, *, label: str = "venice chat", model=None,
                 system=None, gen_kwargs=None, root=None, max_tool_calls=None,
-                messages=None, resolved_models=None) -> Session:
+                messages=None, resolved_models=None, context_archive=None) -> Session:
     """Mint a brand-new active session (fresh id + timestamps)."""
     now = _now_iso()
+    saved_messages = list(messages or [])
     return Session(
         id=new_id(), command=command, created=now, updated=now,
         model=model, system=system,
         gen_kwargs=dict(gen_kwargs or {}), root=root, label=label,
         max_tool_calls=max_tool_calls,
-        resolved_models=dict(resolved_models or {}), messages=list(messages or []),
+        resolved_models=dict(resolved_models or {}), messages=saved_messages,
+        context_archive=list(context_archive or []),
+        protected_system_messages=_leading_system_count(saved_messages),
     )
 
 
@@ -161,6 +184,13 @@ def _validate_messages(data) -> list:
     ):
         raise SessionError("transcript must be a JSON list of message objects")
     return data
+
+
+def _leading_system_count(messages: list) -> int:
+    count = 0
+    while count < len(messages) and messages[count].get("role") == "system":
+        count += 1
+    return count
 
 
 def _read_json(path: str):

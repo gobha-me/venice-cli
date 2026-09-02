@@ -41,20 +41,23 @@ from typing import List, Optional
 
 from .. import _numeric, auth, config, userconfig
 from ..client import build_client_from_auth
-from . import (_agent, _code, _compact, _mailbox, _models, _openai,
+from . import (_agent, _code, _compact, _context_archive, _mailbox, _models, _openai,
                _repl, _review, _session, _steer)
 
 _DEFAULT_MAX_TOOL_CALLS = 25
 
 
-def _budget_for(args) -> Optional[_compact.Budget]:
+def _budget_for(args, archive=None) -> Optional[_compact.Budget]:
     """The auto-compact budget for a run, or None when it isn't opted into (#48).
 
     Enabled by `--auto-compact` / `defaults.code.auto_compact`; threshold and
     keep-turns fall back to the `_compact` defaults when unset. Thin alias for
     the shared builder so every surface opts in identically.
     """
-    return _compact.budget_from_args(args)
+    budget = _compact.budget_from_args(args)
+    if budget is not None:
+        budget.archive = archive
+    return budget
 
 CODING_SYSTEM_PROMPT = """\
 You are vcoder, an autonomous coding agent working inside a single project directory.
@@ -418,6 +421,12 @@ def register(subparsers) -> None:
         help="Turns kept verbatim when compacting "
         f"(default {_compact.DEFAULT_KEEP_TURNS}); older ones are summarized.",
     )
+    grp.add_argument(
+        "--compact-loss-policy", choices=_compact.LOSS_POLICY_CHOICES, default=None,
+        dest="compact_loss_policy", metavar="POLICY",
+        help="Compaction loss policy: aggressive discards summarized messages; "
+        "evidence archives them exactly (default: evidence).",
+    )
 
     it = p.add_argument_group("Interactive")
     it.add_argument(
@@ -766,7 +775,10 @@ def _run(args) -> int:
         return 2
     _session.apply_to_args(args, session, "code")
     userconfig.apply_defaults(args, "code")
-    userconfig.apply_literals(args, cache_guard="warn")
+    userconfig.apply_literals(args, cache_guard="warn", compact_loss_policy="evidence")
+    archive = _context_archive.ContextArchive.from_envelope(
+        session.context_archive if session is not None else None
+    )
     # Faithful root restore: an explicit --root/$VENICE_CODE_ROOT still wins, else a
     # resumed session re-sandboxes to where it left off (tools + system prompt rebind
     # to this root below), else the cwd.
@@ -939,6 +951,8 @@ def _run(args) -> int:
         tools.append(ws_tool)
     if planner:
         tools.append(_code.merge_tool(dispatches))
+    if args.compact_loss_policy == "evidence":
+        tools.append(_context_archive.archive_tool(archive))
     system = PROFILE.build_system(args, root, tools)
 
     roots_note = ""  # #76: surface extra writable / read-only roots in the banner
@@ -961,17 +975,20 @@ def _run(args) -> int:
             root=root, system_reseed=PROFILE.system_reseed,
             ledger=ledger,  # #117: the rails already hold this one
             resolved_models=resolved_models,
+            context_archive=archive,
         )
 
     return _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task,
                         models, dispatches=dispatches,
                         ephemeral=bool(getattr(args, "ephemeral", None)),
-                        ledger=ledger, resolved_models=resolved_models)  # #117
+                        ledger=ledger, resolved_models=resolved_models,
+                        context_archive=archive)  # #117/#74
 
 
 def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task,
                  models=None, *, dispatches=None, ephemeral=False, ledger=None,
-                 resolved_models=None) -> int:
+                 resolved_models=None, context_archive=None) -> int:
+    archive = context_archive or _context_archive.ContextArchive()
     messages: List[dict] = [
         {"role": "system", "content": system},
         {"role": "user", "content": task},
@@ -1092,8 +1109,10 @@ def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task
             "code", label=PROFILE.label, model=model, system=system,
             gen_kwargs=gen_kwargs, root=root, max_tool_calls=max_calls,
             messages=messages, resolved_models=resolved_models,
+            context_archive=archive.to_envelope(),
         )
         active.messages = messages  # share the live list so saves capture the transcript
+        active.context_archive = archive.entries
         try:
             _session.save(active)   # create the file so `latest` resolves during the run
         except OSError as e:
@@ -1101,7 +1120,9 @@ def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task
                   file=sys.stderr)
             active = None
     final_text = None
-    budget = _budget_for(args)
+    budget = _budget_for(args, archive)
+    if budget is not None:
+        budget.protected_system_messages = _compact.leading_system_count(messages)
     # #79: attached Ctrl+C steering. On an interactive tty, wrap the loop so the first
     # Ctrl+C pauses at the next checkpoint and prompts for a steering line (fed through
     # the #78 drain path); a second Ctrl+C aborts. Off a tty or in --json this yields the

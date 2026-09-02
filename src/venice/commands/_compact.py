@@ -50,7 +50,7 @@ import time
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
-from . import _openai
+from . import _context_archive, _openai
 
 # Rough chars-per-token for English/code text. Deliberately conservative
 # (overestimate tokens) so the fallback triggers compaction a little early
@@ -64,6 +64,7 @@ SUMMARY_MAX_TOKENS = 1024
 
 DEFAULT_THRESHOLD_TOKENS = 100_000
 DEFAULT_KEEP_TURNS = 10
+LOSS_POLICY_CHOICES = ("aggressive", "evidence")
 
 _SUMMARY_PREFIX = "[Summary of earlier conversation]"
 _INSTRUCT = (
@@ -124,6 +125,9 @@ class Budget:
     threshold_tokens: int = DEFAULT_THRESHOLD_TOKENS
     keep_turns: int = DEFAULT_KEEP_TURNS
     last_prompt_tokens: Optional[int] = None
+    loss_policy: str = "aggressive"
+    archive: Optional[_context_archive.ContextArchive] = None
+    protected_system_messages: Optional[int] = None
 
     def observe(self, usage) -> None:
         """Record prompt tokens from a response's `usage` (dict or SDK obj)."""
@@ -150,7 +154,7 @@ class Budget:
         return estimate_tokens(messages) >= self.threshold_tokens
 
 
-def budget_from_args(args) -> Optional["Budget"]:
+def budget_from_args(args, archive=None) -> Optional["Budget"]:
     """The auto-compact Budget for a parsed-args namespace, or None when it
     isn't opted into (#48).
 
@@ -168,6 +172,8 @@ def budget_from_args(args) -> Optional["Budget"]:
         keep_turns=(
             getattr(args, "compact_keep_turns", None) or DEFAULT_KEEP_TURNS
         ),
+        loss_policy=getattr(args, "compact_loss_policy", None) or "aggressive",
+        archive=archive,
     )
 
 
@@ -212,8 +218,16 @@ def _groups(messages: List[dict]) -> List[List[dict]]:
     return groups
 
 
+def leading_system_count(messages: List[dict]) -> int:
+    """Count the contiguous authoritative/generated system prefix."""
+    count = 0
+    while count < len(messages) and messages[count].get("role") == "system":
+        count += 1
+    return count
+
+
 def split_for_compaction(
-    messages: List[dict], keep_turns: int
+    messages: List[dict], keep_turns: int, protected_system_messages: Optional[int] = None
 ) -> Optional[Tuple[List[dict], List[dict]]]:
     """Split history into (prefix to summarize, tail to keep verbatim).
 
@@ -224,14 +238,21 @@ def split_for_compaction(
     """
     if keep_turns < 1:
         keep_turns = 1
-    sys_end = 0
-    while sys_end < len(messages) and messages[sys_end].get("role") == "system":
-        sys_end += 1
-    tail_groups = _groups(messages[sys_end:])
+    leading_systems = leading_system_count(messages)
+    # None is the conservative compatibility path: every leading system
+    # message is authoritative. Session-aware callers persist the exact count,
+    # which lets later generated summary/index messages be replaced without
+    # classifying authority from forgeable content text.
+    if protected_system_messages is None:
+        sys_end = leading_systems
+    else:
+        sys_end = min(max(0, protected_system_messages), leading_systems)
+    generated_end = leading_systems
+    tail_groups = _groups(messages[generated_end:])
     if len(tail_groups) <= keep_turns:
         return None
     cut = len(tail_groups) - keep_turns
-    prefix: List[dict] = []
+    prefix: List[dict] = list(messages[sys_end:generated_end])
     for g in tail_groups[:cut]:
         prefix.extend(g)
     tail: List[dict] = []
@@ -283,6 +304,9 @@ def compact_messages(
     ledger=None,
     budget: Optional[Budget] = None,
     trigger: str = "auto",
+    loss_policy: str = "aggressive",
+    archive: Optional[_context_archive.ContextArchive] = None,
+    protected_system_messages: Optional[int] = None,
 ) -> bool:
     """Summarize the older prefix in place; keep system + last `keep_turns`.
 
@@ -311,11 +335,27 @@ def compact_messages(
     history it now describes -- i.e. re-firing compaction immediately, a sawtooth #99's
     trace would show and nothing would prevent.
     """
-    split = split_for_compaction(messages, keep_turns)
+    split = split_for_compaction(
+        messages, keep_turns, protected_system_messages=protected_system_messages
+    )
     if split is None:
         return False
     prefix, tail = split
     sys_msgs = messages[: len(messages) - len(prefix) - len(tail)]
+
+    # Evidence mode refuses before spending a summarization call if the exact
+    # removed messages cannot fit. Staging is side-effect-free; commit happens
+    # only after a usable summary exists, alongside the live-history rewrite.
+    staged = []
+    if loss_policy == "evidence":
+        if archive is None:
+            return False
+        archive.last_error = None
+        try:
+            staged = archive.stage(prefix)
+        except _context_archive.ArchiveError as e:
+            archive.last_error = str(e)
+            return False
 
     # #128: compaction is a deliberately fresh summarization conversation. Reusing
     # the parent session's routing identity would mix unrelated prefixes on one cache
@@ -366,7 +406,11 @@ def compact_messages(
     # lie in the artifact that exists to stop one.
     est_before = estimate_tokens(messages)
     msgs_before = len(messages)
-    messages[:] = sys_msgs + [synthetic_message(summary)] + tail
+    replacement = sys_msgs + [synthetic_message(summary)]
+    if loss_policy == "evidence":
+        archive.commit(staged)
+        replacement.append(archive.live_index_message())
+    messages[:] = replacement + tail
     if ledger is not None:
         ledger.record_compaction({
             "trigger": trigger,
@@ -411,7 +455,7 @@ def compact_messages(
 
 def maybe_compact(oai, model: str, messages: List[dict],
                   budget: Optional[Budget], base_kwargs: Optional[dict] = None,
-                  on_compact=None, ledger=None) -> bool:
+                  on_compact=None, on_blocked=None, ledger=None) -> bool:
     """Compact `messages` in place when `budget` says they're over budget.
 
     The shared gate for every compaction site (`run_loop`'s per-turn check, its
@@ -433,7 +477,12 @@ def maybe_compact(oai, model: str, messages: List[dict],
         oai, model, messages,
         keep_turns=budget.keep_turns, base_kwargs=base_kwargs,
         ledger=ledger, budget=budget, trigger="auto",
+        loss_policy=budget.loss_policy, archive=budget.archive,
+        protected_system_messages=budget.protected_system_messages,
     ):
+        if (on_blocked is not None and budget.archive is not None
+                and budget.archive.last_error):
+            on_blocked(budget.archive.last_error)
         return False
     if on_compact is not None:
         on_compact(before, len(messages))
