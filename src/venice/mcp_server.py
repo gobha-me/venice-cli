@@ -14,14 +14,125 @@ input schema via typing.get_type_hints, so the annotations must stay concrete
 """
 import json
 import os
+import urllib.parse
 from typing import Annotated, List, Literal, Optional
 
+import anyio
+import jwt
+from jwt.exceptions import PyJWTError
 from mcp import types
+from mcp.server.auth.provider import AccessToken, TokenVerifier
+from mcp.server.auth.settings import AuthSettings
 from mcp.server.mcpserver import MCPServer
+from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import Field
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 from . import userconfig
 from .commands import _mcp, _shared, upscale as _upscale
+
+
+REMOTE_TOKEN_MAX_BYTES = 16 * 1024
+REMOTE_JWT_ALGORITHMS = ("RS256", "ES256", "EdDSA")
+REMOTE_DATA_URL_MAX_CHARS = 4 * 1024 * 1024
+
+
+def _valid_remote_image_url(value):
+    """Accept only network/data image URLs; never reinterpret text as a pod path."""
+    if not isinstance(value, str) or not value or len(value) > REMOTE_DATA_URL_MAX_CHARS:
+        return False
+    if value.startswith("data:image/"):
+        header, separator, payload = value.partition(",")
+        return bool(separator and payload and header.endswith(";base64"))
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        parsed.port
+    except ValueError:
+        return False
+    return bool(
+        parsed.scheme in ("http", "https")
+        and parsed.hostname
+        and parsed.username is None
+        and parsed.password is None
+        and not parsed.fragment
+    )
+
+
+class JWKSJWTVerifier(TokenVerifier):
+    """Verify bounded asymmetric OAuth access tokens against a cached JWKS."""
+
+    def __init__(self, *, jwks_url, issuer, audience, required_scopes):
+        self.issuer = issuer
+        self.audience = audience
+        self.required_scopes = frozenset(required_scopes)
+        self._jwks = jwt.PyJWKClient(
+            jwks_url,
+            cache_keys=True,
+            max_cached_keys=16,
+            cache_jwk_set=True,
+            lifespan=300,
+            timeout=5,
+        )
+
+    @staticmethod
+    def _scope_set(claims):
+        raw = claims.get("scope")
+        if raw is None:
+            raw = claims.get("scp")
+        if isinstance(raw, str):
+            return frozenset(raw.split())
+        if isinstance(raw, list) and all(isinstance(item, str) for item in raw):
+            return frozenset(raw)
+        return frozenset()
+
+    def _verify(self, token):
+        if not isinstance(token, str) or not token or len(token.encode()) > REMOTE_TOKEN_MAX_BYTES:
+            return None
+        try:
+            header = jwt.get_unverified_header(token)
+            algorithm = header.get("alg")
+            if algorithm not in REMOTE_JWT_ALGORITHMS or not header.get("kid"):
+                return None
+            signing_key = self._jwks.get_signing_key_from_jwt(token)
+            claims = jwt.decode(
+                token,
+                signing_key.key,
+                algorithms=[algorithm],
+                audience=self.audience,
+                issuer=self.issuer,
+                leeway=60,
+                options={"require": ["exp", "iss", "aud", "sub"]},
+            )
+        except (PyJWTError, OSError, ValueError):
+            # Every signature, claim, parse, and JWKS transport failure is the
+            # same invalid credential to the caller. In particular, never log
+            # the token or its untrusted claims here.
+            return None
+
+        subject = claims.get("sub")
+        client_id = claims.get("client_id") or claims.get("azp")
+        scopes = self._scope_set(claims)
+        if (
+            not isinstance(subject, str)
+            or not subject
+            or not isinstance(client_id, str)
+            or not client_id
+            or not self.required_scopes.issubset(scopes)
+        ):
+            return None
+        return AccessToken(
+            token=token,
+            client_id=client_id,
+            scopes=sorted(scopes),
+            expires_at=claims["exp"],
+            resource=self.audience,
+            subject=subject,
+            claims={"iss": self.issuer},
+        )
+
+    async def verify_token(self, token):
+        return await anyio.to_thread.run_sync(self._verify, token)
 
 
 def _merged(defaults: dict, host: dict) -> dict:
@@ -459,3 +570,152 @@ def serve(client, doc=None, host_image_content=False) -> None:
     build_server(
         client, doc=doc, host_image_content=host_image_content
     ).run(transport="stdio")
+
+
+def build_http_server(
+    client,
+    *,
+    public_url,
+    issuer_url,
+    jwks_url,
+    audience,
+    scopes,
+    doc=None,
+    token_verifier=None,
+) -> MCPServer:
+    """Build the authenticated, path-independent remote MCP profile."""
+    if doc is None:
+        doc = userconfig.load_config()
+    verifier = token_verifier or JWKSJWTVerifier(
+        jwks_url=jwks_url,
+        issuer=issuer_url,
+        audience=audience,
+        required_scopes=scopes,
+    )
+    server = MCPServer(
+        "venice",
+        token_verifier=verifier,
+        auth=AuthSettings(
+            issuer_url=issuer_url,
+            resource_server_url=public_url,
+            required_scopes=list(scopes),
+        ),
+    )
+    chat_defaults = userconfig.config_defaults_for("chat", _mcp.chat_tool, doc)
+    vision_defaults = userconfig.config_defaults_for("vision", _mcp.vision_tool, doc)
+    remote_annotations = types.ToolAnnotations(
+        read_only_hint=False,
+        destructive_hint=False,
+        open_world_hint=True,
+    )
+
+    @server.tool(
+        name="venice_chat",
+        title="Venice chat completion",
+        annotations=remote_annotations,
+    )
+    def remote_chat(
+        message: str,
+        model: Optional[str] = None,
+        system: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        web_search: Optional[str] = None,
+        character: Optional[str] = None,
+    ) -> dict:
+        """Run one Venice chat completion. This consumes API credits and has no
+        pre-call spend quote. Omitted values use defaults.chat.*, then built-ins."""
+        return _mcp.chat_tool(
+            client,
+            message,
+            **_merged(chat_defaults, dict(
+                model=model,
+                system=system,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                web_search=web_search,
+                character=character,
+            )),
+        )
+
+    @server.tool(
+        name="venice_vision",
+        title="Venice remote image analysis",
+        annotations=remote_annotations,
+    )
+    def remote_vision(
+        image_url: str,
+        prompt: Optional[str] = None,
+        model: Optional[str] = None,
+        max_tokens: Optional[int] = None,
+    ) -> types.CallToolResult:
+        """Inspect one remote HTTP(S) or data image through a delegated Venice
+        vision model. Server-local paths and native host content are unavailable."""
+        if not _valid_remote_image_url(image_url):
+            return _vision_text_result({
+                "status": "error",
+                "message": (
+                    "vision: image_url must be an HTTP(S) URL without credentials "
+                    "or a bounded base64 image data URL"
+                ),
+            })
+        args = _merged(vision_defaults, dict(
+            image_url=image_url,
+            prompt=prompt,
+            model=model,
+            max_tokens=max_tokens,
+        ))
+        # A stored stdio preference must not promote a remote call to native
+        # content. The remote schema has no mode or local path authority.
+        args.pop("mode", None)
+        return _vision_text_result(_mcp.vision_tool(
+            client,
+            input_path=None,
+            mode="delegate",
+            **args,
+        ))
+
+    @server.custom_route("/healthz", methods=["GET"], include_in_schema=False)
+    async def healthz(_request: Request):
+        return JSONResponse({"status": "ok"})
+
+    return server
+
+
+def serve_http(
+    client,
+    *,
+    host,
+    port,
+    public_url,
+    issuer_url,
+    jwks_url,
+    audience,
+    scopes,
+    allowed_origins=(),
+    doc=None,
+) -> None:
+    """Run the authenticated remote profile over stateless Streamable HTTP."""
+    allowed_host = urllib.parse.urlsplit(public_url).netloc
+    security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=[allowed_host],
+        allowed_origins=list(allowed_origins),
+    )
+    build_http_server(
+        client,
+        doc=doc,
+        public_url=public_url,
+        issuer_url=issuer_url,
+        jwks_url=jwks_url,
+        audience=audience,
+        scopes=scopes,
+    ).run(
+        transport="streamable-http",
+        host=host,
+        port=port,
+        streamable_http_path="/mcp",
+        stateless_http=True,
+        json_response=True,
+        transport_security=security,
+    )

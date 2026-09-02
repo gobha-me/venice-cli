@@ -56,7 +56,7 @@ openai = ["openai>=1.40"]
 # Keep the major bound explicit: SDK 2.x renamed FastMCP to MCPServer and moved
 # protocol-model attributes to snake_case, so a future major must be reviewed
 # deliberately rather than becoming an ambient resolver break like #95.
-mcp = ["mcp>=2,<3; python_version>='3.10'"]
+mcp = ["mcp>=2.1.1,<3; python_version>='3.10'"]
 # Test-only: `pexpect` drives the real CLI on a pty in tests/test_drive_cli.py.
 # Deliberately NOT in `all` -- `all` is a *runtime* install, and the CI `package`
 # job's "a base install pulls in nothing third-party" proof must stay meaningful.
@@ -97,4 +97,7 @@ include = [
   "/LICENSE",
   "/CONTRIBUTING.md",
   "/SECURITY.md",
+  "/Dockerfile",
+  "/.dockerignore",
+  "/deploy",
 ]

@@ -148,3 +148,62 @@ jobs:
           "$SMOKE_VENV/bin/venice" --version
           "$SMOKE_VENV/bin/venice" --help >/dev/null
           "$SMOKE_VENV/bin/venice" completion bash >/dev/null
+
+  container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build remote MCP image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          push: false
+          tags: venice-cli:mcp-ci
+
+      - name: Smoke the read-only non-root listener
+        env:
+          VENICE_API_KEY: test-fake-key
+          VENICE_MCP_PUBLIC_URL: https://mcp.example.test/mcp
+          VENICE_MCP_OAUTH_ISSUER: https://auth.example.test
+          VENICE_MCP_OAUTH_JWKS_URL: https://auth.example.test/jwks
+          VENICE_MCP_OAUTH_AUDIENCE: venice-api
+          VENICE_MCP_OAUTH_SCOPES: venice:mcp
+        run: |
+          set -eu
+          cleanup() {
+            docker logs venice-mcp-ci 2>&1 || true
+            docker rm -f venice-mcp-ci >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker run --detach --name venice-mcp-ci \
+            --read-only --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+            --publish 127.0.0.1:18080:8000 \
+            --env VENICE_API_KEY \
+            --env VENICE_MCP_PUBLIC_URL \
+            --env VENICE_MCP_OAUTH_ISSUER \
+            --env VENICE_MCP_OAUTH_JWKS_URL \
+            --env VENICE_MCP_OAUTH_AUDIENCE \
+            --env VENICE_MCP_OAUTH_SCOPES \
+            venice-cli:mcp-ci
+          python - <<'PY'
+          import json
+          import time
+          import urllib.error
+          import urllib.request
+
+          url = "http://127.0.0.1:18080/healthz"
+          for attempt in range(30):
+              try:
+                  with urllib.request.urlopen(url, timeout=2) as response:
+                      assert json.load(response) == {"status": "ok"}
+                  break
+              except (OSError, urllib.error.URLError):
+                  if attempt == 29:
+                      raise
+                  time.sleep(1)
+          PY
