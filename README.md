@@ -61,6 +61,8 @@ The name at the left is the corresponding lazy-import label in the source.
 - `review`: model-backed `venice review` runs. A diff skipped by `auto` triage,
   an empty diff, or `--effort never` returns before importing the SDK.
 - `vision`: the agent's model-backed `vision` tool.
+- `mcp-serve --http`: the authenticated remote MCP server's `venice_chat` and
+  delegated `venice_vision` tools.
 <!-- openai-extra-inventory:end -->
 
 The `[mcp]` extra is independent: it provides the transport used to start
@@ -1903,13 +1905,16 @@ look" must never be able to masquerade as "we looked and found nothing".
 
 ## MCP server
 
-`venice mcp-serve` runs an [MCP](https://modelcontextprotocol.io) server over
-stdio, exposing venice's generators as tools that an MCP host (Claude Code, or
-any MCP client) can call directly instead of shelling out to the CLI. Starting
-the server needs the `[mcp]` extra (Python ≥ 3.10); its `venice_chat` tool also
-needs `[openai]`. Delegated `venice_vision` calls need `[openai]` too; its local
-native path does not. Install `[all]` when the host should be able to call all ten
-tools:
+`venice mcp-serve` runs an [MCP](https://modelcontextprotocol.io) server either
+locally over stdio or remotely over authenticated Streamable HTTP. Starting the
+server needs the `[mcp]` extra (Python ≥ 3.10); `venice_chat` and delegated
+`venice_vision` also need `[openai]`.
+
+### Local stdio server
+
+The default stdio profile exposes Venice's generators as tools that a local MCP
+host (Claude Code, or any process that can spawn the CLI) can call directly.
+Install `[all]` when the host should be able to call all ten tools:
 
 ```sh
 pip install "venice-cli[mcp]"
@@ -1976,6 +1981,64 @@ Only stdout carries the JSON-RPC protocol; the server's own diagnostics go to
 stderr. Video generation and image editing are exposed over MCP too: the
 `venice_video` and `venice_image_edit` tools cover the same capabilities as the
 `venice video` and `venice image-edit` CLI commands.
+
+### Authenticated remote server
+
+`venice mcp-serve --http` exposes a deliberately smaller, path-independent
+profile over Streamable HTTP:
+
+- `venice_chat` — one delegated completion;
+- `venice_vision` — delegated analysis of a required remote `image_url`.
+
+The eight tools that consume or return server-local files are absent. HTTP mode
+never turns a pod path into a useful-looking result, and it rejects
+`--host-image-content`; authenticated, bounded remote media resources are tracked
+separately. The local stdio profile remains the ten-tool surface documented above.
+
+HTTP mode is always an OAuth 2.1 resource server. It validates asymmetric JWT
+access tokens locally from an external authorization server's HTTPS JWKS; Venice
+does not provide a login page, issue tokens, or embed an authorization server.
+Tokens must have a `kid`, use RS256, ES256, or EdDSA, and carry the configured
+issuer, audience, expiry, subject, client identity (`client_id` or `azp`), and all
+required scopes. A missing or invalid token is rejected before MCP parses or
+invokes a tool.
+
+```sh
+export VENICE_MCP_PUBLIC_URL=https://mcp.example.com/mcp
+export VENICE_MCP_OAUTH_ISSUER=https://auth.example.com
+export VENICE_MCP_OAUTH_JWKS_URL=https://auth.example.com/.well-known/jwks.json
+export VENICE_MCP_OAUTH_AUDIENCE=https://mcp.example.com
+export VENICE_MCP_OAUTH_SCOPES='venice:mcp'
+
+venice mcp-serve --http --host 0.0.0.0 --port 8000
+```
+
+The first four values and at least one scope are required. Their equivalent CLI
+flags are `--public-url`, `--oauth-issuer`, `--oauth-jwks-url`,
+`--oauth-audience`, and repeatable `--oauth-scope`; explicit flags override the
+environment. The public URL must be HTTPS and end exactly in `/mcp`. These
+security-critical settings do not fall back to `~/.config/venice/config`.
+
+DNS-rebinding protection accepts only the exact Host from the public URL. A
+request with an Origin header is rejected unless that exact HTTPS origin was
+added with repeatable `--allowed-origin` or the whitespace-separated
+`VENICE_MCP_ALLOWED_ORIGINS`. This is an inbound origin check, not a wildcard
+CORS switch. `GET /healthz` is intentionally unauthenticated and returns only
+`{"status":"ok"}` for container probes.
+
+Configure the external authorization server to issue access tokens for the
+chosen audience and scopes, then register its OAuth client in the remote MCP host.
+Claude custom connectors accept a pre-registered OAuth client ID and secret in
+Advanced settings. Authentication limits who may invoke the tools; it does not add
+a pre-call billing quote to `venice_chat` or delegated vision.
+
+The published container is `ghcr.io/gobha-me/venice-cli`. Releases publish an
+immutable version tag and `sha-<full-commit>` tag plus the moving `latest` tag.
+Prefer the version tag or its registry digest in deployments. A hardened
+Deployment, Service, and TLS Ingress template is in
+`deploy/kubernetes/remote-mcp.yaml`; replace its example domain, OAuth values,
+image version, TLS issuer/secret, and separately provision the referenced
+`venice-mcp-api-key` Secret. Do not commit the API key to the manifest.
 
 The reverse direction — venice as an MCP **client**, calling *other* servers'
 tools inside `venice chat` — is [`venice chat --mcp`](#external-mcp-tools---mcp).

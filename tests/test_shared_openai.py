@@ -283,7 +283,7 @@ class TestImportOpenAI(unittest.TestCase):
         self.assertEqual(readme.count(start_marker), 1)
         self.assertEqual(readme.count(end_marker), 1)
         inventory = readme.split(start_marker, 1)[1].split(end_marker, 1)[0]
-        documented = set(re.findall(r"^- `([a-z_]+)`:", inventory, re.MULTILINE))
+        documented = set(re.findall(r"^- `([^`]+)`:", inventory, re.MULTILINE))
         self.assertEqual(documented, labels)
 
         # These wrappers delegate to one of the labelled boundaries rather
