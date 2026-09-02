@@ -1984,16 +1984,37 @@ stderr. Video generation and image editing are exposed over MCP too: the
 
 ### Authenticated remote server
 
-`venice mcp-serve --http` exposes a deliberately smaller, path-independent
-profile over Streamable HTTP:
+`venice mcp-serve --http` defaults to a deliberately small, path-independent
+profile containing `venice_chat` and delegated `venice_vision`. Supplying
+`--media-dir` (or `VENICE_MCP_MEDIA_DIR`) opts one server instance into the full
+remote media profile: image/TTS generation, queued SFX/music/video, upscale,
+background removal, image editing, import/delete, and job status/result tools.
+The local stdio profile remains the ten-tool surface documented above.
 
-- `venice_chat` — one delegated completion;
-- `venice_vision` — delegated analysis of a required remote `image_url`.
+Remote media never exposes a server-local path. Each result is an opaque,
+principal-bound HTTPS URI returned as both JSON metadata and an MCP
+`ResourceLink`. An authenticated client can read bounded objects with MCP
+`resources/read`, or stream any object with `GET`/`HEAD /media/{id}` (including a
+single byte range). `POST /media` accepts a raw, recognized image/audio/video body;
+set `Content-Type` and optionally `X-Venice-Filename`. `venice_media_import`
+supports bounded base64 image data URLs and guarded public HTTPS downloads. Paid
+tools consume only media URIs owned by the current OAuth principal. A different
+subject or OAuth client receives the same not-found response as a missing object.
 
-The eight tools that consume or return server-local files are absent. HTTP mode
-never turns a pod path into a useful-looking result, and it rejects
-`--host-image-content`; authenticated, bounded remote media resources are tracked
-separately. The local stdio profile remains the ten-tool surface documented above.
+Storage is a private SQLite metadata database plus opaque files. Objects and job
+handles expire after 24 hours by default. Default limits are 100 objects and 1 GiB
+per principal, 4 GiB globally, four pending jobs per principal, and 16 pending
+jobs globally. Run exactly one replica against a ReadWriteOnce persistent volume;
+the included Kubernetes template demonstrates that topology. Startup reconciles
+expired rows and task-owned incomplete/orphaned files.
+
+Every paid remote media call requires `confirm=true`, even below the operator's
+hard `VENICE_MCP_REMOTE_MAX_SPEND` ceiling (default **$0.10**). Callers cannot
+raise that ceiling. Tools whose price Venice does not disclose before execution
+(`upscale`, `bg_remove`, and `image_edit`) are disabled by default; enabling them
+requires both `--allow-dynamic-spend` and an explicit remote ceiling of at least
+$10. This opt-in acknowledges that an unknown price cannot be checked before the
+request. Chat and delegated vision retain their existing unquoted behavior.
 
 HTTP mode is always an OAuth 2.1 resource server. It validates asymmetric JWT
 access tokens locally from an external authorization server's HTTPS JWKS; Venice
@@ -2010,6 +2031,14 @@ export VENICE_MCP_OAUTH_JWKS_URL=https://auth.example.com/.well-known/jwks.json
 export VENICE_MCP_OAUTH_AUDIENCE=https://mcp.example.com
 export VENICE_MCP_OAUTH_SCOPES='venice:mcp'
 
+venice mcp-serve --http --host 0.0.0.0 --port 8000
+```
+
+To enable media storage:
+
+```sh
+export VENICE_MCP_MEDIA_DIR=/srv/venice-media
+export VENICE_MCP_REMOTE_MAX_SPEND=0.10
 venice mcp-serve --http --host 0.0.0.0 --port 8000
 ```
 
@@ -2273,6 +2302,16 @@ The player list (`paplay` -> `aplay` -> `ffplay` -> `mpg123` -> `play`
 | `VENICE_EMBED_CA_BUNDLE` | CA bundle to trust for a self-signed embedding backend (`embed`, `index`, `search`, and the `project_search` agent tool) |
 | `VENICE_MCP_MAX_SPEND` | `mcp-serve` auto-approve cap in USD (default `0.10`) |
 | `VENICE_MCP_OUTPUT_DIR` | where `mcp-serve` tools write files (default: cwd) |
+| `VENICE_MCP_MEDIA_DIR` | enable authenticated remote media in this private persistent directory |
+| `VENICE_MCP_MEDIA_TTL_SECONDS` | remote object/job lifetime (default `86400`) |
+| `VENICE_MCP_MEDIA_MAX_OBJECTS` | remote objects plus reservations per principal (default `100`) |
+| `VENICE_MCP_MEDIA_PRINCIPAL_MAX_BYTES` | stored/reserved bytes per principal (default `1073741824`) |
+| `VENICE_MCP_MEDIA_GLOBAL_MAX_BYTES` | stored/reserved bytes across principals (default `4294967296`) |
+| `VENICE_MCP_MEDIA_MAX_PENDING_JOBS` | pending SFX/music/video jobs per principal (default `4`) |
+| `VENICE_MCP_MEDIA_GLOBAL_MAX_PENDING_JOBS` | pending jobs across principals (default `16`) |
+| `VENICE_MCP_MEDIA_MCP_READ_MAX_BYTES` | maximum object returned inline by MCP `resources/read` (default `33554432`) |
+| `VENICE_MCP_REMOTE_MAX_SPEND` | hard known-price ceiling for one remote media call (default `0.10`) |
+| `VENICE_MCP_REMOTE_ALLOW_DYNAMIC_SPEND` | explicitly enable unknown-price remote media tools (default false; ceiling must be at least `10`) |
 | `VENICE_USAGE_RAW` | set to `1`/`true`/`yes`/`on` to echo each API response's raw `usage` block to **stderr** as one `usage-raw: {...}` line (diagnostic; stdout stays machine-readable) |
 
 ## Commands at a glance
@@ -2301,7 +2340,7 @@ The player list (`paplay` -> `aplay` -> `ffplay` -> `mpg123` -> `play`
 | `venice index [PATH] [--model M] [--embed-base-url URL --embed-model M [--embed-ca-bundle PATH \| --embed-insecure]] [...]` / `venice search QUERY [-k N] [--json] [--embed-ca-bundle PATH \| --embed-insecure]` | build / query a local semantic index of a project tree (needs `[openai]`) |
 | `venice code [TASK] [--auto\|--manual] [--plan-only] [-i] [--root DIR] [--continue\|--resume ID\|FILE] [--ephemeral] [--json] [...]` | coding agent: plan → accept → edit/run a project (needs `[openai]` + tool-calling model) |
 | `venice review [FOCUS] [--base REF] [--rounds N] [--effort auto\|always\|never] [--fail-on LEVEL] [--json]` | cold-context review of the current diff (model-backed runs need `[openai]`; skipped/empty runs do not); **findings only — no gate, writes nothing** |
-| `venice mcp-serve [--host-image-content]` | run an MCP server (stdio) exposing venice tools (needs `[mcp]`; delegated vision and `venice_chat` additionally need `[openai]`) |
+| `venice mcp-serve [--host-image-content] [--http ...] [--media-dir DIR]` | run the local MCP server or authenticated remote server, optionally with principal-bound media (needs `[mcp]`; delegated vision and `venice_chat` additionally need `[openai]`) |
 | `venice config add\|list\|remove\|show` | manage the MCP server registry |
 | `venice config get\|set\|unset KEY [VALUE]` | manage default flag values |
 | `venice completion bash\|zsh` | print a shell tab-completion script (generated from the parser) |
