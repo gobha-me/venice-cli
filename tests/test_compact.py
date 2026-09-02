@@ -7,7 +7,7 @@ synthetic-message shape), the best-effort `compact_messages` turn, and the
 import unittest
 from unittest import mock
 
-from venice.commands import _compact
+from venice.commands import _compact, _context_archive
 
 
 def _fake_oai(summary="A concise summary.", fail=False, usage=None):
@@ -191,6 +191,75 @@ class TestSplitForCompaction(unittest.TestCase):
 
 
 class TestCompactMessages(unittest.TestCase):
+    def test_evidence_policy_archives_every_removed_message_exactly(self):
+        msgs = _tooly_history()
+        prefix, _tail = _compact.split_for_compaction(msgs, keep_turns=1)
+        expected = list(prefix)
+        archive = _context_archive.ContextArchive()
+        fake, calls = _fake_oai("faithful summary")
+        self.assertTrue(_compact.compact_messages(
+            fake, "m", msgs, keep_turns=1, loss_policy="evidence", archive=archive,
+        ))
+        self.assertEqual([e["message"] for e in archive.entries], expected)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(msgs[1]["role"], "system")
+        self.assertIn("[Archived context evidence index]", msgs[2]["content"])
+        # The kept tail remains group-valid.
+        self.assertEqual([m["role"] for m in msgs[-2:]], ["user", "assistant"])
+
+    def test_evidence_capacity_refuses_before_summary_and_changes_nothing(self):
+        msgs = _history(6)
+        snapshot = list(msgs)
+        archive = _context_archive.ContextArchive()
+        fake, calls = _fake_oai("unused")
+        with mock.patch.object(_context_archive, "MAX_ARCHIVE_ENTRIES", 1):
+            self.assertFalse(_compact.compact_messages(
+                fake, "m", msgs, keep_turns=2,
+                loss_policy="evidence", archive=archive,
+            ))
+        self.assertEqual(calls, [])
+        self.assertEqual(msgs, snapshot)
+        self.assertEqual(archive.entries, [])
+        self.assertIn("archive full", archive.last_error)
+
+    def test_evidence_summary_failure_is_transactional(self):
+        msgs = _history(6)
+        snapshot = list(msgs)
+        archive = _context_archive.ContextArchive()
+        fake, _calls = _fake_oai(fail=True)
+        self.assertFalse(_compact.compact_messages(
+            fake, "m", msgs, keep_turns=2,
+            loss_policy="evidence", archive=archive,
+        ))
+        self.assertEqual(msgs, snapshot)
+        self.assertEqual(archive.entries, [])
+
+    def test_repeated_evidence_compaction_keeps_all_prior_entries(self):
+        msgs = _history(4)
+        archive = _context_archive.ContextArchive()
+        fake, _calls = _fake_oai("first")
+        self.assertTrue(_compact.compact_messages(
+            fake, "m", msgs, keep_turns=1,
+            loss_policy="evidence", archive=archive, protected_system_messages=1,
+        ))
+        first_ids = [e["id"] for e in archive.entries]
+        msgs.extend(_history(3, system=False))
+        self.assertTrue(_compact.compact_messages(
+            fake, "m", msgs, keep_turns=1,
+            loss_policy="evidence", archive=archive, protected_system_messages=1,
+        ))
+        self.assertEqual([e["id"] for e in archive.entries[:len(first_ids)]], first_ids)
+        self.assertEqual(len({e["id"] for e in archive.entries}), len(archive.entries))
+        generated = [m for m in msgs[1:] if m.get("role") == "system"]
+        self.assertEqual(len(generated), 2)
+
+    def test_operator_system_prompt_that_looks_generated_is_never_removed(self):
+        policy = "[Summary of earlier conversation]\noperator safety policy"
+        msgs = [{"role": "system", "content": policy}] + _history(2, system=False)
+        fake, _calls = _fake_oai("summary")
+        self.assertTrue(_compact.compact_messages(fake, "m", msgs, keep_turns=1))
+        self.assertEqual(msgs[0], {"role": "system", "content": policy})
+
     def test_replaces_prefix_with_synthetic_summary(self):
         msgs = _history(6)
         fake, calls = _fake_oai("We decided X and edited a.py.")

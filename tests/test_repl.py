@@ -133,6 +133,54 @@ def _run_repl(args, results, inputs, *, stdout=None, stderr=None,
 
 class TestRepl(unittest.TestCase):
 
+    def test_system_command_synchronizes_auto_compaction_authority(self):
+        messages = [{"role": "user", "content": "old"}]
+        budget = _compact.Budget(
+            threshold_tokens=1,
+            loss_policy="evidence",
+        )
+        state = {
+            "system": None,
+            "protected_system_messages": 0,
+            "budget": budget,
+        }
+        with mock.patch.object(sys, "stderr", io.StringIO()):
+            _repl._dispatch_slash(
+                "/system safety policy", messages, state, _args(), [],
+            )
+        self.assertEqual(messages[0]["content"], "safety policy")
+        self.assertEqual(state["protected_system_messages"], 1)
+        self.assertEqual(budget.protected_system_messages, 1)
+
+    def test_code_reseed_promotes_inserted_system_to_authoritative(self):
+        from venice.commands import _session
+
+        session = _session.new_session("code", messages=[
+            {"role": "user", "content": "old question"},
+            {"role": "assistant", "content": "old answer"},
+        ])
+        self.assertEqual(session.protected_system_messages, 0)
+        fake, _calls = _fake_openai_seq([])
+        args = _args(
+            interactive=True, system="CODE SAFETY AND ROOT POLICY",
+            auto_compact=True, compact_loss_policy="evidence",
+        )
+        with tempfile.TemporaryDirectory() as store, mock.patch.dict(
+            os.environ, {"VENICE_SESSIONS_DIR": store}
+        ), mock.patch("builtins.input", side_effect=["/exit"]), mock.patch.object(
+            sys, "stdin", io.StringIO("")
+        ), mock.patch.object(sys, "stdout", io.StringIO()), mock.patch.object(
+            sys, "stderr", io.StringIO()
+        ):
+            rc = _repl.run(
+                args, fake, mock.MagicMock(OpenAIError=Exception),
+                mock.MagicMock(), [], "m", session=session,
+                label="venice code", system_reseed=True,
+            )
+        self.assertEqual(rc, 0)
+        self.assertEqual(session.protected_system_messages, 1)
+        self.assertEqual(session.messages[0]["content"], "CODE SAFETY AND ROOT POLICY")
+
     def test_multi_turn_carries_context(self):
         out = io.StringIO()
         results = [
@@ -570,6 +618,41 @@ class TestRepl(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(len(calls), 0)
         self.assertIn("nothing to compact", err.getvalue())
+
+    def test_evidence_compaction_is_listable_and_readable(self):
+        with tempfile.TemporaryDirectory() as d:
+            resume = self._resume_history(d, pairs=6)
+            err = io.StringIO()
+            rc, _fake, calls = _run_repl(
+                _args(interactive=True, resume=resume,
+                      compact_loss_policy="evidence"),
+                [FakeToolCompletion("summary")],
+                ["/compact 2", "/context list", "/context read ctx-000001", "/exit"],
+                stderr=err,
+            )
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 1)
+        output = err.getvalue()
+        self.assertIn('"id": "ctx-000001"', output)
+        self.assertIn('\\"content\\":\\"u0\\"', output)
+
+    def test_reset_clears_evidence_archive(self):
+        with tempfile.TemporaryDirectory() as d:
+            resume = self._resume_history(d, pairs=6)
+            store = str(Path(d) / "store")
+            err = io.StringIO()
+            rc, _fake, _calls = _run_repl(
+                _args(interactive=True, resume=resume,
+                      compact_loss_policy="evidence"),
+                [FakeToolCompletion("summary")],
+                ["/compact 2", "/reset", "/context list", "/exit"], stderr=err,
+                sessions_dir=store,
+            )
+            saved = json.loads(next(Path(store).glob("*.json")).read_text())
+        self.assertEqual(rc, 0)
+        self.assertIn('"total": 0', err.getvalue())
+        self.assertEqual(saved["messages"], [])
+        self.assertEqual(saved["context_archive"], [])
 
     def test_slash_cost_without_cap_reports_running_total(self):
         # The REPL ledger is always-on now (#75): /cost reports a total even

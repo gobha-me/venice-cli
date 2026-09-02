@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest import mock
 
 from venice import cli
+from venice.commands import _context_archive as A
 from venice.commands import _session as S
 from venice.commands._agent import CostLedger
 
@@ -61,6 +62,51 @@ class TestStore(_Base):
             r.gen_kwargs["extra_body"]["venice_parameters"]["enable_web_search"], "on")
         self.assertEqual(r.usage["cache_read_tokens"], 4)
         self.assertEqual([m["content"] for m in r.messages], ["hi"])
+
+    def test_v2_archive_round_trips_and_v1_defaults_empty(self):
+        archive = A.ContextArchive()
+        archive.commit(archive.stage([{"role": "user", "content": "evidence"}]))
+        sess = self._mk(context_archive=archive.to_envelope())
+        path = S.save(sess)
+        self.assertEqual(json.loads(path.read_text())["venice_session"], 2)
+        self.assertEqual(S.load(sess.id, "chat").context_archive,
+                         archive.to_envelope())
+
+        old = sess.to_envelope()
+        old["venice_session"] = 1
+        old.pop("context_archive")
+        old.pop("protected_system_messages")
+        self.assertEqual(S.Session.from_envelope(old).context_archive, [])
+
+    def test_protected_system_count_round_trips_and_v1_infers_safely(self):
+        messages = [
+            {"role": "system", "content": "operator policy"},
+            {"role": "user", "content": "hello"},
+        ]
+        sess = self._mk(messages=messages)
+        S.save(sess)
+        self.assertEqual(S.load(sess.id, "chat").protected_system_messages, 1)
+
+        old = sess.to_envelope()
+        old["venice_session"] = 1
+        old.pop("protected_system_messages")
+        self.assertEqual(S.Session.from_envelope(old).protected_system_messages, 1)
+
+        bad = sess.to_envelope()
+        bad["protected_system_messages"] = 2
+        with self.assertRaisesRegex(S.SessionError, "protected_system_messages"):
+            S.Session.from_envelope(bad)
+
+    def test_tampered_archive_is_rejected_on_resume(self):
+        archive = A.ContextArchive()
+        archive.commit(archive.stage([{"role": "user", "content": "evidence"}]))
+        sess = self._mk(context_archive=archive.to_envelope())
+        path = S.save(sess)
+        doc = json.loads(path.read_text())
+        doc["context_archive"][0]["message"]["content"] = "tampered"
+        path.write_text(json.dumps(doc))
+        with self.assertRaisesRegex(S.SessionError, "invalid context archive"):
+            S.load(sess.id, "chat")
 
     def test_resolved_models_round_trip_and_old_envelopes_default_empty(self):
         selection = {

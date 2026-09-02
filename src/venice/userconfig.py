@@ -441,6 +441,10 @@ _COMMAND_MAP = {
         "auto_compact": ("auto_compact", _as_bool),
         "compact_threshold": ("compact_threshold", int),
         "compact_keep_turns": ("compact_keep_turns", int),
+        "compact_loss_policy": (
+            "compact_loss_policy",
+            _one_of("venice.commands._compact", "LOSS_POLICY_CHOICES"),
+        ),
         "session_max_spend": ("session_max_spend", _numeric.finite_float),
     },
     "embed": {
@@ -485,6 +489,10 @@ _COMMAND_MAP = {
         "auto_compact": ("auto_compact", _as_bool),
         "compact_threshold": ("compact_threshold", int),
         "compact_keep_turns": ("compact_keep_turns", int),
+        "compact_loss_policy": (
+            "compact_loss_policy",
+            _one_of("venice.commands._compact", "LOSS_POLICY_CHOICES"),
+        ),
         "session_max_spend": ("session_max_spend", _numeric.finite_float),
         "cache_guard": (
             "cache_guard",
