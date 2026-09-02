@@ -62,9 +62,11 @@ from .models import MODEL_TYPES
 class Tool:
     """One function tool the model may call.
 
-    ``invoke(arguments, *, confirm=False) -> dict`` takes the model-supplied
-    arguments object and returns a JSON-serializable result dict. ``paid`` marks
-    tools whose result can be a ``confirmation_required`` gate.
+    ``invoke(arguments, *, confirm=False)`` takes the model-supplied arguments
+    object and normally returns a JSON-serializable result dict. A contextual
+    in-process tool may receive loop-owned runtime facts and return a private
+    :class:`_ToolOutcome`. ``paid`` marks tools whose result can be a
+    ``confirmation_required`` gate.
 
     ``category`` (e.g. ``image``/``fs``/``exec``) and ``tags`` are the capability
     axis (#50): a runtime label carried by every built tool so callers can filter a
@@ -82,6 +84,32 @@ class Tool:
     paid: bool = False
     category: str = ""
     tags: Tuple[str, ...] = ()
+    contextual: bool = False
+
+
+@dataclass(frozen=True)
+class _ToolRuntime:
+    """Per-loop facts available to a contextual in-process tool.
+
+    Tool schemas never expose this object.  It is minted by :func:`run_loop`, so
+    a model cannot spoof the active frontend id or its catalog capabilities.
+    """
+
+    model: str
+    models: Optional[List[dict]] = None
+
+
+@dataclass(frozen=True)
+class _ToolOutcome:
+    """A model-visible tool result plus messages committed after its batch.
+
+    Most tools keep returning a plain dict.  This private envelope exists for
+    native vision, where the assistant's tool call must receive its ``tool``
+    result before the loop can legally append the multimodal ``user`` message.
+    """
+
+    result: dict
+    followups: Tuple[dict, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -2455,6 +2483,8 @@ _MODEL_DETAILS_SCHEMA = _obj(
     required=["model"],
 )
 
+VISION_MODE_CHOICES = ("auto", "native", "delegate")
+
 _VISION_SCHEMA = _obj(
     {
         "input_path": _p("string", "Path to a local image file to look at."),
@@ -2465,9 +2495,18 @@ _VISION_SCHEMA = _obj(
         ),
         "model": _p(
             "string",
-            "A vision-capable text model id (default: auto-picked from the catalog).",
+            "A delegated vision model id (used by delegate mode or auto fallback).",
         ),
-        "max_tokens": _p("integer"),
+        "max_tokens": _p("integer", "Maximum tokens for a delegated vision reply."),
+        "mode": {
+            "type": "string",
+            "enum": list(VISION_MODE_CHOICES),
+            "description": (
+                "auto uses the active frontend when it advertises supportsVision, "
+                "otherwise delegates; native requires a known vision-capable "
+                "frontend; delegate always uses a separate vision model."
+            ),
+        },
     },
 )
 
@@ -2702,10 +2741,10 @@ _BUILTINS = [
     ToolSpec(
         "venice_vision",
         "vision_tool",
-        "Look at an image (a local input_path OR an image_url) with a vision-capable "
-        "Venice text model and return what it sees as text. Optional prompt directs "
-        "the question (default: a detailed description). Auto-picks a supportsVision "
-        "model when model is omitted (see venice_model_details). Not spend-gated.",
+        "Look at an image (a local input_path OR an image_url). mode=auto (default) "
+        "attaches it to the active frontend when that model advertises supportsVision "
+        "and otherwise delegates to a vision model; mode=native or mode=delegate "
+        "forces either path. Optional prompt directs the question. Not spend-gated.",
         _VISION_SCHEMA,
         False,
         "vision",
@@ -3122,10 +3161,73 @@ def builtin_tools(
     def _make_free(impl, section, impl_name):
         defaults = _config_defaults(section, impl)
 
-        def invoke(arguments, *, confirm: bool = False):
+        def invoke(arguments, *, confirm: bool = False, runtime=None):
             controlled = {}
             if impl_name == "vision_tool":
                 controlled["path_authority"] = media_path_authority
+                values = {**defaults, **_clean(arguments)}
+                mode = values.pop("mode", "auto")
+                if mode not in VISION_MODE_CHOICES:
+                    return {
+                        "status": "error",
+                        "message": (
+                            "vision: mode must be one of "
+                            + ", ".join(VISION_MODE_CHOICES)
+                        ),
+                    }
+
+                frontend = runtime.model if isinstance(runtime, _ToolRuntime) else None
+                models = runtime.models if isinstance(runtime, _ToolRuntime) else None
+                capability = (
+                    _models.supports_capability(models, frontend, "supportsVision")
+                    if frontend else None
+                )
+                native = mode == "native" or (mode == "auto" and capability is True)
+                if mode == "native" and capability is not True:
+                    state = "does not advertise" if capability is False else "has no known"
+                    return {
+                        "status": "error",
+                        "message": (
+                            f"vision: active model {frontend!r} {state} supportsVision; "
+                            "use mode='delegate' or mode='auto'"
+                        ),
+                    }
+
+                if native:
+                    prepared = _mcp.prepare_vision_input(
+                        values.get("input_path"),
+                        image_url=values.get("image_url"),
+                        path_authority=media_path_authority,
+                    )
+                    if prepared.get("status") != "ok":
+                        return prepared
+                    prompt = (
+                        values.get("prompt") or _mcp.DEFAULT_VISION_PROMPT
+                    ).strip()
+                    followup = {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": prepared["image_url"]},
+                            },
+                        ],
+                    }
+                    return _ToolOutcome(
+                        {
+                            "status": "ok",
+                            "mode": "native",
+                            "model": frontend,
+                            "message": "image attached to the active frontend",
+                        },
+                        (followup,),
+                    )
+
+                result = impl(client, **controlled, **values)
+                if isinstance(result, dict) and result.get("status") == "ok":
+                    result = {**result, "mode": "delegate"}
+                return result
             return impl(client, **controlled, **{**defaults, **_clean(arguments)})
 
         return invoke
@@ -3148,6 +3250,7 @@ def builtin_tools(
             paid=spec.paid,
             category=spec.category,
             tags=spec.tags,
+            contextual=(spec.impl == "vision_tool"),
         )
         for spec in source
     ]
@@ -3390,7 +3493,25 @@ def _invoke_window(acc):
         acc[0] += time.monotonic() - t
 
 
-def _resolve_spend(tool: Tool, arguments: dict, result, gate: dict, *, window=None):
+def _invoke_tool(tool: Tool, arguments: dict, *, confirm: bool, runtime=None):
+    """Invoke one tool, adding loop-owned context only to contextual tools."""
+    kwargs = {"confirm": confirm}
+    if tool.contextual:
+        kwargs["runtime"] = runtime
+    return tool.invoke(arguments, **kwargs)
+
+
+def _visible_tool_result(result) -> dict:
+    return result.result if isinstance(result, _ToolOutcome) else result
+
+
+def _tool_followups(result) -> Tuple[dict, ...]:
+    return result.followups if isinstance(result, _ToolOutcome) else ()
+
+
+def _resolve_spend(
+    tool: Tool, arguments: dict, result, gate: dict, *, window=None, runtime=None
+):
     """Hybrid gate: prompt on a TTY, else feed the block back to the model.
 
     `gate` is the run's mutable auto-accept holder (`{"auto": bool}`); answering
@@ -3416,15 +3537,19 @@ def _resolve_spend(tool: Tool, arguments: dict, result, gate: dict, *, window=No
                 gate["auto"] = True
             try:
                 with _invoke_window(window):  # #82: same call, same row
-                    return tool.invoke(arguments, confirm=True)
+                    return _invoke_tool(
+                        tool, arguments, confirm=True, runtime=runtime
+                    )
             except Exception as e:  # pragma: no cover - impls shouldn't raise
                 return {"status": "error", "message": f"{tool.name} failed: {e}"}
         print(f"{tool.name}: declined by user", file=sys.stderr)
     return result  # non-TTY or declined -> the model sees the gate and adapts
 
 
-def _run_one_call(tc, dispatch: Dict[str, Tool], gate: dict, *, on_tool=None) -> dict:
-    """Run one tool call and return the model-visible result dict.
+def _run_one_call(
+    tc, dispatch: Dict[str, Tool], gate: dict, *, on_tool=None, runtime=None
+):
+    """Run one tool call and return its result dict or private outcome.
 
     `on_tool` (#82) is an optional ``(name, seconds) -> None`` sink for the call's
     EXECUTION time -- `CostLedger.record_tool` when `run_loop` was given a ledger. A
@@ -3459,10 +3584,14 @@ def _run_one_call(tc, dispatch: Dict[str, Tool], gate: dict, *, on_tool=None) ->
     try:
         try:
             with _invoke_window(window):
-                result = tool.invoke(arguments, confirm=bool(gate["auto"]))
+                result = _invoke_tool(
+                    tool, arguments, confirm=bool(gate["auto"]), runtime=runtime
+                )
         except Exception as e:  # pragma: no cover - impls shouldn't raise
             return {"status": "error", "message": f"{tool.name} failed: {e}"}
-        return _resolve_spend(tool, arguments, result, gate, window=window)
+        return _resolve_spend(
+            tool, arguments, result, gate, window=window, runtime=runtime
+        )
     finally:
         # One flush per CALL, after any confirm re-invoke, on every path out of here
         # including the raise above. `tool.name` rather than `tc.function.name`:
@@ -3482,6 +3611,7 @@ def _dispatch_parallel(
     unlimited: bool,
     show: bool,
     on_tool=None,
+    runtime=None,
 ) -> int:
     """Run one assistant turn's tool calls with subagent dispatches executed concurrently.
 
@@ -3538,8 +3668,10 @@ def _dispatch_parallel(
             max_workers=workers, thread_name_prefix="venice-subagent"
         ) as ex:
             futs = {
-                ex.submit(_run_one_call, tool_calls[i], dispatch, gate,
-                          on_tool=on_tool): i
+                ex.submit(
+                    _run_one_call, tool_calls[i], dispatch, gate,
+                    on_tool=on_tool, runtime=runtime,
+                ): i
                 for i in par_idx
             }
             try:
@@ -3551,7 +3683,9 @@ def _dispatch_parallel(
 
     # Serial remainder, in original order (paid tools + the confirm gate stay unchanged).
     for i in ser_idx:
-        results[i] = _run_one_call(tool_calls[i], dispatch, gate, on_tool=on_tool)
+        results[i] = _run_one_call(
+            tool_calls[i], dispatch, gate, on_tool=on_tool, runtime=runtime
+        )
 
     # Commit on the main thread: append in ORIGINAL order, advance by the executed count.
     for i, tc in enumerate(tool_calls):
@@ -3560,9 +3694,13 @@ def _dispatch_parallel(
                 "role": "tool",
                 "tool_call_id": tc.id,
                 "name": tc.function.name,
-                "content": json.dumps(results[i], default=str, allow_nan=False),
+                "content": json.dumps(
+                    _visible_tool_result(results[i]), default=str, allow_nan=False
+                ),
             }
         )
+    for result in results:
+        messages.extend(_tool_followups(result))
     return calls_made + min(slots, n)
 
 
@@ -3599,6 +3737,7 @@ def run_loop(
     steer_drain: Optional[Callable[[], List[str]]] = None,
     parallel: bool = False,
     final_emitter: Optional[Callable[[object], int]] = None,
+    models: Optional[List[dict]] = None,
 ) -> int:
     """Drive the function-calling loop until the model stops (or the cap is hit).
 
@@ -3633,9 +3772,13 @@ def run_loop(
     `final_emitter` is an internal output seam. By default the loop prints the final
     response according to `json_out`; callers that need to build an envelope only
     after their own accounting is finalized can capture the response instead.
+
+    `models` is the current text catalog used only for loop-owned contextual policy
+    such as native vision. It never rides the model-facing tool schema.
     """
     oai_tools = to_openai_tools(tools)
     dispatch = dispatch_map(tools)
+    runtime = _ToolRuntime(model=model, models=models)
     calls_made = 0
     gate = {"auto": bool(yes)}  # mutable so an `a`/`all` confirm flips the run to auto
     # #82: the per-tool timing sink, bound ONCE so both dispatch paths -- and every pool
@@ -3764,8 +3907,10 @@ def run_loop(
                 tool_calls, dispatch, gate, messages,
                 calls_made=calls_made, max_tool_calls=max_tool_calls,
                 unlimited=unlimited, show=show, on_tool=on_tool,
+                runtime=runtime,
             )
         else:
+            followups = []
             for tc in tool_calls:
                 if not unlimited and calls_made >= max_tool_calls:
                     result = {
@@ -3778,16 +3923,24 @@ def run_loop(
                         f"· {tc.function.name} {_short_args(tc.function.arguments)}".rstrip(),
                         enabled=show,
                     )
-                    result = _run_one_call(tc, dispatch, gate, on_tool=on_tool)
+                    result = _run_one_call(
+                        tc, dispatch, gate, on_tool=on_tool, runtime=runtime
+                    )
                     calls_made += 1
                 messages.append(
                     {
                         "role": "tool",
                         "tool_call_id": tc.id,
                         "name": tc.function.name,
-                        "content": json.dumps(result, default=str, allow_nan=False),
+                        "content": json.dumps(
+                            _visible_tool_result(result),
+                            default=str,
+                            allow_nan=False,
+                        ),
                     }
                 )
+                followups.extend(_tool_followups(result))
+            messages.extend(followups)
 
         if cache_event is not None and cache_event.action == "stop":
             # The assistant tool-call message must receive one result per call before

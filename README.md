@@ -858,13 +858,16 @@ guessing, and `venice_model_details` (single `model` arg) which returns one
 model's pricing (cost), `capabilities` (text models — supportsVision etc.),
 `constraints` (image/media — aspect ratios, resolutions, qualities, prompt-length
 limit), and the full `model_spec`, so the agent can budget input and confirm a
-model fits, and `venice_vision`, which sends a local image (`input_path`, as a
-base64 data-URL) or an `image_url` to a vision-capable text model and returns
-what it sees — the agent's eyes, so it can inspect its own generations
-(watermarks, character consistency, glitches) instead of working blind; an
-optional `prompt` directs the question, and when `model` is omitted a
-`supportsVision` model is auto-picked from the catalog. Not spend-gated.
-(`venice code` gets all three too.)
+model fits, and `venice_vision`, which accepts a local image (`input_path`, as a
+base64 data-URL) or an `image_url` — the agent's eyes, so it can inspect its own
+generations (watermarks, character consistency, glitches) instead of working
+blind. `mode=auto` (the default) attaches the image to the active frontend when
+that model advertises `supportsVision`; otherwise it delegates to a separate
+vision model and returns that model's text. `mode=native` or `mode=delegate`
+forces either path. An optional `prompt` directs the question; `model` and
+`max_tokens` configure only delegation or the `auto` fallback. Not spend-gated.
+(`venice code` gets all three too; `venice_vision` is not exposed by
+`mcp-serve`.)
 
 ```sh
 # One command, multiple steps: the model generates an image, then critiques it.
@@ -1538,7 +1541,7 @@ jq '.usage.billed_total' ~/.config/venice/sessions/<id>.json
 | `git` | validated read-only Git (`status`/`diff`/`log`/`show`/…); literal paths go after `--` | no |
 | `project_search` | semantic search over the `.venice` index (if built) — a **snapshot** of the last build; use `grep` for live matches | no |
 | `reindex` | rebuild the `.venice` index so `project_search` reflects this session's edits (re-embeds only changed files); present only when an index exists | yes (paid) |
-| `venice_vision` | describe/inspect a local image or image URL via a vision-capable model | no |
+| `venice_vision` | inspect a local image or URL natively on a capable frontend, otherwise through a delegated vision model (`mode=auto\|native\|delegate`) | no |
 | `write_file` | create/overwrite a file (atomic) | yes |
 | `edit_file` | replace an exact, unique string in a file | yes |
 | `apply_patch` | apply a batch of edits grouped per file, atomically per file (use `occurrence=N` for non-unique strings) | yes |
@@ -1574,7 +1577,9 @@ it unrestricted (unchanged behavior).
 The same active/attached readable-root and secret-path policy applies when
 `venice_vision` or a `--assets` media tool reads a model-supplied local file. Those
 inputs must also match a recognized media signature; confirmation and `--auto` do
-not widen this authority.
+not widen this authority. Native images remain in the conversation history so the
+frontend can inspect them again; a persistent session therefore stores the bounded
+data URL in its existing 0600 envelope.
 
 The free `git` tool validates arguments per operation rather than trusting a
 subcommand name. `branch` and `remote` are listing-only; content diffs require
@@ -2069,6 +2074,9 @@ safety), it should be settable in config." Currently config-backable:
 - `defaults.review.*` — `model`, `base`, `rounds`, `effort`, `context`, `fail_on`,
   `max_diff_chars`, `max_tool_calls`, `subagent_max_tokens`, `exec_timeout`.
   Setting `model` is the usual way to make reviewer/author decorrelation permanent
+- `defaults.vision.*` — `mode` (`auto`, `native`, or `delegate`), delegated
+  fallback `model`, and delegated `max_tokens`. The per-image `prompt` remains a
+  tool-call input rather than a standing preference
 - `defaults.chat.*`, `defaults.code.*`, `defaults.index.*`,
   `defaults.search.*` — see each command's section above
 
@@ -2093,6 +2101,10 @@ way, as do the generation knobs `defaults.image.{model,format,variants}`,
 `defaults.{sfx,music,video}.max_wait`. An explicit argument the model puts in
 the tool call still wins over config. `venice mcp-serve` threads the same
 defaults into its wrappers.
+
+`defaults.vision.*` applies to the in-process `venice_vision` tool in chat and
+code. It does not create a vision tool on `venice mcp-serve`, whose remote-host
+capability and image-content contract are tracked in [#222](https://github.com/gobha-me/venice-cli/issues/222).
 
 Not everything crosses over, and the gaps are deliberate: `poll_interval` is
 CLI-only because the tool implementations fix their own polling cadence, and

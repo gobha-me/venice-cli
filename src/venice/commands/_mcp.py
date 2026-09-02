@@ -722,25 +722,18 @@ def _vision_default(models: List[dict]) -> Optional[str]:
     return None
 
 
-def vision_tool(
-    client,
+def prepare_vision_input(
     input_path: Optional[str] = None,
     *,
     image_url: Optional[str] = None,
-    prompt: Optional[str] = None,
-    model: Optional[str] = None,
-    max_tokens: Optional[int] = None,
     path_authority=None,
 ) -> dict:
-    """Describe/inspect an image via a multimodal /chat/completions call.
+    """Validate one vision source and return its request-ready image URL.
 
-    The image is a local `input_path` (sent as a base64 data: URL) or an
-    `image_url` passed through verbatim -- exactly one of the two. The model
-    must be vision-capable: an explicit non-vision `model` is rejected
-    client-side (the API would reject the image content anyway); when `model`
-    is omitted the default-trait text model is used if it advertises
-    supportsVision, else the first catalog model that does. Cheap relative to
-    media generation, so it is not spend-gated. Needs the `[openai]` extra.
+    Local paths cross the same authority, size, and signature boundary as the
+    delegated vision path, then become a bounded data URL.  Keeping this step
+    separate lets the agent loop attach the exact same authorized image to its
+    active frontend model without buying a second completion.
     """
     if bool(input_path) == bool(image_url):
         return _err("vision: exactly one of input_path or image_url is required")
@@ -753,11 +746,44 @@ def vision_tool(
         if isinstance(resolved, dict):
             return resolved
         p, mime = resolved
-        url = _shared.encode_data_url(
+        image_url = _shared.encode_data_url(
             p, default_mime="image/png", detected_mime=mime
         )
-    else:
-        url = image_url
+
+    return {"status": "ok", "image_url": image_url}
+
+
+def vision_tool(
+    client,
+    input_path: Optional[str] = None,
+    *,
+    image_url: Optional[str] = None,
+    prompt: Optional[str] = None,
+    model: Optional[str] = None,
+    max_tokens: Optional[int] = None,
+    mode: Optional[str] = None,
+    path_authority=None,
+) -> dict:
+    """Describe/inspect an image via a delegated multimodal completion.
+
+    The image is a local `input_path` (sent as a base64 data: URL) or an
+    `image_url` passed through verbatim -- exactly one of the two. The model
+    must be vision-capable: an explicit non-vision `model` is rejected
+    client-side (the API would reject the image content anyway); when `model`
+    is omitted the default-trait text model is used if it advertises
+    supportsVision, else the first catalog model that does. Cheap relative to
+    media generation, so it is not spend-gated. Needs the `[openai]` extra.
+
+    ``mode`` is accepted so ``defaults.vision.mode`` participates in the shared
+    tool-default allowlist.  The in-process agent wrapper consumes it before
+    reaching this delegated implementation.
+    """
+    prepared = prepare_vision_input(
+        input_path, image_url=image_url, path_authority=path_authority
+    )
+    if prepared.get("status") != "ok":
+        return prepared
+    url = prepared["image_url"]
 
     openai = _openai.import_openai("vision")  # stderr hint if missing
     if openai is None:

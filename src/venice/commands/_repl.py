@@ -411,6 +411,7 @@ def _turn(oai, openai, chat, text, messages, gen_kwargs, state, args) -> bool:
                     ledger=ledger,
                     steer_drain=steer_drain,
                     parallel=bool(getattr(args, "parallel", None)),  # #52
+                    models=state.get("models"),
                 )
         else:
             _t0 = time.monotonic()
@@ -702,6 +703,7 @@ def run(args, oai, openai, client, models, model, initial=None, *,
             cap = session.max_tool_calls
         state = {
             "model": model,
+            "models": models,
             "tools": tools,
             "tools_on": tools_on,
             "yes": bool(getattr(args, "yes", False)),  # /auto and /manual flip this

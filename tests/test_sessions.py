@@ -114,6 +114,21 @@ class TestStore(_Base):
             "provider state \u2603",
         )
 
+    def test_native_vision_message_round_trips_for_reinspection(self):
+        content = [
+            {"type": "text", "text": "Inspect the alignment"},
+            {"type": "image_url", "image_url": {
+                "url": "data:image/png;base64,iVBORw0KGgo=",
+            }},
+        ]
+        sess = self._mk(messages=[
+            {"role": "user", "content": "look at the screenshot"},
+            {"role": "user", "content": content},
+        ])
+        S.save(sess)
+        got = S.load(sess.id, "chat")
+        self.assertEqual(got.messages[1]["content"], content)
+
     def test_envelope_has_version_and_no_key(self):
         sess = self._mk()
         path = S.save(sess)

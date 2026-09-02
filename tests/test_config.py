@@ -738,10 +738,12 @@ class TestExplicitConfigEnrollment(unittest.TestCase):
             by_section.setdefault(spec["section"], set()).update(
                 _optional_dests(parsers[name])
             )
-        # `browser` is compatibility/tool-only while the CLI rail is disabled.
-        self.assertEqual(set(uc._COMMAND_MAP) - set(by_section), {"browser"})
+        # `browser` and `vision` are tool-only sections rather than top-level
+        # command parsers.
+        tool_only = {"browser", "vision"}
+        self.assertEqual(set(uc._COMMAND_MAP) - set(by_section), tool_only)
         for section, rows in uc._COMMAND_MAP.items():
-            if section == "browser":
+            if section in tool_only:
                 continue
             for key, (dest, _coerce) in rows.items():
                 with self.subTest(section=section, key=key):
@@ -2016,6 +2018,36 @@ class TestConfigDefaultsFor(unittest.TestCase):
         fetch = uc.config_defaults_for("browser", _mcp.web_fetch_tool, doc)
         self.assertEqual(fetch, {"timeout": 10, "max_bytes": 5})
         self.assertNotIn("wait_ms", fetch)           # web_fetch takes no wait_ms
+
+    def test_vision_policy_is_allowlisted_coerced_and_signature_gated(self):
+        from venice.commands import _mcp
+        doc = {"defaults": {"vision": {
+            "mode": "native", "model": "qwen-vl", "max_tokens": "64",
+            "prompt": "not a standing preference",
+        }}}
+        sources = {}
+        out = uc.config_defaults_for(
+            "vision", _mcp.vision_tool, doc, sources=sources
+        )
+        self.assertEqual(out, {
+            "mode": "native", "model": "qwen-vl", "max_tokens": 64,
+        })
+        self.assertEqual(sources, {
+            "mode": "defaults.vision.mode",
+            "model": "defaults.vision.model",
+            "max_tokens": "defaults.vision.max_tokens",
+        })
+
+    def test_invalid_vision_mode_is_ignored(self):
+        from venice.commands import _mcp
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            out = uc.config_defaults_for(
+                "vision", _mcp.vision_tool,
+                {"defaults": {"vision": {"mode": "maybe"}}},
+            )
+        self.assertEqual(out, {})
+        self.assertIn("ignoring invalid config default mode='maybe'", err.getvalue())
 
 
 if __name__ == "__main__":

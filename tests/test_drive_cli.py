@@ -320,6 +320,55 @@ class TestDriveCharge(_DriveCase):
         self.assertEqual(result["name"], "venice_image")
         self.assertEqual(json.loads(result["content"])["status"], "ok")
 
+    @needs_openai
+    def test_native_vision_reaches_frontend_without_delegate_completion(self):
+        self.api.set_models("text", [{
+            "id": "vision-front",
+            "type": "text",
+            "model_spec": {
+                "traits": ["default"],
+                "capabilities": {
+                    "supportsFunctionCalling": True,
+                    "supportsVision": True,
+                },
+            },
+        }])
+        (self.project / "shot.png").write_bytes(
+            b"\x89PNG\r\n\x1a\n" + b"drive-native-vision"
+        )
+        self.api.reply_tool_call("venice_vision", {
+            "input_path": "shot.png",
+            "prompt": "Inspect the alignment",
+        })
+        self.api.reply("NATIVE-VISION-COMPLETE")
+
+        cp = self.run_cli(
+            "chat", "inspect the screenshot", "--tools", "--tool", "venice_vision",
+            "--json",
+        )
+        self.assertEqual(cp.returncode, 0, cp.stderr)
+        self.assertIn('"final": "NATIVE-VISION-COMPLETE"', cp.stdout)
+
+        self.assertEqual(
+            self.api.paths,
+            ["/models", "/chat/completions", "/chat/completions"],
+        )
+        bodies = self.api.bodies("/chat/completions")
+        self.assertEqual(len(bodies), 2)  # no delegated vision completion
+        assistant, result, attached = bodies[1]["messages"][-3:]
+        self.assertEqual(assistant["role"], "assistant")
+        self.assertEqual(result["role"], "tool")
+        self.assertEqual(json.loads(result["content"])["mode"], "native")
+        self.assertEqual(attached["role"], "user")
+        self.assertEqual(attached["content"][0], {
+            "type": "text", "text": "Inspect the alignment",
+        })
+        self.assertTrue(
+            attached["content"][1]["image_url"]["url"].startswith(
+                "data:image/png;base64,"
+            )
+        )
+
 
 # --------------------------------------------------------------------------
 # C'. the same gates with no pty at all
