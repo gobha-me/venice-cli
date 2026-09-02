@@ -2,8 +2,8 @@
 
 Direction A of the MCP epic (#16 / #14): venice is the *callee*. It speaks MCP over
 stdio -- JSON-RPC frames on stdout -- exposing image/sfx/music/tts/upscale/bg-remove/
-chat as MCP tools, so a host (Claude Code, or the #15 host) calls them instead of
-shelling out to the CLI.
+chat/vision as MCP tools, so a host (Claude Code, or the #15 host) calls them
+instead of shelling out to the CLI.
 
 The `mcp` SDK is imported lazily (behind the `[mcp]` extra, Python >=3.10) so the
 base stdlib-only CLI and `venice --help` keep working without it -- the same
@@ -26,11 +26,20 @@ def register(subparsers) -> None:
         help="Run an MCP server (stdio) exposing venice tools.",
         description=(
             "Speaks MCP over stdio: exposes venice image/sfx/music/tts/upscale/"
-            "bg-remove/chat as MCP tools. Needs the [mcp] extra (Python >=3.10): "
+            "bg-remove/chat/vision as MCP tools. Needs the [mcp] extra "
+            "(Python >=3.10): "
             'pip install "venice-cli[mcp]". Attach it with, e.g., '
             "`claude mcp add venice -- venice mcp-serve`. Spend on paid tools is "
             "gated: costs over VENICE_MCP_MAX_SPEND (default $0.10) need confirm=true. "
-            "Output files land in VENICE_MCP_OUTPUT_DIR (default: cwd)."
+            "Generated files land in VENICE_MCP_OUTPUT_DIR (default: cwd)."
+        ),
+    )
+    p.add_argument(
+        "--host-image-content",
+        action="store_true",
+        help=(
+            "declare that this stdio host delivers MCP ImageContent to a "
+            "vision-capable frontend (default: text-only/delegated vision)"
         ),
     )
     p.set_defaults(handler=_run)
@@ -55,7 +64,11 @@ def _run(args) -> int:
     print("venice mcp-serve: starting stdio MCP server (Ctrl-C to stop)",
           file=sys.stderr)
     try:
-        serve(client, doc=doc)
+        serve(
+            client,
+            doc=doc,
+            host_image_content=getattr(args, "host_image_content", False),
+        )
     except KeyboardInterrupt:
         return 130
     return 0
