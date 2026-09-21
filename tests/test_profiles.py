@@ -88,6 +88,8 @@ class TestProfileBuilders(unittest.TestCase):
         out = code.PROFILE.build_system(_code_args(system=None), "/repo", [])
         self.assertEqual(out, base)
         self.assertNotIn("Project-specific instructions", out)
+        self.assertIn("use venice_vision when available", out)
+        self.assertIn("separate delegate", out)
 
 
 if __name__ == "__main__":

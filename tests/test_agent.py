@@ -3056,6 +3056,26 @@ class TestNativeVisionDispatch(unittest.TestCase):
         self.assertEqual(props["mode"]["enum"], ["auto", "native", "delegate"])
         self.assertNotIn("runtime", props)
 
+    def test_route_progress_distinguishes_current_context_from_delegate(self):
+        native = _agent._ToolOutcome({
+            "status": "ok", "mode": "native", "model": "frontend",
+        })
+        self.assertEqual(
+            _agent._vision_route_progress("venice_vision", native),
+            "  ↳ vision: native via frontend (image added to active model context)",
+        )
+        self.assertEqual(
+            _agent._vision_route_progress("venice_vision", {
+                "status": "ok", "mode": "delegate", "model": "vision-model",
+                "input_path": "secret-render-path.png",
+            }),
+            "  ↳ vision: delegated via vision-model (separate completion)",
+        )
+        self.assertIsNone(_agent._vision_route_progress(
+            "venice_vision", {"status": "error", "mode": "native"},
+        ))
+        self.assertIsNone(_agent._vision_route_progress("read_file", native))
+
     def test_auto_known_capable_attaches_image_without_delegate(self):
         with mock.patch.object(
             _agent._mcp, "prepare_vision_input",
@@ -3174,7 +3194,7 @@ class TestNativeVisionDispatch(unittest.TestCase):
         def vision(arguments, *, confirm=False, runtime=None):
             self.assertEqual(runtime.model, "frontend")
             return _agent._ToolOutcome(
-                {"status": "ok", "mode": "native"},
+                {"status": "ok", "mode": "native", "model": "frontend"},
                 ({"role": "user", "content": [{"type": "text", "text": "image"}]},),
             )
 
@@ -3191,8 +3211,10 @@ class TestNativeVisionDispatch(unittest.TestCase):
         ]), FakeToolCompletion("done")]
         fake, calls = _fake_oai(seq)
         messages = [{"role": "user", "content": "go"}]
+        err = io.StringIO()
+        err.isatty = lambda: True
         with mock.patch.object(sys, "stdout", io.StringIO()), \
-             mock.patch.object(sys, "stderr", io.StringIO()):
+             mock.patch.object(sys, "stderr", err):
             _agent.run_loop(
                 fake, "frontend", messages, {}, tools,
                 max_tool_calls=0, yes=True, json_out=False,
@@ -3202,6 +3224,10 @@ class TestNativeVisionDispatch(unittest.TestCase):
         self.assertEqual(roles, ["assistant", "tool", "tool", "user"])
         self.assertEqual(calls[1]["messages"][-4]["tool_call_id"], "c1")
         self.assertEqual(calls[1]["messages"][-3]["tool_call_id"], "c2")
+        self.assertIn(
+            "vision: native via frontend (image added to active model context)",
+            err.getvalue(),
+        )
 
 
 class TestAsyncJobSchemas(unittest.TestCase):
@@ -3808,11 +3834,11 @@ class TestParallelDispatch(unittest.TestCase):
         self.assertFalse(_agent._is_parallelizable(mk(_agent.MERGE_TOOL_NAME)))
         self.assertFalse(_agent._is_parallelizable(mk("write_file")))
 
-    def _run(self, seq, tools, *, max_tool_calls, parallel, ledger=None):
+    def _run(self, seq, tools, *, max_tool_calls, parallel, ledger=None, stderr=None):
         fake, calls = _fake_oai(seq)
         messages = [{"role": "user", "content": "go"}]
         with mock.patch.object(sys, "stdout", io.StringIO()), \
-             mock.patch.object(sys, "stderr", io.StringIO()):
+             mock.patch.object(sys, "stderr", stderr or io.StringIO()):
             _agent.run_loop(fake, "m", messages, {}, tools,
                             max_tool_calls=max_tool_calls, yes=True, json_out=False,
                             parallel=parallel, ledger=ledger)
@@ -3884,7 +3910,7 @@ class TestParallelDispatch(unittest.TestCase):
     def test_mixed_batch_commits_native_followup_after_every_tool_result(self):
         def vision(arguments, *, confirm=False, runtime=None):
             return _agent._ToolOutcome(
-                {"status": "ok", "mode": "native"},
+                {"status": "ok", "mode": "native", "model": "m"},
                 ({"role": "user", "content": [
                     {"type": "text", "text": "image"},
                 ]},),
@@ -3901,9 +3927,11 @@ class TestParallelDispatch(unittest.TestCase):
             self._spawn_call("c1", "worker"),
             _FnCall("c2", "venice_vision", "{}"),
         ])
+        err = io.StringIO()
+        err.isatty = lambda: True
         _messages, calls = self._run(
             [turn, FakeToolCompletion("done")], tools,
-            max_tool_calls=0, parallel=True,
+            max_tool_calls=0, parallel=True, stderr=err,
         )
         self.assertEqual(
             [m["role"] for m in calls[1]["messages"][-5:-1]],
@@ -3912,6 +3940,10 @@ class TestParallelDispatch(unittest.TestCase):
         self.assertEqual(
             [m["tool_call_id"] for m in calls[1]["messages"][-4:-2]],
             ["c1", "c2"],
+        )
+        self.assertIn(
+            "vision: native via m (image added to active model context)",
+            err.getvalue(),
         )
 
     def test_budget_marks_overflow_not_executed_without_running(self):

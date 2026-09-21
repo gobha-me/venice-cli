@@ -274,10 +274,15 @@ def read_file(roots, path, *, offset=None, limit=None) -> dict:
     data, text = _index.read_text(Path(real))
     if data is None:
         return _err(f"cannot read {rel}")
+    if text is None:
+        if _shared._sniff_media_mime(data, "image") is not None:
+            return _err(
+                f"{rel} is an image; inspect it with venice_vision using "
+                f"input_path={rel!r}"
+            )
+        return _err(f"{rel} is binary or not UTF-8; not shown")
     if len(data) > MAX_READ_BYTES:
         return _err(f"{rel} is too large ({len(data)} bytes > {MAX_READ_BYTES})")
-    if text is None:
-        return _err(f"{rel} is binary or not UTF-8; not shown")
     lines = text.splitlines()
     total = len(lines)
     start = max(int(offset) - 1, 0) if offset else 0
@@ -879,7 +884,8 @@ def code_tools(
     tools = [
         _agent.Tool("read_file",
                     "Read a UTF-8 text file inside the project root and return its "
-                    "lines. Use before editing. Read-only.",
+                    "lines. Use before editing; use venice_vision for image files. "
+                    "Read-only.",
                     _READ_SCHEMA, free(read_file), paid=False,
                     category="fs", tags=("read",)),
         _agent.Tool("list_dir",
