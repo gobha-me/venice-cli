@@ -22,6 +22,7 @@ def _models_payload(type_):
         "music": ["elevenlabs-sound-effects-v2", "mmaudio-v2-text-to-audio"],
         "asr": ["nvidia-parakeet-tdt-0.6b-v3"],
         "inpaint": ["flux-dev-inpainting"],
+        "decision": ["decision-router-v1"],
         "future-media": ["tomorrows-model"],
         "alpha-future": ["next-weeks-model"],
     }
@@ -70,13 +71,13 @@ def _fake_urlopen_factory(calls=None):
 
 class TestModels(unittest.TestCase):
 
-    def test_parser_accepts_current_asr_and_inpaint_types(self):
+    def test_parser_accepts_current_catalog_types(self):
         from venice.commands import models
 
         parser = argparse.ArgumentParser()
         subparsers = parser.add_subparsers(dest="command")
         models.register(subparsers)
-        for model_type in ("asr", "inpaint"):
+        for model_type in ("asr", "inpaint", "decision"):
             with self.subTest(model_type=model_type):
                 args = parser.parse_args(["models", "--type", model_type])
                 self.assertEqual(args.type, model_type)
@@ -97,9 +98,11 @@ class TestModels(unittest.TestCase):
         self.assertIn("music", out)
         self.assertIn("asr", out)
         self.assertIn("inpaint", out)
+        self.assertIn("decision", out)
         self.assertIn("future-media", out)
         self.assertRegex(out, r"(?m)^asr\s+1$")
         self.assertRegex(out, r"(?m)^inpaint\s+1$")
+        self.assertRegex(out, r"(?m)^decision\s+1$")
         self.assertIn("TOTAL", out)
 
     def test_type_filter_lists_ids(self):
@@ -121,6 +124,7 @@ class TestModels(unittest.TestCase):
         expected = {
             "asr": "nvidia-parakeet-tdt-0.6b-v3",
             "inpaint": "flux-dev-inpainting",
+            "decision": "decision-router-v1",
         }
         for model_type, model_id in expected.items():
             with self.subTest(model_type=model_type):
@@ -148,6 +152,7 @@ class TestModels(unittest.TestCase):
         by_type = json.loads(buf.getvalue())
         self.assertEqual(by_type["asr"][0]["id"], "nvidia-parakeet-tdt-0.6b-v3")
         self.assertEqual(by_type["inpaint"][0]["id"], "flux-dev-inpainting")
+        self.assertEqual(by_type["decision"][0]["id"], "decision-router-v1")
         self.assertEqual(by_type["future-media"][0]["id"], "tomorrows-model")
         self.assertEqual(by_type["code"][0]["id"], "zai-org-glm-5-1")
         self.assertEqual(list(by_type)[-2:], ["alpha-future", "future-media"])
@@ -211,6 +216,7 @@ class TestModels(unittest.TestCase):
         for slug, model_type in (
             ("nvidia-parakeet-tdt-0.6b-v3", "asr"),
             ("flux-dev-inpainting", "inpaint"),
+            ("decision-router-v1", "decision"),
         ):
             with self.subTest(model_type=model_type):
                 calls = []

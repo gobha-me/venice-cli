@@ -61,6 +61,22 @@
       "operation_id": "createTranscription"
     },
     {
+      "key": "POST /audio/voice-changer/complete",
+      "operation_id": "completeVoiceChanger"
+    },
+    {
+      "key": "POST /audio/voice-changer/queue",
+      "operation_id": "queueVoiceChanger"
+    },
+    {
+      "key": "POST /audio/voice-changer/quote",
+      "operation_id": "quoteVoiceChanger"
+    },
+    {
+      "key": "POST /audio/voice-changer/retrieve",
+      "operation_id": "retrieveVoiceChanger"
+    },
+    {
       "key": "POST /audio/voices",
       "operation_id": "createClonedVoice"
     },
@@ -117,6 +133,10 @@
       "operation_id": "cryptoRpcProxy"
     },
     {
+      "key": "POST /decisions",
+      "operation_id": "createDecision"
+    },
+    {
       "key": "POST /embeddings",
       "operation_id": "createEmbedding"
     },
@@ -163,6 +183,10 @@
     {
       "key": "POST /responses",
       "operation_id": "createResponse"
+    },
+    {
+      "key": "POST /systemone",
+      "operation_id": "createDecisionSystemOne"
     },
     {
       "key": "POST /video/complete",
@@ -216,6 +240,7 @@
               {
                 "enum": [
                   "asr",
+                  "decision",
                   "embedding",
                   "image",
                   "inpaint",
@@ -476,6 +501,12 @@
         "application/json": {
           "additionalProperties": false,
           "properties": {
+            "anon_user_id": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[\\x20-\\x7E]+$",
+              "type": "string"
+            },
             "fallbacks": {
               "items": {
                 "properties": {
@@ -1117,6 +1148,9 @@
                   ],
                   "type": "string"
                 },
+                "enabled": {
+                  "type": "boolean"
+                },
                 "summary": {
                   "enum": [
                     "auto",
@@ -1510,39 +1544,66 @@
       "parameters": [],
       "request_bodies": {
         "application/json": {
-          "additionalProperties": false,
-          "properties": {
-            "image": {
-              "anyOf": [
-                {},
-                {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "anon_user_id": {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "pattern": "^[\\x20-\\x7E]+$",
+                  "type": "string"
+                },
+                "image": {
+                  "minLength": 1,
+                  "pattern": "\\S",
                   "type": "string"
                 }
-              ]
+              },
+              "required": [
+                "image"
+              ],
+              "type": "object"
             },
-            "image_url": {
-              "format": "uri",
-              "type": "string"
+            {
+              "additionalProperties": false,
+              "properties": {
+                "anon_user_id": {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "pattern": "^[\\x20-\\x7E]+$",
+                  "type": "string"
+                },
+                "image_url": {
+                  "format": "uri",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "image_url"
+              ],
+              "type": "object"
             }
-          },
-          "type": "object"
+          ]
         },
         "multipart/form-data": {
           "additionalProperties": false,
           "properties": {
-            "image": {
-              "anyOf": [
-                {},
-                {
-                  "type": "string"
-                }
-              ]
+            "anon_user_id": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[\\x20-\\x7E]+$",
+              "type": "string"
             },
-            "image_url": {
-              "format": "uri",
+            "image": {
+              "format": "binary",
+              "minLength": 1,
               "type": "string"
             }
           },
+          "required": [
+            "image"
+          ],
           "type": "object"
         }
       }
@@ -1554,17 +1615,24 @@
         "application/json": {
           "additionalProperties": false,
           "properties": {
+            "anon_user_id": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[\\x20-\\x7E]+$",
+              "type": "string"
+            },
             "aspect_ratio": {
               "enum": [
-                "auto",
-                123,
-                1269,
-                182,
-                184,
-                245,
-                556,
-                61,
-                969
+                "16:9",
+                "1:1",
+                "21:9",
+                "2:3",
+                "3:2",
+                "3:4",
+                "4:3",
+                "4:5",
+                "9:16",
+                "auto"
               ],
               "type": "string"
             },
@@ -1596,12 +1664,15 @@
                 "firered-image-edit",
                 "flux-2-max-edit",
                 "gpt-image-1-5-edit",
+                "gpt-image-2-5-flare-edit",
+                "gpt-image-2-5-sunburst-edit",
                 "gpt-image-2-edit",
                 "grok-imagine-edit",
                 "grok-imagine-image-2-0-edit",
                 "grok-imagine-quality-edit",
                 "luma-uni-1-edit",
                 "luma-uni-1-max-edit",
+                "muse-image-edit",
                 "nano-banana-2-edit",
                 "nano-banana-2-lite-edit",
                 "nano-banana-pro-edit",
@@ -1649,17 +1720,24 @@
         "multipart/form-data": {
           "additionalProperties": false,
           "properties": {
+            "anon_user_id": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[\\x20-\\x7E]+$",
+              "type": "string"
+            },
             "aspect_ratio": {
               "enum": [
-                "auto",
-                123,
-                1269,
-                182,
-                184,
-                245,
-                556,
-                61,
-                969
+                "16:9",
+                "1:1",
+                "21:9",
+                "2:3",
+                "3:2",
+                "3:4",
+                "4:3",
+                "4:5",
+                "9:16",
+                "auto"
               ],
               "type": "string"
             },
@@ -1691,12 +1769,15 @@
                 "firered-image-edit",
                 "flux-2-max-edit",
                 "gpt-image-1-5-edit",
+                "gpt-image-2-5-flare-edit",
+                "gpt-image-2-5-sunburst-edit",
                 "gpt-image-2-edit",
                 "grok-imagine-edit",
                 "grok-imagine-image-2-0-edit",
                 "grok-imagine-quality-edit",
                 "luma-uni-1-edit",
                 "luma-uni-1-max-edit",
+                "muse-image-edit",
                 "nano-banana-2-edit",
                 "nano-banana-2-lite-edit",
                 "nano-banana-pro-edit",
@@ -1759,6 +1840,12 @@
         "application/json": {
           "additionalProperties": false,
           "properties": {
+            "anon_user_id": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[\\x20-\\x7E]+$",
+              "type": "string"
+            },
             "aspect_ratio": {
               "type": "string"
             },
@@ -1901,17 +1988,24 @@
         "application/json": {
           "additionalProperties": false,
           "properties": {
+            "anon_user_id": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[\\x20-\\x7E]+$",
+              "type": "string"
+            },
             "aspect_ratio": {
               "enum": [
-                "auto",
-                123,
-                1269,
-                182,
-                184,
-                245,
-                556,
-                61,
-                969
+                "16:9",
+                "1:1",
+                "21:9",
+                "2:3",
+                "3:2",
+                "3:4",
+                "4:3",
+                "4:5",
+                "9:16",
+                "auto"
               ],
               "type": "string"
             },
@@ -1941,10 +2035,13 @@
                 "firered-image-edit",
                 "flux-2-max-edit",
                 "gpt-image-1-5-edit",
+                "gpt-image-2-5-flare-edit",
+                "gpt-image-2-5-sunburst-edit",
                 "gpt-image-2-edit",
                 "grok-imagine-edit",
                 "grok-imagine-image-2-0-edit",
                 "grok-imagine-quality-edit",
+                "muse-image-edit",
                 "nano-banana-2-edit",
                 "nano-banana-2-lite-edit",
                 "nano-banana-pro-edit",
@@ -1999,17 +2096,24 @@
         },
         "multipart/form-data": {
           "properties": {
+            "anon_user_id": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[\\x20-\\x7E]+$",
+              "type": "string"
+            },
             "aspect_ratio": {
               "enum": [
-                "auto",
-                123,
-                1269,
-                182,
-                184,
-                245,
-                556,
-                61,
-                969
+                "16:9",
+                "1:1",
+                "21:9",
+                "2:3",
+                "3:2",
+                "3:4",
+                "4:3",
+                "4:5",
+                "9:16",
+                "auto"
               ],
               "type": "string"
             },
@@ -2032,10 +2136,13 @@
                 "firered-image-edit",
                 "flux-2-max-edit",
                 "gpt-image-1-5-edit",
+                "gpt-image-2-5-flare-edit",
+                "gpt-image-2-5-sunburst-edit",
                 "gpt-image-2-edit",
                 "grok-imagine-edit",
                 "grok-imagine-image-2-0-edit",
                 "grok-imagine-quality-edit",
+                "muse-image-edit",
                 "nano-banana-2-edit",
                 "nano-banana-2-lite-edit",
                 "nano-banana-pro-edit",
@@ -2176,19 +2283,19 @@
           "properties": {
             "aspect_ratio": {
               "enum": [
+                "16:9",
+                "1:1",
+                "21:9",
+                "2:3",
+                "3:2",
+                "3:4",
+                "4:3",
+                "4:5",
+                "5:4",
+                "9:16",
+                "9:21",
                 "adaptive",
-                "auto",
-                123,
-                1269,
-                182,
-                184,
-                243,
-                245,
-                304,
-                556,
-                561,
-                61,
-                969
+                "auto"
               ],
               "type": "string"
             },
@@ -2197,6 +2304,41 @@
             },
             "audio_url": {
               "type": "string"
+            },
+            "camera_trajectory": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "azimuth": {
+                    "type": "number"
+                  },
+                  "distance": {
+                    "exclusiveMinimum": true,
+                    "minimum": 0,
+                    "type": "number"
+                  },
+                  "elevation": {
+                    "maximum": 90,
+                    "minimum": -90,
+                    "type": "number"
+                  },
+                  "time": {
+                    "maximum": 1,
+                    "minimum": 0,
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "azimuth",
+                  "distance",
+                  "elevation",
+                  "time"
+                ],
+                "type": "object"
+              },
+              "maxItems": 12,
+              "minItems": 2,
+              "type": "array"
             },
             "compression": {
               "maximum": 1,
@@ -2417,14 +2559,17 @@
             },
             "resolution": {
               "enum": [
+                "1080P",
                 "1080p",
                 "1440p",
                 "1x",
                 "2160p",
                 "256p",
                 "2K",
+                "2k",
                 "2x",
                 "360p",
+                "480P",
                 "480p",
                 "4k",
                 "4x",
@@ -2479,8 +2624,7 @@
           },
           "required": [
             "duration",
-            "model",
-            "prompt"
+            "model"
           ],
           "type": "object"
         }
@@ -2494,19 +2638,19 @@
           "properties": {
             "aspect_ratio": {
               "enum": [
+                "16:9",
+                "1:1",
+                "21:9",
+                "2:3",
+                "3:2",
+                "3:4",
+                "4:3",
+                "4:5",
+                "5:4",
+                "9:16",
+                "9:21",
                 "adaptive",
-                "auto",
-                123,
-                1269,
-                182,
-                184,
-                243,
-                245,
-                304,
-                556,
-                561,
-                61,
-                969
+                "auto"
               ],
               "type": "string"
             },
@@ -2564,14 +2708,17 @@
             },
             "resolution": {
               "enum": [
+                "1080P",
                 "1080p",
                 "1440p",
                 "1x",
                 "2160p",
                 "256p",
                 "2K",
+                "2k",
                 "2x",
                 "360p",
+                "480P",
                 "480p",
                 "4k",
                 "4x",
@@ -2642,8 +2789,8 @@
     }
   },
   "source": {
-    "sha256": "0daa64c8907430bfafc2aea862eaa161a6c77c9bb3a5b4edb2e517ae95532b33",
+    "sha256": "330c28802c27b5222fe3849aeaa78bc9ac674e66a714e71f6e28e5f61605bc60",
     "url": "https://docs.venice.ai/swagger.yaml",
-    "version": "20260826.105305"
+    "version": "20260918.184256"
   }
 }
