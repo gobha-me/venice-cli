@@ -120,17 +120,21 @@ class Budget:
     `last_prompt_tokens` is filled in from a response's `usage` block via
     :meth:`observe` -- the server's own count of the prompt we just sent,
     which is the ground truth the heuristic only approximates.
+    `last_prompt_estimate` binds that count to the exact message snapshot sent,
+    so later message growth can be added to the measured baseline.
     """
 
     threshold_tokens: int = DEFAULT_THRESHOLD_TOKENS
     keep_turns: int = DEFAULT_KEEP_TURNS
     last_prompt_tokens: Optional[int] = None
+    last_prompt_estimate: Optional[int] = None
+    last_error: Optional[str] = None
     loss_policy: str = "aggressive"
     archive: Optional[_context_archive.ContextArchive] = None
     protected_system_messages: Optional[int] = None
 
-    def observe(self, usage) -> None:
-        """Record prompt tokens from a response's `usage` (dict or SDK obj)."""
+    def observe(self, usage, messages: Optional[List[dict]] = None) -> None:
+        """Record prompt tokens and the message snapshot that produced them."""
         if usage is None:
             return
         if hasattr(usage, "model_dump"):
@@ -139,19 +143,34 @@ class Budget:
             pt = usage.get("prompt_tokens")
             if isinstance(pt, (int, float)):
                 self.last_prompt_tokens = int(pt)
+                self.last_prompt_estimate = (
+                    estimate_tokens(messages) if messages is not None else None
+                )
 
     def over(self, messages: List[dict]) -> bool:
         """True when the history has crossed the compaction threshold.
 
-        Prefers the last observed server count when available (it's exact and
-        already includes system/tool overhead); else falls back to the
-        character heuristic.
+        The last observed server count is exact for its request snapshot. Add
+        the heuristic change since that snapshot so assistant replies, tool
+        results, and new user turns cannot remain invisible until restart.
         """
         if self.threshold_tokens <= 0:
             return False  # auto-compact disabled
-        if self.last_prompt_tokens is not None:
-            return self.last_prompt_tokens >= self.threshold_tokens
-        return estimate_tokens(messages) >= self.threshold_tokens
+        current_estimate = estimate_tokens(messages)
+        if self.last_prompt_tokens is None:
+            effective_tokens = current_estimate
+        elif self.last_prompt_estimate is None:
+            # Compatibility for restored/tests-created budgets without a bound
+            # snapshot: neither known value may safely hide the other.
+            effective_tokens = max(self.last_prompt_tokens, current_estimate)
+        else:
+            effective_tokens = max(
+                0,
+                self.last_prompt_tokens
+                + current_estimate
+                - self.last_prompt_estimate,
+            )
+        return effective_tokens >= self.threshold_tokens
 
 
 def budget_from_args(args, archive=None) -> Optional["Budget"]:
@@ -329,12 +348,16 @@ def compact_messages(
     success rather than compaction success: an empty summary still spent the tokens.
 
     #116: `budget` is now MUTATED, not merely read -- a successful compaction clears
-    `last_prompt_tokens`, which the same argument moves in here. It was hand-copied at
-    both call sites, so a third one added later would have inherited the event for free
-    and silently missed the reset, leaving `Budget.over` reading a count larger than the
-    history it now describes -- i.e. re-firing compaction immediately, a sawtooth #99's
-    trace would show and nothing would prevent.
+    the observed prompt baseline and its bound estimate. That reset belongs here rather
+    than being hand-copied at each call site; otherwise a new site can leave
+    `Budget.over` reading observation state for history that no longer exists and
+    immediately re-fire compaction.
     """
+    if budget is not None:
+        budget.last_error = None
+    if archive is not None:
+        archive.last_error = None
+
     split = split_for_compaction(
         messages, keep_turns, protected_system_messages=protected_system_messages
     )
@@ -349,12 +372,15 @@ def compact_messages(
     staged = []
     if loss_policy == "evidence":
         if archive is None:
+            if budget is not None:
+                budget.last_error = "evidence mode requires a context archive"
             return False
-        archive.last_error = None
         try:
             staged = archive.stage(prefix)
         except _context_archive.ArchiveError as e:
             archive.last_error = str(e)
+            if budget is not None:
+                budget.last_error = archive.last_error
             return False
 
     # #128: compaction is a deliberately fresh summarization conversation. Reusing
@@ -377,6 +403,8 @@ def compact_messages(
         # Nothing recorded on this path, deliberately: there is no usage block to read,
         # and the SDK may have retried or never reached the server at all. `record()`'s
         # row-on-every-path rule is about calls the caller KNOWS completed.
+        if budget is not None:
+            budget.last_error = "summary request failed"
         return False  # compaction is best-effort; the run continues un-compacted
     # #101: billed on API SUCCESS, not on compaction success -- note this sits ABOVE the
     # empty-summary return below. The call has completed and the tokens are spent
@@ -398,6 +426,8 @@ def compact_messages(
     if getattr(resp, "choices", None):
         summary = (resp.choices[0].message.content or "").strip()
     if not summary:
+        if budget is not None:
+            budget.last_error = "summarizer returned an empty response"
         return False
 
     # #99: measure BEFORE the rewrite below, then record AFTER it, and only on this
@@ -449,7 +479,8 @@ def compact_messages(
     # the `if ledger is not None` block one line up: a `/compact` in a session with a
     # budget and no ledger still has a stale count to clear.
     if budget is not None:
-        budget.last_prompt_tokens = None  # stale after compaction
+        budget.last_prompt_tokens = None  # observation is stale after compaction
+        budget.last_prompt_estimate = None
     return True
 
 
@@ -465,7 +496,7 @@ def maybe_compact(oai, model: str, messages: List[dict],
 
     #99/#116: `ledger` and `budget` are forwarded, not consumed here. Everything that
     must happen when a compaction succeeds -- the event, the bill, and clearing the now
-    stale observed prompt-token count -- belongs to `compact_messages`, because this
+    stale prompt observation -- belongs to `compact_messages`, because this
     gate is only three of the four compaction sites and `/compact` calls straight past
     it. `on_compact` stays here: it is presentation (the REPL and `run_loop` word it
     differently), not an invariant.
@@ -480,9 +511,11 @@ def maybe_compact(oai, model: str, messages: List[dict],
         loss_policy=budget.loss_policy, archive=budget.archive,
         protected_system_messages=budget.protected_system_messages,
     ):
-        if (on_blocked is not None and budget.archive is not None
-                and budget.archive.last_error):
-            on_blocked(budget.archive.last_error)
+        reason = budget.last_error
+        if reason is None and budget.archive is not None:
+            reason = budget.archive.last_error
+        if on_blocked is not None and reason:
+            on_blocked(reason)
         return False
     if on_compact is not None:
         on_compact(before, len(messages))

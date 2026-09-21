@@ -3814,6 +3814,8 @@ def run_loop(
                 tool_choice="none",
                 **base_kwargs,
             )
+        if budget is not None:
+            budget.observe(getattr(resp, "usage", None), messages)
         if ledger is not None:
             # #99: caller-stamped, like every other window in this file. NOT added to
             # `elapsed_seconds` -- that is `record_turn`'s job at the command level, and
@@ -3877,7 +3879,7 @@ def run_loop(
                 **base_kwargs,
             )
         if budget is not None:
-            budget.observe(getattr(resp, "usage", None))
+            budget.observe(getattr(resp, "usage", None), messages)
         if ledger is not None:
             # #99: see `_force_final` -- caller-stamped, and deliberately NOT folded into
             # `elapsed_seconds`. Unlike the per-tool windows these are strictly serial on

@@ -433,7 +433,7 @@ def _turn(oai, openai, chat, text, messages, gen_kwargs, state, args) -> bool:
                 oai, chat, state["model"], messages, gen_kwargs,
             )
             if budget is not None:
-                budget.observe(usage)
+                budget.observe(usage, messages)
             if ledger is not None:
                 # #99: `_stream_turn` drains the whole generator, so this window is
                 # time-to-LAST-token, not time-to-response like every other row. The
@@ -623,6 +623,10 @@ def _dispatch_slash(line, messages, state, args, models, oai=None, gen_kwargs=No
                 file=sys.stderr,
             )
         else:
+            budget = state.get("budget")
+            if budget is not None and budget.last_error:
+                print(f"(/compact refused: {budget.last_error})", file=sys.stderr)
+                return "continue"
             archive = state.get("archive")
             if archive is not None and archive.last_error:
                 print(f"(/compact refused: {archive.last_error})", file=sys.stderr)
