@@ -1066,6 +1066,18 @@ class TestOneShotSteering(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(self._sessions(), [])          # --ephemeral opts out
 
+    def test_execute_local_stop_skips_acceptance_call_and_is_persisted(self):
+        seq = [FakeToolCompletion("plan")]
+        with mock.patch.object(_agent, "run_loop", return_value=2):
+            rc, calls = self._run(
+                _code_args(task="do x", root=self.root, auto=True), seq,
+            )
+        self.assertEqual(rc, 2)
+        self.assertEqual(len(calls), 1)  # plan only; no acceptance request
+        with open(self._sessions()[0]) as f:
+            doc = json.load(f)
+        self.assertEqual(doc["usage"]["api_calls_total"], 1)
+
     def test_steer_deposited_at_execute_is_consumed(self):
         # A steer queued the instant the run becomes steerable (its session is first
         # saved, at Execute) must be drained at the execute loop's first checkpoint and

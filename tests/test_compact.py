@@ -4,6 +4,7 @@ Covers the pure helpers in `_compact` (token estimate, group-boundary split,
 synthetic-message shape), the best-effort `compact_messages` turn, and the
 `Budget` usage tracker. All OpenAI calls are faked -- no network, no key.
 """
+import json
 import unittest
 from unittest import mock
 
@@ -122,6 +123,34 @@ class TestEstimateTokens(unittest.TestCase):
         ])
         self.assertGreaterEqual(n, 10)
 
+    def test_request_bytes_counts_image_data_ignored_by_token_estimate(self):
+        messages = [{"role": "user", "content": [
+            {"type": "text", "text": "look"},
+            {"type": "image_url", "image_url": {
+                "url": "data:image/png;base64," + "A" * 10000,
+            }},
+        ]}]
+        self.assertLess(_compact.estimate_tokens(messages), 100)
+        self.assertGreater(_compact.estimate_request_bytes(messages), 10000)
+
+    def test_request_byte_estimate_matches_compact_json(self):
+        messages = [{
+            "role": "user",
+            "content": "quote=\" slash=\\ newline=\n snowman=☃",
+            "parts": [None, True, 17],
+        }]
+        expected = len(json.dumps(
+            messages, ensure_ascii=False, separators=(",", ":"),
+        ).encode("utf-8"))
+        self.assertEqual(_compact.estimate_request_bytes(messages), expected)
+
+    def test_request_safety_reserves_space_for_the_rest_of_the_body(self):
+        messages = [{"role": "user", "content": "x" * 100}]
+        exact = _compact.estimate_request_bytes(messages)
+        self.assertTrue(_compact.request_bytes_over(
+            messages, exact + _compact.COMPACTED_OVERHEAD_BYTES,
+        ))
+
 
 class TestBudget(unittest.TestCase):
     def test_disabled_when_threshold_nonpositive(self):
@@ -224,7 +253,11 @@ class TestCompactMessages(unittest.TestCase):
         self.assertTrue(_compact.compact_messages(
             fake, "m", msgs, keep_turns=1, loss_policy="evidence", archive=archive,
         ))
-        self.assertEqual([e["message"] for e in archive.entries], expected)
+        exact = []
+        for entry in archive.entries:
+            page = archive.read(entry["id"])
+            exact.append(json.loads(page["content"]))
+        self.assertEqual(exact, expected)
         self.assertEqual(len(calls), 1)
         self.assertEqual(msgs[1]["role"], "system")
         self.assertIn("[Archived context evidence index]", msgs[2]["content"])
@@ -245,6 +278,42 @@ class TestCompactMessages(unittest.TestCase):
         self.assertEqual(msgs, snapshot)
         self.assertEqual(archive.entries, [])
         self.assertIn("archive full", archive.last_error)
+
+    def test_byte_pressure_archives_older_images_beyond_keep_turns(self):
+        image = "data:image/png;base64," + "A" * 2000
+        msgs = [{"role": "system", "content": "sys"}]
+        for i in range(4):
+            msgs.extend([
+                {"role": "user", "content": [
+                    {"type": "text", "text": f"image {i}"},
+                    {"type": "image_url", "image_url": {"url": image + str(i)}},
+                ]},
+                {"role": "assistant", "content": f"seen {i}"},
+            ])
+        split = _compact.split_for_compaction(
+            msgs, keep_turns=4, max_live_bytes=5000,
+        )
+        self.assertIsNotNone(split)
+        prefix, tail = split
+        self.assertGreaterEqual(len(prefix), 4)
+        self.assertEqual(tail[-1]["content"], "seen 3")
+
+    def test_oversized_newest_turn_hard_blocks_without_api_call(self):
+        msgs = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "A" * 5000},
+        ]
+        archive = _context_archive.ContextArchive()
+        budget = _compact.Budget(
+            threshold_tokens=10**9, request_bytes=1000,
+            loss_policy="evidence", archive=archive,
+            protected_system_messages=1,
+        )
+        fake, calls = _fake_oai("unused")
+        self.assertFalse(_compact.maybe_compact(fake, "m", msgs, budget))
+        self.assertTrue(budget.hard_blocked)
+        self.assertEqual(calls, [])
+        self.assertIn("smaller image", budget.last_error)
 
     def test_evidence_summary_failure_is_transactional(self):
         msgs = _history(6)

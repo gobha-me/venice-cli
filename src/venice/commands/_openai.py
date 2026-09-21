@@ -14,11 +14,26 @@ catalog, so the missing-SDK path never touches the network.
 from __future__ import annotations
 
 import os
+import re
 import sys
 from typing import Optional
 
 
 _PROMPT_CACHE_KEY = "prompt_cache_key"
+_HTTP_TITLES = {
+    413: "Request Entity Too Large",
+}
+
+
+def _safe_api_error(error, status) -> str:
+    """Keep proxy HTML and unbounded response bodies out of terminal output."""
+    text = str(error).strip()
+    if re.search(r"<\s*(?:!doctype|html|head|body)\b", text, re.IGNORECASE):
+        title = _HTTP_TITLES.get(status, "HTTP error")
+        return f"HTTP {status} {title}" if isinstance(status, int) else title
+    if len(text) > 1000:
+        text = text[:997] + "..."
+    return text
 
 
 def prompt_cache_key(kwargs: Optional[dict]) -> Optional[str]:
@@ -119,7 +134,7 @@ def status_to_exit(module, e, label: str) -> int:
         print(f"{label}: connection error: {e}", file=sys.stderr)
         return 8
     status = getattr(e, "status_code", None)
-    print(f"{label}: API error: {e}", file=sys.stderr)
+    print(f"{label}: API error: {_safe_api_error(e, status)}", file=sys.stderr)
     if status == 401:
         return 2
     if status == 404:

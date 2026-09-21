@@ -387,6 +387,14 @@ class TestStatusToExit(unittest.TestCase):
             _openai.status_to_exit(_StubOpenAI(), _Status(401), "embed")
         self.assertIn("embed: API error", err.getvalue())
 
+    def test_html_proxy_error_is_collapsed(self):
+        exc = _Status(413)
+        exc.args = ("<html><head><title>413</title></head><body>noise</body></html>",)
+        rc, err = self._exit(exc)
+        self.assertEqual(rc, 2)
+        self.assertIn("HTTP 413 Request Entity Too Large", err)
+        self.assertNotIn("<html>", err)
+
 
 if __name__ == "__main__":
     unittest.main()

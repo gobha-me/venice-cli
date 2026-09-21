@@ -682,15 +682,21 @@ size rather than a guess. `--compact-loss-policy aggressive|evidence` controls
 what happens to the summarized prefix. Chat defaults to `aggressive`, preserving
 the original behavior. Code defaults to `evidence`: every removed user message,
 assistant tool call (including arguments), and tool result is copied exactly into
-the private session envelope before the live history is replaced. The model gets
+private per-session sidecar files before the live history is replaced. The session
+envelope retains only bounded, content-addressed metadata. The model gets
 a bounded index plus the read-only `venice_context_archive` tool; operators can use
-the `/context` commands above even in a plain REPL. The archive is capped at 512
-entries and 8 MiB. If the next compaction would cross either cap, it is refused
+the `/context` commands above even in a plain REPL. The archive defaults to a
+1 GiB disk quota and 8192 entries; change the quota with
+`--context-archive-max-mib` or `defaults.<command>.context_archive_max_mib`.
+If the next compaction would cross either cap, it is refused
 before the summary API call and both history and archive remain unchanged. Reads
 are paged at 32 KiB and list pages at 50 entries. Compaction is otherwise
 best-effort — a failed or empty summarization leaves both stores untouched — and
-never orphans a tool result from its assistant turn. It's off by default because
-it costs a summarization call.
+never orphans a tool result from its assistant turn. A separate 16 MiB live-request
+safety threshold accounts for image data URLs that text token estimates miss;
+under byte pressure compaction archives additional oldest complete turns. If even
+the newest turn cannot fit, the CLI stops locally instead of sending a request that
+will receive HTTP 413. It's off by default because it costs a summarization call.
 
 #### Sessions
 
@@ -700,9 +706,10 @@ each turn to `~/.config/venice/sessions/<id>.json` (mode 0600;
 a session travels with its **settings** — model, system prompt, generation
 parameters, `max-tool-calls`, the `venice code` sandbox root, and the running
 token/cost usage — plus any bounded exact context archive — so resuming restores
-the whole context, not just the messages. Session envelope v2 adds
-`context_archive` plus the structural count of authoritative leading system
-messages; v1 envelopes remain readable, conservatively preserve their complete
+the whole context, not just the messages. Session envelope v3 stores
+content-addressed archive metadata while exact bodies live under
+`~/.config/venice/sessions/<id>/context_archive/`; v2 inline archives migrate on
+resume. V1 envelopes remain readable, conservatively preserve their complete
 leading system prefix, and resume with an empty archive.
 The API key is never written to a session.
 
@@ -1641,6 +1648,7 @@ external diff helpers. Use the confirmed `run` tool for other Git forms.
 | `--review-rounds N` | passes `venice_review` makes over the same diff (default **1**, max 3); config `defaults.code.review_rounds` |
 | `--auto-compact` | summarize older history once the prompt crosses `--compact-threshold` tokens (default 100 000), keeping the last `--compact-keep-turns` turns (default 10); long runs stay in-context |
 | `--compact-loss-policy aggressive\|evidence` | discard summarized messages or retain their exact JSON in the bounded private session archive; default **evidence** for code and **aggressive** for chat; config `defaults.code.compact_loss_policy` / `defaults.chat.compact_loss_policy` |
+| `--context-archive-max-mib N` | disk quota for exact evidence archived by compaction (default 1024 MiB); config `defaults.code.context_archive_max_mib` / `defaults.chat.context_archive_max_mib` |
 | `--cache-guard off\|warn\|stop` | react when a cache-priced model explicitly reports zero cached tokens after the cold first API call and a 2,000-token prompt; default **warn**, config `defaults.code.cache_guard` |
 | `-i`, `--json`, `--model`, `--system` | interactive REPL · JSON envelope · model · extra system instructions |
 | `--persona NAME` | load `~/.config/venice/personas/NAME.md` as the system prompt at launch (`/persona` in the REPL) |

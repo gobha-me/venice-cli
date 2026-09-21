@@ -61,6 +61,11 @@ _PER_MESSAGE_TOKENS = 4
 # Cap on the summary's own length, so a pathological prefix can't make the
 # summarization request itself overflow.
 SUMMARY_MAX_TOKENS = 1024
+# HTTP payload bytes are independent of model tokens: a native-vision data URL
+# can be tens of MiB while contributing little to the text-token estimate. Stay
+# below common proxy limits and compact old attachments before sending them.
+DEFAULT_REQUEST_BYTES = 16 * 1024 * 1024
+COMPACTED_OVERHEAD_BYTES = 256 * 1024
 
 DEFAULT_THRESHOLD_TOKENS = 100_000
 DEFAULT_KEEP_TURNS = 10
@@ -112,6 +117,55 @@ def estimate_tokens(messages: List[dict]) -> int:
     return total
 
 
+def _json_string_bytes(value: str) -> int:
+    """Exact compact-JSON UTF-8 size of a string without materializing it."""
+    total = 2  # quotes
+    for char in value:
+        code = ord(char)
+        if char in ('"', "\\") or char in ("\b", "\f", "\n", "\r", "\t"):
+            total += 2
+        elif code < 0x20:
+            total += 6
+        else:
+            total += len(char.encode("utf-8"))
+    return total
+
+
+def _json_bytes(value) -> int:
+    """Exact compact-JSON byte count for request-shaped finite values."""
+    if value is None:
+        return 4
+    if value is True:
+        return 4
+    if value is False:
+        return 5
+    if isinstance(value, str):
+        return _json_string_bytes(value)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        # Request values have already passed the project's finite-number guards.
+        return len(str(value).encode("ascii"))
+    if isinstance(value, list):
+        return 2 + max(0, len(value) - 1) + sum(_json_bytes(v) for v in value)
+    if isinstance(value, dict):
+        return 2 + max(0, len(value) - 1) + sum(
+            _json_string_bytes(str(k)) + 1 + _json_bytes(v)
+            for k, v in value.items()
+        )
+    return _json_string_bytes(str(value))
+
+
+def estimate_request_bytes(messages: List[dict]) -> int:
+    """Serialized byte size of the message array, including image data URLs."""
+    return _json_bytes(messages)
+
+
+def request_bytes_over(messages: List[dict], limit: int) -> bool:
+    """Whether messages plus a bounded request-envelope reserve reach ``limit``."""
+    return limit > 0 and (
+        estimate_request_bytes(messages) + COMPACTED_OVERHEAD_BYTES >= limit
+    )
+
+
 @dataclass
 class Budget:
     """The auto-compact budget: when to fire and how much tail to keep.
@@ -132,6 +186,8 @@ class Budget:
     loss_policy: str = "aggressive"
     archive: Optional[_context_archive.ContextArchive] = None
     protected_system_messages: Optional[int] = None
+    request_bytes: int = DEFAULT_REQUEST_BYTES
+    hard_blocked: bool = False
 
     def observe(self, usage, messages: Optional[List[dict]] = None) -> None:
         """Record prompt tokens and the message snapshot that produced them."""
@@ -154,8 +210,11 @@ class Budget:
         the heuristic change since that snapshot so assistant replies, tool
         results, and new user turns cannot remain invisible until restart.
         """
+        if self.hard_blocked:
+            return False
+        byte_over = request_bytes_over(messages, self.request_bytes)
         if self.threshold_tokens <= 0:
-            return False  # auto-compact disabled
+            return byte_over
         current_estimate = estimate_tokens(messages)
         if self.last_prompt_tokens is None:
             effective_tokens = current_estimate
@@ -170,7 +229,10 @@ class Budget:
                 + current_estimate
                 - self.last_prompt_estimate,
             )
-        return effective_tokens >= self.threshold_tokens
+        return effective_tokens >= self.threshold_tokens or byte_over
+
+    def over_bytes(self, messages: List[dict]) -> bool:
+        return request_bytes_over(messages, self.request_bytes)
 
 
 def budget_from_args(args, archive=None) -> Optional["Budget"]:
@@ -246,7 +308,9 @@ def leading_system_count(messages: List[dict]) -> int:
 
 
 def split_for_compaction(
-    messages: List[dict], keep_turns: int, protected_system_messages: Optional[int] = None
+    messages: List[dict], keep_turns: int,
+    protected_system_messages: Optional[int] = None,
+    max_live_bytes: Optional[int] = None,
 ) -> Optional[Tuple[List[dict], List[dict]]]:
     """Split history into (prefix to summarize, tail to keep verbatim).
 
@@ -268,9 +332,26 @@ def split_for_compaction(
         sys_end = min(max(0, protected_system_messages), leading_systems)
     generated_end = leading_systems
     tail_groups = _groups(messages[generated_end:])
-    if len(tail_groups) <= keep_turns:
+    byte_pressure = (
+        max_live_bytes is not None
+        and request_bytes_over(messages, max_live_bytes)
+    )
+    if len(tail_groups) <= keep_turns and not byte_pressure:
         return None
-    cut = len(tail_groups) - keep_turns
+    cut = max(0, len(tail_groups) - keep_turns)
+    # `keep_turns` is a recency preference, not permission to send a body the
+    # transport will reject. Under byte pressure archive additional oldest
+    # complete groups, always retaining at least the newest exchange.
+    if byte_pressure:
+        sys_msgs = messages[:sys_end]
+        while cut < len(tail_groups) - 1:
+            kept = [item for group in tail_groups[cut:] for item in group]
+            if (estimate_request_bytes(sys_msgs + kept)
+                    + COMPACTED_OVERHEAD_BYTES < max_live_bytes):
+                break
+            cut += 1
+    if cut <= 0:
+        return None
     prefix: List[dict] = list(messages[sys_end:generated_end])
     for g in tail_groups[:cut]:
         prefix.extend(g)
@@ -326,6 +407,7 @@ def compact_messages(
     loss_policy: str = "aggressive",
     archive: Optional[_context_archive.ContextArchive] = None,
     protected_system_messages: Optional[int] = None,
+    max_live_bytes: Optional[int] = None,
 ) -> bool:
     """Summarize the older prefix in place; keep system + last `keep_turns`.
 
@@ -355,13 +437,25 @@ def compact_messages(
     """
     if budget is not None:
         budget.last_error = None
+        budget.hard_blocked = False
     if archive is not None:
         archive.last_error = None
 
     split = split_for_compaction(
-        messages, keep_turns, protected_system_messages=protected_system_messages
+        messages, keep_turns,
+        protected_system_messages=protected_system_messages,
+        max_live_bytes=max_live_bytes,
     )
     if split is None:
+        if (max_live_bytes is not None
+                and request_bytes_over(messages, max_live_bytes)):
+            reason = (
+                f"newest retained turn is too large for the {max_live_bytes}-byte "
+                "request safety limit; render or attach a smaller image"
+            )
+            if budget is not None:
+                budget.last_error = reason
+                budget.hard_blocked = True
         return False
     prefix, tail = split
     sys_msgs = messages[: len(messages) - len(prefix) - len(tail)]
@@ -381,6 +475,7 @@ def compact_messages(
             archive.last_error = str(e)
             if budget is not None:
                 budget.last_error = archive.last_error
+                budget.hard_blocked = True
             return False
 
     # #128: compaction is a deliberately fresh summarization conversation. Reusing
@@ -400,6 +495,8 @@ def compact_messages(
             **kwargs,
         )
     except Exception:
+        if archive is not None:
+            archive.discard(staged)
         # Nothing recorded on this path, deliberately: there is no usage block to read,
         # and the SDK may have retried or never reached the server at all. `record()`'s
         # row-on-every-path rule is about calls the caller KNOWS completed.
@@ -426,6 +523,8 @@ def compact_messages(
     if getattr(resp, "choices", None):
         summary = (resp.choices[0].message.content or "").strip()
     if not summary:
+        if archive is not None:
+            archive.discard(staged)
         if budget is not None:
             budget.last_error = "summarizer returned an empty response"
         return False
@@ -438,8 +537,30 @@ def compact_messages(
     msgs_before = len(messages)
     replacement = sys_msgs + [synthetic_message(summary)]
     if loss_policy == "evidence":
-        archive.commit(staged)
-        replacement.append(archive.live_index_message())
+        replacement.append(archive.live_index_message(staged))
+    if (max_live_bytes is not None
+            and request_bytes_over(replacement + tail, max_live_bytes)):
+        # The conservative reserve should make this unreachable, but do not send
+        # a known-oversized request if an unusually large summary/index defeats it.
+        reason = (
+            f"compacted history still exceeds the {max_live_bytes}-byte "
+            "request safety limit"
+        )
+        if budget is not None:
+            budget.last_error = reason
+            budget.hard_blocked = True
+        if archive is not None:
+            archive.discard(staged)
+        return False
+    if loss_policy == "evidence":
+        try:
+            archive.commit(staged)
+        except _context_archive.ArchiveError as e:
+            archive.last_error = str(e)
+            if budget is not None:
+                budget.last_error = archive.last_error
+                budget.hard_blocked = True
+            return False
     messages[:] = replacement + tail
     if ledger is not None:
         ledger.record_compaction({
@@ -481,6 +602,7 @@ def compact_messages(
     if budget is not None:
         budget.last_prompt_tokens = None  # observation is stale after compaction
         budget.last_prompt_estimate = None
+        budget.hard_blocked = False
     return True
 
 
@@ -510,7 +632,10 @@ def maybe_compact(oai, model: str, messages: List[dict],
         ledger=ledger, budget=budget, trigger="auto",
         loss_policy=budget.loss_policy, archive=budget.archive,
         protected_system_messages=budget.protected_system_messages,
+        max_live_bytes=budget.request_bytes,
     ):
+        if budget.over_bytes(messages):
+            budget.hard_blocked = True
         reason = budget.last_error
         if reason is None and budget.archive is not None:
             reason = budget.archive.last_error

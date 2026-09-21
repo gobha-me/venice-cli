@@ -445,6 +445,9 @@ _COMMAND_MAP = {
             "compact_loss_policy",
             _one_of("venice.commands._compact", "LOSS_POLICY_CHOICES"),
         ),
+        "context_archive_max_mib": (
+            "context_archive_max_mib", _positive(_exact_int),
+        ),
         "session_max_spend": ("session_max_spend", _numeric.finite_float),
     },
     "embed": {
@@ -492,6 +495,9 @@ _COMMAND_MAP = {
         "compact_loss_policy": (
             "compact_loss_policy",
             _one_of("venice.commands._compact", "LOSS_POLICY_CHOICES"),
+        ),
+        "context_archive_max_mib": (
+            "context_archive_max_mib", _positive(_exact_int),
         ),
         "session_max_spend": ("session_max_spend", _numeric.finite_float),
         "cache_guard": (

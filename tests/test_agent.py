@@ -17,7 +17,7 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-from venice.commands import _agent
+from venice.commands import _agent, _context_archive
 from tests.test_chat import FakeToolCompletion, _FnCall
 
 
@@ -2983,6 +2983,32 @@ class TestAutoCompact(unittest.TestCase):
         # History NOT compacted (the failed summary changed nothing).
         self.assertEqual(history[1]["role"], "user")
         self.assertNotIn("[Summary", str(history))
+
+    def test_oversized_uncompactable_request_stops_before_completion(self):
+        history = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "A" * 5000},
+        ]
+        fake, calls = _fake_oai([])
+        archive = _context_archive.ContextArchive()
+        budget = _agent._compact.Budget(
+            threshold_tokens=10**9,
+            request_bytes=1000,
+            loss_policy="evidence",
+            archive=archive,
+            protected_system_messages=1,
+        )
+        err = io.StringIO()
+        with mock.patch.object(sys, "stdout", io.StringIO()), \
+             mock.patch.object(sys, "stderr", err):
+            rc = _agent.run_loop(
+                fake, "m", history, {}, [_free_tool()],
+                max_tool_calls=0, yes=True, json_out=False, budget=budget,
+            )
+        self.assertEqual(rc, 2)
+        self.assertEqual(calls, [])
+        self.assertEqual(err.getvalue().count("auto-compaction refused"), 1)
+        self.assertIn("smaller image", err.getvalue())
 
 
 class TestProgress(unittest.TestCase):

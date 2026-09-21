@@ -63,14 +63,20 @@ class TestStore(_Base):
         self.assertEqual(r.usage["cache_read_tokens"], 4)
         self.assertEqual([m["content"] for m in r.messages], ["hi"])
 
-    def test_v2_archive_round_trips_and_v1_defaults_empty(self):
+    def test_v3_archive_round_trips_and_v1_defaults_empty(self):
+        sess = self._mk()
         archive = A.ContextArchive()
+        archive.bind(S.context_archive_dir(sess.id))
         archive.commit(archive.stage([{"role": "user", "content": "evidence"}]))
-        sess = self._mk(context_archive=archive.to_envelope())
+        sess.context_archive = archive.to_envelope()
         path = S.save(sess)
-        self.assertEqual(json.loads(path.read_text())["venice_session"], 2)
+        self.assertEqual(json.loads(path.read_text())["venice_session"], 3)
         self.assertEqual(S.load(sess.id, "chat").context_archive,
                          archive.to_envelope())
+        self.assertEqual(
+            S.load(sess.id, "chat").context_archive_source,
+            str(S.context_archive_dir(sess.id)),
+        )
 
         old = sess.to_envelope()
         old["venice_session"] = 1
@@ -98,12 +104,14 @@ class TestStore(_Base):
             S.Session.from_envelope(bad)
 
     def test_tampered_archive_is_rejected_on_resume(self):
+        sess = self._mk()
         archive = A.ContextArchive()
+        archive.bind(S.context_archive_dir(sess.id))
         archive.commit(archive.stage([{"role": "user", "content": "evidence"}]))
-        sess = self._mk(context_archive=archive.to_envelope())
+        sess.context_archive = archive.to_envelope()
         path = S.save(sess)
         doc = json.loads(path.read_text())
-        doc["context_archive"][0]["message"]["content"] = "tampered"
+        doc["context_archive"][0]["sha256"] = "tampered"
         path.write_text(json.dumps(doc))
         with self.assertRaisesRegex(S.SessionError, "invalid context archive"):
             S.load(sess.id, "chat")
@@ -235,17 +243,30 @@ class TestStore(_Base):
         self.assertEqual(S.most_recent("chat").id, c.id)
         self.assertEqual(S.most_recent("code").id, k.id)
 
+    def test_most_recent_carries_context_archive_source(self):
+        sess = self._mk("chat")
+        S.save(sess)
+        restored = S.most_recent("chat")
+        self.assertEqual(
+            restored.context_archive_source,
+            str(S.context_archive_dir(sess.id)),
+        )
+
     def test_most_recent_none(self):
         self.assertIsNone(S.most_recent("chat"))
 
     def test_list_and_delete(self):
         a = self._mk(); S.save(a)
         b = self._mk(); S.save(b)
+        sidecar = S.context_archive_dir(a.id)
+        sidecar.mkdir(parents=True)
+        (sidecar / "owned").write_text("evidence")
         rows = S.list_sessions()
         self.assertEqual(len(rows), 2)
         # newest first (b saved last)
         self.assertEqual(rows[0][0], b.id)
         self.assertTrue(S.delete(a.id))
+        self.assertFalse(sidecar.parent.exists())
         self.assertFalse(S.delete(a.id))               # already gone
         self.assertEqual(len(S.list_sessions()), 1)
 

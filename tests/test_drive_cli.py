@@ -718,10 +718,17 @@ class TestDriveChatRepl(_DriveCase):
             d.send("/exit")
             self.assertEqual(d.wait(), 0)
 
-        envelope = json.loads(self.sessions()[0].read_text(encoding="utf-8"))
-        self.assertEqual(envelope["venice_session"], 2)
+        session_path = self.sessions()[0]
+        envelope = json.loads(session_path.read_text(encoding="utf-8"))
+        self.assertEqual(envelope["venice_session"], 3)
+        archive_dir = session_path.with_suffix("") / "context_archive"
         self.assertEqual(
-            [entry["message"]["content"] for entry in envelope["context_archive"]],
+            [
+                json.loads((archive_dir / entry["blob"]).read_text(encoding="utf-8"))[
+                    "content"
+                ]
+                for entry in envelope["context_archive"]
+            ],
             ["One", "FIRST-REPLY"],
         )
         usage = envelope["usage"]

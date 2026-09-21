@@ -404,6 +404,8 @@ def _turn(oai, openai, chat, text, messages, gen_kwargs, state, args) -> bool:
         ),
         ledger=ledger,  # #99
     )
+    if budget is not None and budget.hard_blocked:
+        return False
     # Mid-run steering: a tool-loop turn drains this session's mailbox at each
     # checkpoint (#78, detached). On an interactive tty, #79 also makes the first Ctrl+C
     # pause and prompt for a steering line at the checkpoint; a second Ctrl+C (or Ctrl+C
@@ -516,6 +518,10 @@ def _dispatch_slash(line, messages, state, args, models, oai=None, gen_kwargs=No
         archive = state.get("archive")
         if archive is not None:
             archive.clear()
+        budget = state.get("budget")
+        if budget is not None:
+            budget.hard_blocked = False
+            budget.last_error = None
         print("(conversation cleared)", file=sys.stderr)
     elif cmd == "system":
         if rest:
@@ -737,7 +743,10 @@ def run(args, oai, openai, client, models, model, initial=None, *,
     archive = context_archive
     if archive is None:
         archive = _context_archive.ContextArchive.from_envelope(
-            session.context_archive if session is not None else None
+            session.context_archive if session is not None else None,
+            source_dir=(
+                session.context_archive_source if session is not None else None
+            ),
         )
 
     if gen_kwargs is None:
@@ -861,6 +870,25 @@ def run(args, oai, openai, client, models, model, initial=None, *,
             if root is not None:
                 active.root = root
         state["session"] = active
+
+        if archive.entries or state["loss_policy"] == "evidence":
+            try:
+                archive_limit = _context_archive.max_bytes_from_args(args)
+                if active is None:
+                    archive.bind_temporary(max_bytes=archive_limit)
+                else:
+                    archive.bind(
+                        _session.context_archive_dir(active.id),
+                        max_bytes=archive_limit,
+                    )
+                    active.context_archive = archive.to_envelope()
+            except _context_archive.ArchiveError as e:
+                print(
+                    f"{_session.command_from_label(label)}: context archive: {e}",
+                    file=sys.stderr,
+                )
+                return 2
+        stack.callback(archive.close)
 
         if _rl is not None:
             _install_completer(_rl, models, stack)
