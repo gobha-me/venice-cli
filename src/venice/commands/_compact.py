@@ -72,6 +72,15 @@ DEFAULT_KEEP_TURNS = 10
 LOSS_POLICY_CHOICES = ("aggressive", "evidence")
 
 _SUMMARY_PREFIX = "[Summary of earlier conversation]"
+EVIDENCE_FALLBACK_SUMMARY = (
+    "The summarizer returned no text, so the earlier conversation was archived "
+    "exactly instead of being discarded. Use venice_context_archive when it is "
+    "available, or ask the operator to retrieve /context entries, before relying "
+    "on missing details."
+)
+EVIDENCE_FALLBACK_NOTICE = (
+    "summarizer returned an empty response; continuing from the exact evidence archive"
+)
 _INSTRUCT = (
     "Summarize the conversation so far into a compact brief for continuing it. "
     "Keep: decisions made, file paths and identifiers mentioned, code changes, "
@@ -408,13 +417,16 @@ def compact_messages(
     archive: Optional[_context_archive.ContextArchive] = None,
     protected_system_messages: Optional[int] = None,
     max_live_bytes: Optional[int] = None,
+    on_fallback=None,
 ) -> bool:
     """Summarize the older prefix in place; keep system + last `keep_turns`.
 
     Returns True when the history was compacted, False when there was nothing
     to do or the summarization call failed (in which case `messages` is left
-    untouched). Only the summary text is taken from the response; the model's
-    own wording is never trusted with roles.
+    untouched). An empty response is also a failure in aggressive mode; evidence
+    mode can instead commit its exact staged archive with a deterministic bridge.
+    Only the summary text is taken from the response; the model's own wording is
+    never trusted with roles.
 
     #99: when `ledger` is given, a successful compaction is logged to it as a context
     event. Recorded HERE, in the worker, rather than at the compaction sites -- the gate
@@ -522,12 +534,22 @@ def compact_messages(
     summary = ""
     if getattr(resp, "choices", None):
         summary = (resp.choices[0].message.content or "").strip()
+    evidence_fallback = False
     if not summary:
-        if archive is not None:
-            archive.discard(staged)
-        if budget is not None:
-            budget.last_error = "summarizer returned an empty response"
-        return False
+        if loss_policy == "evidence" and archive is not None:
+            # The semantic summary failed, but evidence mode has already staged
+            # every removed message exactly. A deterministic bridge plus the
+            # bounded live index keeps the request small without destroying the
+            # only copy of the work. The archive commit remains transactional
+            # with the history rewrite below.
+            summary = EVIDENCE_FALLBACK_SUMMARY
+            evidence_fallback = True
+        else:
+            if archive is not None:
+                archive.discard(staged)
+            if budget is not None:
+                budget.last_error = "summarizer returned an empty response"
+            return False
 
     # #99: measure BEFORE the rewrite below, then record AFTER it, and only on this
     # success path. The module's contract is that a failed summarization leaves history
@@ -563,8 +585,11 @@ def compact_messages(
             return False
     messages[:] = replacement + tail
     if ledger is not None:
-        ledger.record_compaction({
+        event = {
             "trigger": trigger,
+            # The manual command can use a one-off summarizer model without changing
+            # the session model. Keep that routing decision beside the cost it caused.
+            "summary_model": model,
             "messages_before": msgs_before,
             "messages_after": len(messages),
             # `est_*` vs `observed_*` carries the measured-vs-estimated distinction in
@@ -592,7 +617,10 @@ def compact_messages(
             # bucket-only because the bucket totals every compaction, and which ONE of
             # them was expensive is the question a sawtooth makes you ask.
             "cost": round(cost, 6),
-        })
+        }
+        if evidence_fallback:
+            event["summary_mode"] = "evidence_fallback"
+        ledger.record_compaction(event)
     # #116: the LAST piece of post-compaction bookkeeping to move in here, and it must
     # stay BELOW the event above -- `observed_tokens_before` reads the value this line
     # clears, so a reset hoisted above the recording silently nulls every automatic
@@ -603,12 +631,15 @@ def compact_messages(
         budget.last_prompt_tokens = None  # observation is stale after compaction
         budget.last_prompt_estimate = None
         budget.hard_blocked = False
+    if evidence_fallback and on_fallback is not None:
+        on_fallback(EVIDENCE_FALLBACK_NOTICE)
     return True
 
 
 def maybe_compact(oai, model: str, messages: List[dict],
                   budget: Optional[Budget], base_kwargs: Optional[dict] = None,
-                  on_compact=None, on_blocked=None, ledger=None) -> bool:
+                  on_compact=None, on_blocked=None, on_fallback=None,
+                  ledger=None) -> bool:
     """Compact `messages` in place when `budget` says they're over budget.
 
     The shared gate for every compaction site (`run_loop`'s per-turn check, its
@@ -633,6 +664,7 @@ def maybe_compact(oai, model: str, messages: List[dict],
         loss_policy=budget.loss_policy, archive=budget.archive,
         protected_system_messages=budget.protected_system_messages,
         max_live_bytes=budget.request_bytes,
+        on_fallback=on_fallback,
     ):
         if budget.over_bytes(messages):
             budget.hard_blocked = True

@@ -50,7 +50,8 @@ Commands:
   /models          list the available models (marks the current and default)
   /auto            auto-accept paid/side-effecting tool calls for following turns
   /manual          confirm each paid/side-effecting tool call (undo /auto)
-  /compact [N]     summarize older history to shrink the context (keeps last N turns)
+  /compact [N] [MODEL]
+                   summarize older history; optionally use MODEL for this call only
   /context list    list archived evidence metadata (up to 50 entries)
   /context read ID [OFFSET]
                    read up to 32 KiB of exact archived message JSON
@@ -221,7 +222,7 @@ def _make_completer(models, rl):
         # Empty prefix left of the token => we're completing the command word.
         if not buf[: rl.get_begidx()].strip():
             candidates = _COMMANDS
-        elif buf.lstrip().split(maxsplit=1)[0].lower() == "/model":
+        elif buf.lstrip().split(maxsplit=1)[0].lower() in ("/model", "/compact"):
             candidates = model_ids
         elif buf.lstrip().split(maxsplit=1)[0].lower() == "/persona":
             candidates = [name for name, _ in _persona.available()]
@@ -401,6 +402,9 @@ def _turn(oai, openai, chat, text, messages, gen_kwargs, state, args) -> bool:
         ),
         on_blocked=lambda reason: print(
             f"(auto-compaction refused: {reason})", file=sys.stderr,
+        ),
+        on_fallback=lambda reason: print(
+            f"(auto-compaction recovery: {reason})", file=sys.stderr,
         ),
         ledger=ledger,  # #99
     )
@@ -599,33 +603,68 @@ def _dispatch_slash(line, messages, state, args, models, oai=None, gen_kwargs=No
             print(f"(auto-accept {on})", file=sys.stderr)
     elif cmd == "compact":
         # Manual compaction (#48): summarize the older prefix with the session
-        # model; `rest` can override how many recent turns stay verbatim.
+        # model; an optional one-off MODEL never changes the active session model.
         keep = _compact.DEFAULT_KEEP_TURNS
         if state.get("budget") is not None:
             keep = state["budget"].keep_turns
-        if rest:
+        summary_model = state["model"]
+        words = rest.split()
+        if len(words) > 2:
+            print("usage: /compact [N] [MODEL]", file=sys.stderr)
+            return "continue"
+        if words:
             try:
-                keep = max(1, int(rest))
+                keep = max(1, int(words[0]))
             except ValueError:
-                print(f"/compact: bad turn count {rest!r}", file=sys.stderr)
+                if len(words) == 2:
+                    print(f"/compact: bad turn count {words[0]!r}", file=sys.stderr)
+                    return "continue"
+                summary_model = words[0]
+            else:
+                if len(words) == 2:
+                    summary_model = words[1]
+        if summary_model != state["model"]:
+            summary_model, rc = _models.resolve_model(
+                summary_model, models, label="/compact", noun="text model",
+            )
+            if rc is not None:
                 return "continue"
         before = len(messages)
-        if _compact.compact_messages(
-            oai, state["model"], messages,
-            keep_turns=keep, base_kwargs=gen_kwargs,
-            # #99: a hand-typed compaction is still a prefix event and still shows up as
-            # a cache cliff on the next call, so it is traced like the automatic one --
-            # `trigger` is what lets the operator tell the two apart afterwards.
-            ledger=state.get("ledger"), budget=state.get("budget"), trigger="manual",
-            loss_policy=state["loss_policy"], archive=state.get("archive"),
-            protected_system_messages=state["protected_system_messages"],
-        ):
+        ledger = state.get("ledger")
+        # The compaction bucket must be priced at the model that actually handled the
+        # one-off request. Rebind only for the synchronous summary call, then restore
+        # the active conversation model even when compaction refuses or the call fails.
+        if ledger is not None and summary_model != state["model"]:
+            ledger.bind_model(summary_model, models)
+        try:
+            compacted = _compact.compact_messages(
+                oai, summary_model, messages,
+                keep_turns=keep, base_kwargs=gen_kwargs,
+                # #99: a hand-typed compaction is still a prefix event and still shows up as
+                # a cache cliff on the next call, so it is traced like the automatic one --
+                # `trigger` is what lets the operator tell the two apart afterwards.
+                ledger=ledger, budget=state.get("budget"), trigger="manual",
+                loss_policy=state["loss_policy"], archive=state.get("archive"),
+                protected_system_messages=state["protected_system_messages"],
+                on_fallback=lambda reason: print(
+                    f"(/compact recovery: {reason})", file=sys.stderr,
+                ),
+            )
+        finally:
+            if ledger is not None and summary_model != state["model"]:
+                ledger.bind_model(state["model"], models)
+        if compacted:
             # #116: no budget reset here any more -- `compact_messages` owns it, so this
             # site cannot forget it and cannot disagree with `maybe_compact` about when
             # it happens. Only the wording below is this site's to keep.
+            model_note = (
+                f"; summary model {summary_model}"
+                if summary_model != state["model"] else ""
+            )
             print(
                 f"(compacted: {before} -> {len(messages)} messages; "
-                f"last {keep} turn(s) verbatim)",
+                f"last {keep} turn(s) verbatim"
+                f"{model_note})",
                 file=sys.stderr,
             )
         else:

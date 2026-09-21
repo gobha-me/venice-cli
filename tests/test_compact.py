@@ -390,6 +390,46 @@ class TestCompactMessages(unittest.TestCase):
         self.assertFalse(_compact.compact_messages(fake, "m", msgs, keep_turns=2))
         self.assertEqual(msgs, snapshot)
 
+    def test_empty_evidence_summary_recovers_from_exact_archive(self):
+        msgs = _tooly_history()
+        prefix, _tail = _compact.split_for_compaction(msgs, keep_turns=1)
+        expected = list(prefix)
+        archive = _context_archive.ContextArchive()
+        fake, calls = _fake_oai(summary="   ")
+        led = _Rec(cost=0.0001)
+        notices = []
+
+        self.assertTrue(_compact.compact_messages(
+            fake, "working-model", msgs, keep_turns=1,
+            loss_policy="evidence", archive=archive, ledger=led,
+            on_fallback=notices.append,
+        ))
+
+        exact = [json.loads(archive.read(e["id"])["content"])
+                 for e in archive.entries]
+        self.assertEqual(exact, expected)
+        self.assertEqual(len(calls), 1)
+        self.assertIn(_compact.EVIDENCE_FALLBACK_SUMMARY, msgs[1]["content"])
+        self.assertIn("[Archived context evidence index]", msgs[2]["content"])
+        self.assertEqual(notices, [_compact.EVIDENCE_FALLBACK_NOTICE])
+        self.assertEqual(led.events[0]["summary_mode"], "evidence_fallback")
+        self.assertEqual(led.seq, ["call", "event"])
+
+    def test_empty_evidence_fallback_commit_failure_keeps_history(self):
+        msgs = _history(6)
+        snapshot = list(msgs)
+        archive = _context_archive.ContextArchive()
+        fake, _calls = _fake_oai(summary="")
+        with mock.patch.object(
+            archive, "commit", side_effect=_context_archive.ArchiveError("disk failed")
+        ):
+            self.assertFalse(_compact.compact_messages(
+                fake, "m", msgs, keep_turns=2,
+                loss_policy="evidence", archive=archive,
+            ))
+        self.assertEqual(msgs, snapshot)
+        self.assertEqual(archive.entries, [])
+
     def test_tool_turns_survive_intact(self):
         msgs = _tooly_history()
         fake, _calls = _fake_oai("summary")
@@ -538,6 +578,24 @@ class TestCompactionEvents(unittest.TestCase):
                 ))
                 self.assertEqual(budget.last_error, reason)
                 self.assertEqual(blocked, [reason])
+
+    def test_auto_empty_evidence_summary_reports_recovery_not_block(self):
+        msgs = _history(6)
+        archive = _context_archive.ContextArchive()
+        budget = _compact.Budget(
+            threshold_tokens=1, keep_turns=2,
+            loss_policy="evidence", archive=archive,
+        )
+        fake, _calls = _fake_oai(summary="")
+        recovered = []
+        blocked = []
+        self.assertTrue(_compact.maybe_compact(
+            fake, "m", msgs, budget, {},
+            on_fallback=recovered.append, on_blocked=blocked.append,
+        ))
+        self.assertEqual(recovered, [_compact.EVIDENCE_FALLBACK_NOTICE])
+        self.assertEqual(blocked, [])
+        self.assertFalse(budget.hard_blocked)
 
     def test_nothing_to_compact_records_nothing(self):
         msgs = _history(3)
