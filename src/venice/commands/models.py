@@ -20,6 +20,7 @@ MODEL_TYPES = (
     "upscale",
     "asr",
     "inpaint",
+    "decision",
 )
 
 

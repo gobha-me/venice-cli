@@ -871,10 +871,11 @@ a read-only [semantic search](#semantic-search) over the project's local
 the last index build — pair it with `reindex`, a paid tool that rebuilds the index
 so recall reflects edits made this session), and
 `venice_models`, a read-only lookup that lists model ids for a given catalog
-type (its single `type` arg — text/code/image/video/music/tts/embedding/upscale,
-or `all`) so the model can pick a valid `model` for the other tools instead of
-guessing, and `venice_model_details` (single `model` arg) which returns one
-model's pricing (cost), `capabilities` (text models — supportsVision etc.),
+type (its single `type` arg — text/code/image/video/music/tts/embedding/upscale/
+asr/inpaint/decision, or `all`) so the model can pick a valid `model` for the
+other tools instead of guessing, and `venice_model_details` (single `model` arg)
+which returns one model's pricing (cost), `capabilities` (text models —
+supportsVision etc.),
 `constraints` (image/media — aspect ratios, resolutions, qualities, prompt-length
 limit), and the full `model_spec`, so the agent can budget input and confirm a
 model fits, and `venice_vision`, which accepts a local image (`input_path`, as a

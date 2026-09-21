@@ -84,8 +84,29 @@ def _load_yaml(raw: bytes) -> dict:
             "PyYAML is required for live OpenAPI work; install "
             "scripts/openapi-requirements.txt"
         ) from None
+
+    class OpenAPILoader(yaml.SafeLoader):
+        """Safe loader with YAML 1.2-like handling for colon-delimited scalars.
+
+        PyYAML's default YAML 1.1 integer resolver treats an unquoted OpenAPI enum
+        value such as ``4:3`` as the sexagesimal integer ``243``.  Swagger uses
+        these values for image/video aspect ratios and declares their schema type as
+        string.  YAML 1.2 removed sexagesimal integers, so preserve every scalar
+        carrying a colon as text while retaining SafeLoader's ordinary integer
+        behavior for values such as bounds and status codes.
+        """
+
+    def construct_openapi_int(loader, node):
+        scalar = loader.construct_scalar(node)
+        if ":" in scalar:
+            return scalar
+        return yaml.SafeLoader.construct_yaml_int(loader, node)
+
+    OpenAPILoader.add_constructor(
+        "tag:yaml.org,2002:int", construct_openapi_int
+    )
     try:
-        value = yaml.safe_load(raw)
+        value = yaml.load(raw, Loader=OpenAPILoader)
     except yaml.YAMLError as exc:
         raise ContractError(f"OpenAPI YAML is invalid: {exc}") from None
     if not isinstance(value, dict):

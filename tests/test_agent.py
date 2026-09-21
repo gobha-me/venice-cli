@@ -3581,6 +3581,7 @@ class TestToolRegistry(unittest.TestCase):
         model_types = spec.parameters["properties"]["type"]["enum"]
         self.assertIn("asr", model_types)
         self.assertIn("inpaint", model_types)
+        self.assertIn("decision", model_types)
 
     def test_every_registry_tool_has_a_category(self):
         # drift guard: a new tool with no/empty category fails here.

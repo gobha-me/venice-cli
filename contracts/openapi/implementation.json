@@ -203,6 +203,7 @@
             "venice_parameters"
           ],
           "intentional_omissions": {
+            "anon_user_id": "End-user tracking identifiers are not collected or sent.",
             "fallbacks": "Fallback routing is not exposed by the curated completion surfaces.",
             "frequency_penalty": "Advanced sampling controls are not exposed.",
             "include": "Responses-style include controls are not used by chat completions.",
@@ -280,7 +281,9 @@
             "image",
             "image_url"
           ],
-          "intentional_omissions": {}
+          "intentional_omissions": {
+            "anon_user_id": "End-user tracking identifiers are not collected or sent."
+          }
         },
         "multipart/form-data": {
           "unsupported": "The stdlib client uses bounded JSON base64 or URL input."
@@ -316,6 +319,7 @@
             "safe_mode"
           ],
           "intentional_omissions": {
+            "anon_user_id": "End-user tracking identifiers are not collected or sent.",
             "modelId": "The deprecated modelId alias is intentionally not emitted for single-image edit."
           }
         },
@@ -370,6 +374,7 @@
             "width"
           ],
           "intentional_omissions": {
+            "anon_user_id": "End-user tracking identifiers are not collected or sent.",
             "inpaint": "Image editing is exposed through the dedicated edit operations.",
             "return_binary": "The existing image decoder consumes the documented JSON image envelope."
           }
@@ -407,7 +412,9 @@
             "resolution",
             "safe_mode"
           ],
-          "intentional_omissions": {}
+          "intentional_omissions": {
+            "anon_user_id": "End-user tracking identifiers are not collected or sent."
+          }
         },
         "multipart/form-data": {
           "unsupported": "The stdlib client uses bounded JSON base64 inputs."
@@ -497,6 +504,7 @@
             "video_url"
           ],
           "intentional_omissions": {
+            "camera_trajectory": "Advanced camera-path control is outside the curated video surface.",
             "compression": "Enhancement-only controls are outside the curated video surface.",
             "consents": "Provider-specific consent envelopes are not exposed.",
             "creativity": "Enhancement-only controls are outside the curated video surface.",

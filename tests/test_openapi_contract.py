@@ -211,6 +211,31 @@ class CommittedInventoryTests(unittest.TestCase):
         for operation, fields in actual.items():
             self.assertEqual(fields, _implemented_fields(self.manifest, operation), operation)
 
+    def test_background_remove_bodies_match_exactly_one_live_union_branch(self):
+        schema = self.lock["implemented_operations"][
+            "POST /image/background-remove"
+        ]["request_bodies"]["application/json"]
+        branches = schema["anyOf"]
+        self.assertEqual(len(branches), 2)
+
+        with mock.patch("venice.commands.bg_remove.encode_base64", return_value="base64"):
+            bodies = (
+                bg_remove._build_body(
+                    _namespace(input=Path("image.png"), image_url=None)
+                ),
+                bg_remove._build_body(
+                    _namespace(input=None, image_url="https://example.test/image.png")
+                ),
+            )
+        for body in bodies:
+            matches = []
+            for branch in branches:
+                fields = set(body)
+                properties = set(branch.get("properties", {}))
+                required = set(branch.get("required", []))
+                matches.append(required <= fields <= properties)
+            self.assertEqual(matches.count(True), 1, body)
+
 
 class DriftClassificationTests(unittest.TestCase):
     @classmethod
@@ -260,6 +285,10 @@ class DriftClassificationTests(unittest.TestCase):
     def test_unresolved_reference_fails_closed(self):
         with self.assertRaises(contract.ContractError):
             contract.normalize_schema({"$ref": "#/components/schemas/Missing"}, {})
+
+    def test_yaml_loader_preserves_unquoted_aspect_ratios(self):
+        loaded = contract._load_yaml(b"values: [1:1, 4:3, 16:9, 42]\n")
+        self.assertEqual(loaded["values"], ["1:1", "4:3", "16:9", 42])
 
 
 if __name__ == "__main__":
