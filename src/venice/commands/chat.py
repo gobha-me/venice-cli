@@ -128,6 +128,12 @@ def register(subparsers) -> None:
         help="Compaction loss policy: aggressive summarizes and discards older "
         "messages; evidence archives them exactly (default: aggressive).",
     )
+    it.add_argument(
+        "--context-archive-max-mib", type=_context_archive.positive_mib,
+        default=None, metavar="MIB",
+        help="Maximum disk-backed exact evidence per session "
+        f"(default {_context_archive.DEFAULT_ARCHIVE_MAX_MIB} MiB).",
+    )
 
     # --- Venice extensions -> venice_parameters ---
     ext = p.add_argument_group("Venice extensions")
@@ -668,6 +674,7 @@ def _run_agent(args, oai, openai, client, models, model, kwargs) -> Optional[int
     # operator spent waiting on us, and `_finish` is inert until a ledger exists.
     t0 = time.monotonic()
     ledger = None
+    archive = None
     final_response = []
 
     def _capture_final(resp) -> int:
@@ -694,6 +701,13 @@ def _run_agent(args, oai, openai, client, models, model, kwargs) -> Optional[int
             ledger = _agent.usage_ledger(args, models, model)  # #66 spend cap, #86 metering
             archive = _context_archive.ContextArchive()
             if args.compact_loss_policy == "evidence":
+                try:
+                    archive.bind_temporary(
+                        max_bytes=_context_archive.max_bytes_from_args(args)
+                    )
+                except _context_archive.ArchiveError as e:
+                    print(f"chat: context archive: {e}", file=sys.stderr)
+                    return 2
                 tools.append(_context_archive.archive_tool(archive))
             budget = _compact.budget_from_args(args)
             if budget is not None:
@@ -739,6 +753,8 @@ def _run_agent(args, oai, openai, client, models, model, kwargs) -> Optional[int
         # stamps before its envelope above; idempotence makes this a no-op there. Error
         # and Ctrl+C paths have no envelope, so they still report their partial cost.
         _finish(ledger, t0)
+        if archive is not None:
+            archive.close()
 
 
 def _run_once(oai, kwargs: dict, as_json: bool) -> int:

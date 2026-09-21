@@ -3824,6 +3824,18 @@ def run_loop(
     )
 
     def _force_final(reason: str) -> int:
+        _compact.maybe_compact(
+            oai, model, messages, budget, base_kwargs,
+            on_compact=lambda b, a: _progress(
+                f"(auto-compacted history: {b} -> {a} messages)", enabled=show,
+            ),
+            on_blocked=lambda why: print(
+                f"auto-compaction refused: {why}", file=sys.stderr,
+            ),
+            ledger=ledger,
+        )
+        if budget is not None and budget.hard_blocked:
+            return 2
         print(reason, file=sys.stderr)
         _t0 = time.monotonic()
         with _Spinner("finishing", enabled=show):
@@ -3889,6 +3901,11 @@ def run_loop(
             ),
             ledger=ledger,  # #99: log the event; #101: and bill the summary call
         )
+        if budget is not None and budget.hard_blocked:
+            # Evidence preservation failed or even the newest retained turn is
+            # transport-oversized. Do not follow a local refusal with the exact
+            # request we already know is unsafe (the #241 HTTP 413 chain).
+            return 2
         _t0 = time.monotonic()
         with _Spinner("thinking", enabled=show):
             resp = oai.chat.completions.create(
@@ -3983,18 +4000,9 @@ def run_loop(
 
         if not unlimited and calls_made >= max_tool_calls:
             # The forced-final is the turn a long, over-budget run most needs
-            # compacted -- it returns without re-entering the loop, so compact
-            # here too or it ships the full history (#48).
-            _compact.maybe_compact(
-                oai, model, messages, budget, base_kwargs,
-                on_compact=lambda b, a: _progress(
-                    f"(auto-compacted history: {b} -> {a} messages)", enabled=show,
-                ),
-                on_blocked=lambda reason: print(
-                    f"auto-compaction refused: {reason}", file=sys.stderr,
-                ),
-                ledger=ledger,  # #99
-            )
+            # compacted. `_force_final` owns that preflight so every forced-final
+            # path (tool cap, spend cap, token cap, cache guard) has the same byte
+            # safety rail and no path attempts the summary twice.
             return _force_final(
                 f"chat: reached --max-tool-calls ({max_tool_calls}); "
                 "requesting a final answer"

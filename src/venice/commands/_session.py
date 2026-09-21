@@ -1,6 +1,7 @@
 """Session store for `venice chat` / `venice code` (#47).
 
-A *session* is one REPL conversation persisted as a single JSON **envelope** so a
+A *session* is one REPL conversation persisted as a JSON **envelope** plus an
+optional private evidence sidecar, so a
 resume restores its *settings* -- model, system prompt, generation kwargs /
 ``venice_parameters``, ``max_tool_calls``, the ``code`` sandbox root, and the
 running usage/cost ledger -- not just its messages. This is the persistence
@@ -8,7 +9,8 @@ substrate the compaction (#48/#74) and multi-agent (#52) work build on, and it
 discharges #75's deferred "usage survives ``--resume``" criterion.
 
 Layout: one ``<SESSIONS_DIR>/<id>.json`` per session, auto-saved after every
-committed turn via an atomic 0600 write (mirrors ``auth._save_secrets``). The
+committed turn via an atomic 0600 write (mirrors ``auth._save_secrets``), with
+exact compacted messages under ``<SESSIONS_DIR>/<id>/context_archive/``. The
 store lives under ``~/.config/venice/sessions/`` by convention; ``$VENICE_SESSIONS_DIR``
 overrides it (resolved per call so this module has no import-time side effects).
 
@@ -30,7 +32,7 @@ from typing import List, Optional, Tuple
 from .. import _numeric, config
 from . import _context_archive, _index
 
-SESSION_VERSION = 2
+SESSION_VERSION = 3
 
 
 class SessionError(Exception):
@@ -90,6 +92,10 @@ class Session:
     messages: list = field(default_factory=list)
     context_archive: list = field(default_factory=list)
     protected_system_messages: int = 0
+    # Runtime-only location for v3 archive blobs. Never serialized: persisted
+    # sessions derive it from their validated id; imported envelopes derive it
+    # from the source file and are copied when rebound to their new session id.
+    context_archive_source: Optional[str] = field(default=None, repr=False)
 
     def to_envelope(self) -> dict:
         return {
@@ -216,6 +222,12 @@ def _resolve_zone_path(session_id: str) -> Path:
     return path
 
 
+def context_archive_dir(session_id: str) -> Path:
+    """Private sidecar directory for one validated stored session."""
+    path = _resolve_zone_path(session_id)
+    return path.parent / session_id / "context_archive"
+
+
 def load(ref: str, command: str) -> Session:
     """Load a session by id (in-place) or import a transcript/envelope file.
 
@@ -232,11 +244,15 @@ def load(ref: str, command: str) -> Session:
     source doesn't carry one (a bare legacy transcript).
     """
     if os.path.isfile(ref):
+        source_path = Path(ref)
         data = _read_json(ref)
         if isinstance(data, list):
             return new_session(command, messages=_validate_messages(data))
         if isinstance(data, dict) and ("venice_session" in data or "messages" in data):
             s = Session.from_envelope(data)
+            s.context_archive_source = str(
+                source_path.with_suffix("") / "context_archive"
+            )
             # An imported file becomes a new session -- don't clobber a store id.
             now = _now_iso()
             s.id, s.created, s.updated = new_id(), now, now
@@ -259,6 +275,7 @@ def load(ref: str, command: str) -> Session:
         raise SessionError(f"session {ref!r} is malformed (expected an envelope)")
     s = Session.from_envelope(data)
     s.id = ref  # in-place resume keeps the store identity
+    s.context_archive_source = str(context_archive_dir(ref))
     return s
 
 
@@ -324,6 +341,7 @@ def _iter_sessions():
         except SessionError:
             continue
         s.id = entry.stem
+        s.context_archive_source = str(context_archive_dir(s.id))
         yield s
 
 

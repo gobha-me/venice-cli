@@ -430,6 +430,12 @@ def register(subparsers) -> None:
         help="Compaction loss policy: aggressive discards summarized messages; "
         "evidence archives them exactly (default: evidence).",
     )
+    grp.add_argument(
+        "--context-archive-max-mib", type=_context_archive.positive_mib,
+        default=None, metavar="MIB",
+        help="Maximum disk-backed exact evidence per session "
+        f"(default {_context_archive.DEFAULT_ARCHIVE_MAX_MIB} MiB).",
+    )
 
     it = p.add_argument_group("Interactive")
     it.add_argument(
@@ -780,7 +786,8 @@ def _run(args) -> int:
     userconfig.apply_defaults(args, "code")
     userconfig.apply_literals(args, cache_guard="warn", compact_loss_policy="evidence")
     archive = _context_archive.ContextArchive.from_envelope(
-        session.context_archive if session is not None else None
+        session.context_archive if session is not None else None,
+        source_dir=(session.context_archive_source if session is not None else None),
     )
     # Faithful root restore: an explicit --root/$VENICE_CODE_ROOT still wins, else a
     # resumed session re-sandboxes to where it left off (tools + system prompt rebind
@@ -981,11 +988,18 @@ def _run(args) -> int:
             context_archive=archive,
         )
 
-    return _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task,
-                        models, dispatches=dispatches,
-                        ephemeral=bool(getattr(args, "ephemeral", None)),
-                        ledger=ledger, resolved_models=resolved_models,
-                        context_archive=archive)  # #117/#74
+    try:
+        return _run_oneshot(
+            args, oai, openai, model, tools, system, gen_kwargs, root, task,
+            models, dispatches=dispatches,
+            ephemeral=bool(getattr(args, "ephemeral", None)),
+            ledger=ledger, resolved_models=resolved_models,
+            context_archive=archive,
+        )  # #117/#74
+    finally:
+        # Persistent archives own no temporary directory, so this is inert for
+        # normal sessions and deterministic cleanup for --ephemeral one-shots.
+        archive.close()
 
 
 def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task,
@@ -1115,7 +1129,21 @@ def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task
             context_archive=archive.to_envelope(),
         )
         active.messages = messages  # share the live list so saves capture the transcript
-        active.context_archive = archive.entries
+    if archive.entries or args.compact_loss_policy == "evidence":
+        try:
+            archive_limit = _context_archive.max_bytes_from_args(args)
+            if active is None:
+                archive.bind_temporary(max_bytes=archive_limit)
+            else:
+                archive.bind(
+                    _session.context_archive_dir(active.id),
+                    max_bytes=archive_limit,
+                )
+                active.context_archive = archive.entries
+        except _context_archive.ArchiveError as e:
+            print(f"code: context archive: {e}", file=sys.stderr)
+            return 2
+    if active is not None:
         try:
             _session.save(active)   # create the file so `latest` resolves during the run
         except OSError as e:
@@ -1137,16 +1165,20 @@ def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task
         with _steer.pause_and_steer(sid, enabled=steer_enabled) as steer_drain:
             if args.json:
                 with _capture_stdout() as buf:
-                    _agent.run_loop(oai, model, messages, gen_kwargs, tools,
-                                    max_tool_calls=max_calls, yes=yes, json_out=False,
-                                    budget=budget, ledger=ledger, steer_drain=steer_drain,
-                                    parallel=parallel, models=models)
+                    loop_rc = _agent.run_loop(
+                        oai, model, messages, gen_kwargs, tools,
+                        max_tool_calls=max_calls, yes=yes, json_out=False,
+                        budget=budget, ledger=ledger, steer_drain=steer_drain,
+                        parallel=parallel, models=models,
+                    )
                 final_text = buf.getvalue().strip()
             else:
-                _agent.run_loop(oai, model, messages, gen_kwargs, tools,
-                                max_tool_calls=max_calls, yes=yes, json_out=False,
-                                budget=budget, ledger=ledger, steer_drain=steer_drain,
-                                parallel=parallel, models=models)
+                loop_rc = _agent.run_loop(
+                    oai, model, messages, gen_kwargs, tools,
+                    max_tool_calls=max_calls, yes=yes, json_out=False,
+                    budget=budget, ledger=ledger, steer_drain=steer_drain,
+                    parallel=parallel, models=models,
+                )
     except openai.OpenAIError as e:
         _finish(ledger, t0, human, json_out=args.json)
         return _openai.status_to_exit(openai, e, "code")
@@ -1169,6 +1201,20 @@ def _run_oneshot(args, oai, openai, model, tools, system, gen_kwargs, root, task
             except OSError:
                 pass
         return 130
+
+    if loop_rc != 0:
+        # In particular, byte-safety refusal returns 2 before any oversized
+        # completion. Do not follow that local stop with the out-of-loop
+        # acceptance request; persist the inspectable partial session instead.
+        _finish(ledger, t0, human, json_out=args.json)
+        if active is not None:
+            active.usage = ledger.to_dict()
+            active.context_archive = archive.to_envelope()
+            try:
+                _session.save(active)
+            except OSError:
+                pass
+        return loop_rc
 
     # --- Acceptance check ---
     verdict = None          # None = skipped; else 'pass' | 'fail' | 'unknown'
