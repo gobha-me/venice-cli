@@ -3509,6 +3509,23 @@ def _tool_followups(result) -> Tuple[dict, ...]:
     return result.followups if isinstance(result, _ToolOutcome) else ()
 
 
+def _vision_route_progress(name: str, result) -> Optional[str]:
+    """Describe who inspected an image, without repeating its path or URL."""
+    if name != "venice_vision":
+        return None
+    visible = _visible_tool_result(result)
+    if not isinstance(visible, dict) or visible.get("status") != "ok":
+        return None
+    mode = visible.get("mode")
+    model = visible.get("model")
+    via = f" via {model}" if isinstance(model, str) and model else ""
+    if mode == "native":
+        return f"  ↳ vision: native{via} (image added to active model context)"
+    if mode == "delegate":
+        return f"  ↳ vision: delegated{via} (separate completion)"
+    return None
+
+
 def _resolve_spend(
     tool: Tool, arguments: dict, result, gate: dict, *, window=None, runtime=None
 ):
@@ -3689,6 +3706,9 @@ def _dispatch_parallel(
 
     # Commit on the main thread: append in ORIGINAL order, advance by the executed count.
     for i, tc in enumerate(tool_calls):
+        route = _vision_route_progress(tc.function.name, results[i])
+        if route is not None:
+            _progress(route, enabled=show)
         messages.append(
             {
                 "role": "tool",
@@ -3934,6 +3954,9 @@ def run_loop(
                         tc, dispatch, gate, on_tool=on_tool, runtime=runtime
                     )
                     calls_made += 1
+                route = _vision_route_progress(tc.function.name, result)
+                if route is not None:
+                    _progress(route, enabled=show)
                 messages.append(
                     {
                         "role": "tool",

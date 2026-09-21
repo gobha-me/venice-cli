@@ -72,6 +72,9 @@ attach_root -- it registers the root and switches the active directory so relati
 and run/git follow it -- rather than writing a path into the wrong repo.
 - Explore before you change: use read_file, list_dir, grep (and project_search when \
 available) to understand the code first.
+- For screenshots, renders, and other image files, use venice_vision when available. \
+Its default mode keeps pixels in this model's conversation when the active model \
+advertises vision support; otherwise the tool reports that it used a separate delegate.
 - Prefer edit_file for small, targeted changes; use write_file for new files or full \
 rewrites. Match the surrounding code's style.
 - Use run to run tests, builds, or git mutations. run, write_file, and edit_file \

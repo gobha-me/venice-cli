@@ -61,6 +61,17 @@ class TestCodeTools(unittest.TestCase):
         r = self.tools["read_file"].invoke({"path": "b.bin"})
         self.assertEqual(r["status"], "error")
         self.assertIn("binary", r["message"])
+        self.assertNotIn("venice_vision", r["message"])
+
+    def test_read_image_points_to_vision_tool(self):
+        (Path(self.root) / "render.png").write_bytes(
+            b"\x89PNG\r\n\x1a\n" + b"render-pixels"
+        )
+        r = self.tools["read_file"].invoke({"path": "render.png"})
+        self.assertEqual(r["status"], "error")
+        self.assertIn("is an image", r["message"])
+        self.assertIn("venice_vision", r["message"])
+        self.assertIn("input_path='render.png'", r["message"])
 
     def test_read_oversize_rejected(self):
         big = "x" * (_code.MAX_READ_BYTES + 10)
@@ -529,6 +540,7 @@ class TestCodeFactory(unittest.TestCase):
         self.assertFalse(by["venice_vision"].paid)
         self.assertFalse(by["venice_job_status"].paid)   # charged at queue time
         self.assertFalse(by["venice_job_result"].paid)
+        self.assertIn("use venice_vision for image files", by["read_file"].description)
 
     def test_models_tool_absent_without_client(self):
         names = {t.name for t in _code.code_tools("/tmp")}

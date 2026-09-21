@@ -884,7 +884,11 @@ generations (watermarks, character consistency, glitches) instead of working
 blind. `mode=auto` (the default) attaches the image to the active frontend when
 that model advertises `supportsVision`; otherwise it delegates to a separate
 vision model and returns that model's text. `mode=native` or `mode=delegate`
-forces either path. An optional `prompt` directs the question; `model` and
+forces either path. On the native path the tool call only authorizes and loads
+the local file; the pixels are then added to the same conversation for the active
+model's next turn. Interactive progress says `native` (active model context) or
+`delegated` (separate completion), without repeating the image path. An optional
+`prompt` directs the question; `model` and
 `max_tokens` configure only delegation or the `auto` fallback. Not spend-gated.
 (`venice code` gets all three too; `mcp-serve` uses the separate
 [`--host-image-content`](#mcp-server) declaration for native vision.)
