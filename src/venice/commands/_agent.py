@@ -3832,6 +3832,9 @@ def run_loop(
             on_blocked=lambda why: print(
                 f"auto-compaction refused: {why}", file=sys.stderr,
             ),
+            on_fallback=lambda why: print(
+                f"auto-compaction recovery: {why}", file=sys.stderr,
+            ),
             ledger=ledger,
         )
         if budget is not None and budget.hard_blocked:
@@ -3898,6 +3901,9 @@ def run_loop(
             ),
             on_blocked=lambda reason: print(
                 f"auto-compaction refused: {reason}", file=sys.stderr,
+            ),
+            on_fallback=lambda reason: print(
+                f"auto-compaction recovery: {reason}", file=sys.stderr,
             ),
             ledger=ledger,  # #99: log the event; #101: and bill the summary call
         )

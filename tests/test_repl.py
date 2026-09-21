@@ -28,7 +28,7 @@ from tests.test_chat import (
     _args,
 )
 
-from venice.commands import _agent, _compact, _repl  # noqa: E402
+from venice.commands import _agent, _compact, _context_archive, _repl  # noqa: E402
 
 _EMPTY_CFG = {"version": 1, "mcpServers": {}, "defaults": {}}
 
@@ -636,6 +636,38 @@ class TestRepl(unittest.TestCase):
         self.assertIn('"id": "ctx-000001"', output)
         self.assertIn('\\"content\\":\\"u0\\"', output)
 
+    def test_empty_evidence_fallback_survives_session_resume(self):
+        from venice.commands import _session
+
+        with tempfile.TemporaryDirectory() as d:
+            resume = self._resume_history(d, pairs=6)
+            store = str(Path(d) / "store")
+            err = io.StringIO()
+            rc, _fake, calls = _run_repl(
+                _args(interactive=True, resume=resume,
+                      compact_loss_policy="evidence"),
+                [FakeToolCompletion("   ")],
+                ["/compact 2", "/exit"], stderr=err, sessions_dir=store,
+            )
+            with mock.patch.dict(os.environ, {"VENICE_SESSIONS_DIR": store}):
+                session_id = next(Path(store).glob("*.json")).stem
+                saved = _session.load(session_id, "chat")
+                archive = _context_archive.ContextArchive.from_envelope(
+                    saved.context_archive,
+                    source_dir=saved.context_archive_source,
+                )
+                exact = json.loads(archive.read("ctx-000001")["content"])
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 1)
+        self.assertIn("/compact recovery", err.getvalue())
+        self.assertTrue(any(
+            _compact.EVIDENCE_FALLBACK_SUMMARY in str(message.get("content", ""))
+            for message in saved.messages
+        ))
+        self.assertNotIn("message", saved.context_archive[0])
+        self.assertEqual(exact, {"role": "user", "content": "u0"})
+
     def test_reset_clears_evidence_archive(self):
         with tempfile.TemporaryDirectory() as d:
             resume = self._resume_history(d, pairs=6)
@@ -868,6 +900,103 @@ class TestRepl(unittest.TestCase):
             err.getvalue(),
         )
         self.assertNotIn("nothing to compact", err.getvalue())
+
+    def test_slash_compact_uses_one_off_model_without_switching_session(self):
+        messages = [{"role": "system", "content": "sys"}]
+        for i in range(5):
+            messages.extend([
+                {"role": "user", "content": f"u{i}"},
+                {"role": "assistant", "content": f"a{i}"},
+            ])
+        fake, calls = _fake_openai_seq([FakeToolCompletion("summary")])
+        state = {
+            "model": "working-model",
+            "tools_on": True,
+            "loss_policy": "aggressive",
+            "protected_system_messages": 1,
+            "budget": None,
+            "archive": None,
+            "ledger": None,
+        }
+        models = [{"id": "working-model"}, {"id": "summary-model"}]
+        err = io.StringIO()
+        with mock.patch.object(sys, "stderr", err):
+            result = _repl._dispatch_slash(
+                "/compact 2 summary-model", messages, state, _args(), models,
+                oai=fake, gen_kwargs={},
+            )
+        self.assertEqual(result, "continue")
+        self.assertEqual(calls[0]["model"], "summary-model")
+        self.assertEqual(state["model"], "working-model")
+        self.assertTrue(state["tools_on"])
+        self.assertIn("summary model summary-model", err.getvalue())
+
+    def test_slash_compact_prices_one_off_model_and_restores_ledger(self):
+        messages = [{"role": "system", "content": "sys"}]
+        for i in range(5):
+            messages.extend([
+                {"role": "user", "content": f"u{i}"},
+                {"role": "assistant", "content": f"a{i}"},
+            ])
+        fake, _calls = _fake_openai_seq([FakeToolCompletion(
+            "summary", usage={"prompt_tokens": 1_000_000, "completion_tokens": 0},
+        )])
+        models = [
+            {"id": "working-model", "model_spec": {
+                "pricing": {"input": {"usd": 1.0}},
+            }},
+            {"id": "summary-model", "model_spec": {
+                "pricing": {"input": {"usd": 9.0}},
+            }},
+        ]
+        ledger = _agent.CostLedger(model_id="working-model", models=models)
+        state = {
+            "model": "working-model",
+            "tools_on": True,
+            "loss_policy": "aggressive",
+            "protected_system_messages": 1,
+            "budget": None,
+            "archive": None,
+            "ledger": ledger,
+        }
+        with mock.patch.object(sys, "stderr", io.StringIO()):
+            _repl._dispatch_slash(
+                "/compact 2 summary-model", messages, state, _args(), models,
+                oai=fake, gen_kwargs={},
+            )
+        self.assertEqual(ledger.model_id, "working-model")
+        self.assertEqual(ledger.buckets["compaction"]["cost"], 9.0)
+        self.assertEqual(ledger.context_events[0]["summary_model"], "summary-model")
+
+    def test_slash_compact_evidence_fallback_is_explicit(self):
+        messages = [{"role": "system", "content": "sys"}]
+        for i in range(5):
+            messages.extend([
+                {"role": "user", "content": f"u{i}"},
+                {"role": "assistant", "content": f"a{i}"},
+            ])
+        fake, _calls = _fake_openai_seq([FakeToolCompletion("   ")])
+        archive = _context_archive.ContextArchive()
+        state = {
+            "model": "working-model",
+            "tools_on": True,
+            "loss_policy": "evidence",
+            "protected_system_messages": 1,
+            "budget": _compact.Budget(
+                threshold_tokens=1, loss_policy="evidence", archive=archive,
+            ),
+            "archive": archive,
+            "ledger": None,
+        }
+        err = io.StringIO()
+        with mock.patch.object(sys, "stderr", err):
+            _repl._dispatch_slash(
+                "/compact 2", messages, state, _args(),
+                [{"id": "working-model"}], oai=fake, gen_kwargs={},
+            )
+        self.assertGreater(len(archive.entries), 0)
+        self.assertIn("/compact recovery", err.getvalue())
+        self.assertNotIn("/compact refused", err.getvalue())
 
     def test_slash_usage_before_any_turn(self):
         err = io.StringIO()

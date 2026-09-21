@@ -636,8 +636,9 @@ In-REPL slash-commands: `/system [text]` (show/set the system prompt),
 `/model [name]` (switch model; with no name, show the current one and list the
 catalog), `/models` (list the available models, marking the current and the
 default), `/auto` and `/manual` (toggle auto-accepting paid/side-effecting tool
-calls for following turns), `/compact [N]` (summarize older history into one
-message, keeping the last `N` turns verbatim),
+calls for following turns), `/compact [N] [MODEL]` (summarize older history into
+one message, keeping the last `N` turns verbatim; an optional one-off summarizer
+model does not change the session model or tool state),
 `/context list [CURSOR]` (list archived evidence metadata) and
 `/context read ID [OFFSET]` (read up to 32 KiB of an exact archived message),
 `/cost` (this session's estimated spend so far, with the active model's
@@ -691,8 +692,12 @@ the `/context` commands above even in a plain REPL. The archive defaults to a
 If the next compaction would cross either cap, it is refused
 before the summary API call and both history and archive remain unchanged. Reads
 are paged at 32 KiB and list pages at 50 entries. Compaction is otherwise
-best-effort — a failed or empty summarization leaves both stores untouched — and
-never orphans a tool result from its assistant turn. A separate 16 MiB live-request
+best-effort: a failed request leaves both stores untouched. An empty summary stays
+fail-closed in aggressive mode; in evidence mode the CLI instead commits the exact
+staged archive and inserts a deterministic recovery bridge plus its bounded index,
+so the session can continue and resume without losing the only copy of its work.
+The terminal reports that fallback explicitly. Compaction never orphans a tool
+result from its assistant turn. A separate 16 MiB live-request
 safety threshold accounts for image data URLs that text token estimates miss;
 under byte pressure compaction archives additional oldest complete turns. If even
 the newest turn cannot fit, the CLI stops locally instead of sending a request that
