@@ -2901,6 +2901,39 @@ class TestAutoCompact(unittest.TestCase):
         self.assertEqual(history[1]["role"], "system")
         self.assertIn("summary of the work", history[1]["content"])
 
+    def test_tool_result_growth_crosses_threshold_without_a_resume(self):
+        history = [{"role": "system", "content": "sys"}]
+        for i in range(6):
+            history.extend((
+                {"role": "user", "content": f"u{i}"},
+                {"role": "assistant", "content": f"a{i}"},
+            ))
+        usage = {"prompt_tokens": 900, "completion_tokens": 3}
+        seq = [
+            FakeToolCompletion(tool_calls=[_FnCall("c1", "t", "{}")], usage=usage),
+            FakeToolCompletion("summary after the large tool result"),
+            FakeToolCompletion("done"),
+        ]
+        fake, calls = _fake_oai(seq)
+        tool = _tool(
+            "t",
+            lambda a, *, confirm=False: {"status": "ok", "content": "x" * 1200},
+        )
+        budget = _agent._compact.Budget(threshold_tokens=1000, keep_turns=2)
+        with mock.patch.object(sys, "stdout", io.StringIO()), \
+             mock.patch.object(sys, "stderr", io.StringIO()):
+            rc = _agent.run_loop(
+                fake, "m", history, {}, [tool], max_tool_calls=0, yes=True,
+                json_out=False, budget=budget,
+            )
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(calls[1]["tool_choice"], "none")
+        self.assertTrue(any(
+            "summary after the large tool result" in str(m.get("content"))
+            for m in calls[2]["messages"]
+        ))
+
     def test_no_budget_means_no_compaction(self):
         history = self._big_history()
         before = list(history)

@@ -852,6 +852,23 @@ class TestRepl(unittest.TestCase):
             self.assertEqual(len(calls), 1)  # the compaction actually ran
             self.assertIsNone(held[0].last_prompt_tokens)
 
+    def test_slash_compact_reports_an_empty_summary(self):
+        with tempfile.TemporaryDirectory() as d:
+            resume = self._resume_history(d, pairs=6)
+            err = io.StringIO()
+            rc, fake, calls = _run_repl(
+                _args(interactive=True, resume=resume, auto_compact=True),
+                [FakeToolCompletion("   ")],
+                ["/compact 2", "/exit"], stderr=err,
+            )
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 1)
+        self.assertIn(
+            "/compact refused: summarizer returned an empty response",
+            err.getvalue(),
+        )
+        self.assertNotIn("nothing to compact", err.getvalue())
+
     def test_slash_usage_before_any_turn(self):
         err = io.StringIO()
         rc, fake, calls = _run_repl(
@@ -1157,6 +1174,35 @@ class TestRepl(unittest.TestCase):
                 m.get("role") == "system" and "compact summary" in str(m.get("content"))
                 for m in msgs
             ))
+
+    def test_streamed_reply_growth_crosses_threshold_without_a_resume(self):
+        with tempfile.TemporaryDirectory() as d:
+            resume = self._resume_history(d, pairs=6)
+            err = io.StringIO()
+            results = [
+                [FakeChunk("r" * 1200), FakeChunk(usage={
+                    "prompt_tokens": 900,
+                    "completion_tokens": 300,
+                    "total_tokens": 1200,
+                })],
+                FakeToolCompletion("summary after the large streamed reply"),
+                [FakeChunk("r2")],
+            ]
+            rc, fake, calls = _run_repl(
+                _args(
+                    interactive=True, resume=resume, auto_compact=True,
+                    compact_threshold=1000, compact_keep_turns=2,
+                ),
+                results, ["first", "second", "/exit"], stderr=err,
+            )
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(calls[1]["tool_choice"], "none")
+        self.assertIn("auto-compacted", err.getvalue())
+        self.assertTrue(any(
+            "summary after the large streamed reply" in str(m.get("content"))
+            for m in calls[2]["messages"]
+        ))
 
     def test_malformed_resume_exit_2(self):
         with tempfile.TemporaryDirectory() as d:

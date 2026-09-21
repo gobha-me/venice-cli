@@ -135,16 +135,40 @@ class TestBudget(unittest.TestCase):
         self.assertTrue(b.over([{"role": "user", "content": "hi"}]))
         b.observe({"prompt_tokens": 10})
         self.assertFalse(b.over([{"role": "user", "content": "hi"}]))
+        self.assertTrue(b.over([{"role": "user", "content": "x" * 4000}]))
+
+    def test_live_budget_adds_growth_since_the_observed_snapshot(self):
+        messages = [{"role": "user", "content": "x" * 3200}]
+        b = _compact.Budget(threshold_tokens=1000)
+        b.observe({"prompt_tokens": 900}, messages)
+        self.assertFalse(b.over(messages))
+
+        messages.append({"role": "assistant", "content": "y" * 1200})
+        self.assertGreaterEqual(_compact.estimate_tokens(messages), 1000)
+        self.assertTrue(b.over(messages))
+        # This used to be the tell: only a fresh/resumed Budget noticed the
+        # threshold crossing because the live one stayed pinned at 900.
+        self.assertTrue(_compact.Budget(threshold_tokens=1000).over(messages))
+
+    def test_observed_baseline_tracks_history_shrinkage_too(self):
+        messages = [{"role": "user", "content": "x" * 4000}]
+        b = _compact.Budget(threshold_tokens=1000)
+        b.observe({"prompt_tokens": 1200}, messages)
+        messages[:] = [{"role": "user", "content": "reset"}]
+        self.assertFalse(b.over(messages))
 
     def test_observe_accepts_sdk_objects_and_garbage(self):
         b = _compact.Budget(threshold_tokens=100)
         usage = mock.MagicMock()
         usage.model_dump.return_value = {"prompt_tokens": 500}
-        b.observe(usage)
+        messages = [{"role": "user", "content": "snapshot"}]
+        b.observe(usage, messages)
         self.assertEqual(b.last_prompt_tokens, 500)
+        self.assertEqual(b.last_prompt_estimate, _compact.estimate_tokens(messages))
         b.observe(None)
         b.observe({"prompt_tokens": "nope"})
         self.assertEqual(b.last_prompt_tokens, 500)  # unchanged
+        self.assertEqual(b.last_prompt_estimate, _compact.estimate_tokens(messages))
 
     def test_falls_back_to_estimate(self):
         b = _compact.Budget(threshold_tokens=50)
@@ -429,6 +453,23 @@ class TestCompactionEvents(unittest.TestCase):
                     fake, "m", msgs, keep_turns=2, ledger=led))
                 self.assertEqual(led.events, [])
 
+    def test_failed_summarization_exposes_a_safe_reason(self):
+        cases = (
+            ({"fail": True}, "summary request failed"),
+            ({"summary": "   "}, "summarizer returned an empty response"),
+        )
+        for kw, reason in cases:
+            with self.subTest(**kw):
+                msgs = _history(6)
+                fake, _calls = _fake_oai(**kw)
+                budget = _compact.Budget(threshold_tokens=1, keep_turns=2)
+                blocked = []
+                self.assertFalse(_compact.maybe_compact(
+                    fake, "m", msgs, budget, {}, on_blocked=blocked.append,
+                ))
+                self.assertEqual(budget.last_error, reason)
+                self.assertEqual(blocked, [reason])
+
     def test_nothing_to_compact_records_nothing(self):
         msgs = _history(3)
         fake, _calls = _fake_oai()
@@ -588,6 +629,7 @@ class TestBudgetReset(unittest.TestCase):
     def _budget(self, observed=88110):
         b = _compact.Budget(threshold_tokens=1, keep_turns=2)
         b.last_prompt_tokens = observed
+        b.last_prompt_estimate = 777
         return b
 
     def test_compact_messages_clears_the_stale_observed_count(self):
@@ -599,6 +641,7 @@ class TestBudgetReset(unittest.TestCase):
         self.assertTrue(_compact.compact_messages(
             fake, "m", msgs, keep_turns=2, budget=b))
         self.assertIsNone(b.last_prompt_tokens)
+        self.assertIsNone(b.last_prompt_estimate)
 
     def test_the_reset_happens_without_a_ledger(self):
         # The reset must not be nested inside the `if ledger is not None` block that
@@ -621,6 +664,7 @@ class TestBudgetReset(unittest.TestCase):
                 self.assertFalse(_compact.compact_messages(
                     fake, "m", msgs, keep_turns=2, budget=b))
                 self.assertEqual(b.last_prompt_tokens, 88110)
+                self.assertEqual(b.last_prompt_estimate, 777)
 
     def test_nothing_to_compact_leaves_the_observed_count_alone(self):
         msgs = _history(3)
