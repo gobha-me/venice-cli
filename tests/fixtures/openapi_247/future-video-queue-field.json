@@ -1,8 +1,0 @@
-{
-  "operation": "POST /video/queue",
-  "media_type": "application/json",
-  "property": "future_optional",
-  "schema": {
-    "type": "boolean"
-  }
-}

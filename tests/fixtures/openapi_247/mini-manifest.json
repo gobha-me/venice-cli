@@ -1,0 +1,35 @@
+{
+  "operations": {
+    "POST /image/generate": {
+      "consumers": ["cli:image"],
+      "model_catalog_constraints": {},
+      "parameters": {
+        "implemented": ["header:Accept-Encoding"],
+        "intentional_omissions": {}
+      },
+      "request_bodies": {
+        "application/json": {
+          "implemented": ["model", "prompt", "transparent_background"],
+          "intentional_omissions": {}
+        }
+      }
+    },
+    "POST /video/queue": {
+      "consumers": ["cli:video"],
+      "model_catalog_constraints": {},
+      "parameters": {
+        "implemented": [],
+        "intentional_omissions": {}
+      },
+      "request_bodies": {
+        "application/json": {
+          "implemented": [
+            "aspect_ratio", "image_strength", "model", "negative_prompt",
+            "prompt", "resolution"
+          ],
+          "intentional_omissions": {}
+        }
+      }
+    }
+  }
+}
