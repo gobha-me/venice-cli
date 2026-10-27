@@ -120,13 +120,13 @@ class CommittedInventoryTests(unittest.TestCase):
             style_references=[{"image": "data:image/png;base64,eA==", "strength": 0.5}],
             embed_exif_metadata=True, lora_strength=80, quality="high",
             enable_web_search=True, disable_prompt_optimization_thinking=True,
-            enhance_prompt=True, style_prefix=None,
+            enhance_prompt=True, style_prefix=None, transparent_background=True,
         )
         edit_common = dict(
             prompt="edit", model="edit-model", aspect_ratio="1:1",
             resolution="1K", output_format="png", quality="high",
             safe_mode=True, disable_prompt_optimization_thinking=True,
-            enhance_prompt=True,
+            enhance_prompt=True, transparent_background=True,
         )
         chat_args = _namespace(
             system="system", temperature=0.2, max_tokens=100,
@@ -200,7 +200,7 @@ class CommittedInventoryTests(unittest.TestCase):
             )),
             "POST /video/complete": set(video.job_body("m", "q")),
             "POST /video/queue": set(video.queue_body(
-                "m", "prompt", shared_video, video_media, "none"
+                "m", "prompt", shared_video, video_media, "none", image_strength=0.5
             )),
             "POST /video/quote": set(video.quote_body(
                 "m", shared_video,

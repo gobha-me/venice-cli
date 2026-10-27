@@ -89,6 +89,12 @@ def register(subparsers) -> None:
                    choices=OUTPUT_FORMATS,
                    help="Output image format (default inferred; PNG for 1K).")
     p.add_argument(
+        "--transparent-background",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Request a transparent background from models that support it.",
+    )
+    p.add_argument(
         "--quality",
         choices=QUALITY_CHOICES,
         default=None,
@@ -186,6 +192,8 @@ def _add_common(body: dict, args) -> None:
         )
     if getattr(args, "enhance_prompt", None) is not None:
         body["enhance_prompt"] = args.enhance_prompt
+    if getattr(args, "transparent_background", None) is not None:
+        body["transparent_background"] = args.transparent_background
 
 
 def _build_body(args, base_image: str, layers_b64: List[str]) -> tuple:

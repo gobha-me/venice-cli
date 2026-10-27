@@ -316,7 +316,8 @@
             "output_format",
             "prompt",
             "resolution",
-            "safe_mode"
+            "safe_mode",
+            "transparent_background"
           ],
           "intentional_omissions": {
             "anon_user_id": "End-user tracking identifiers are not collected or sent.",
@@ -370,6 +371,7 @@
             "steps",
             "style_preset",
             "style_references",
+            "transparent_background",
             "variants",
             "width"
           ],
@@ -410,7 +412,8 @@
             "prompt",
             "quality",
             "resolution",
-            "safe_mode"
+            "safe_mode",
+            "transparent_background"
           ],
           "intentional_omissions": {
             "anon_user_id": "End-user tracking identifiers are not collected or sent."
@@ -491,6 +494,7 @@
             "duration",
             "elements",
             "end_image_url",
+            "image_strength",
             "image_url",
             "model",
             "negative_prompt",

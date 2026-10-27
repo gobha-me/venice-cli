@@ -2254,6 +2254,9 @@ _IMAGE_SCHEMA = _obj(
         "aspect_ratio": _p("string"),
         "resolution": _p("string"),
         "embed_exif_metadata": _p("boolean"),
+        "transparent_background": _p(
+            "boolean", "Request a transparent background from supported models."
+        ),
         "lora_strength": {
             "type": "integer",
             "minimum": 0,
@@ -2537,6 +2540,9 @@ _IMAGE_EDIT_SCHEMA = _obj(
         },
         "disable_prompt_optimization_thinking": _p("boolean"),
         "enhance_prompt": _p("boolean", "Rewrite the edit prompt before generation."),
+        "transparent_background": _p(
+            "boolean", "Request a transparent background from supported models."
+        ),
         "safe_mode": _p("boolean", "Blur adult/NSFW content. Defaults to on; set false to disable."),
     },
     required=["prompt"],
@@ -2544,14 +2550,22 @@ _IMAGE_EDIT_SCHEMA = _obj(
 
 _VIDEO_SCHEMA = _obj(
     {
-        "prompt": _p("string", "What the video should depict."),
+        "prompt": {
+            "type": "string",
+            "maxLength": _video.MAX_PROMPT,
+            "description": "What the video should depict.",
+        },
         "model": _p("string", "Video model id (default: the catalog default)."),
         "duration": _p("string", "Clip length, e.g. '5s'."),
-        "negative_prompt": _p("string"),
+        "negative_prompt": {"type": "string", "maxLength": _video.MAX_PROMPT},
         "resolution": _p("string", "Output resolution tier, e.g. 720p/1080p."),
         "aspect_ratio": _p("string", "Output aspect ratio, e.g. 16:9."),
         "no_audio": _p("boolean", "Generate silent video (no soundtrack)."),
         "image_url": _p("string", "Authorized local path or URL of a start image."),
+        "image_strength": {
+            "type": "number", "minimum": 0, "maximum": 1,
+            "description": "Model-dependent image conditioning strength.",
+        },
         "end_image_url": _p("string", "Authorized local path or URL of an end frame."),
         "video_url": _p("string", "Authorized local path or URL of an input video."),
         "audio_url": _p("string", "Authorized local path or URL of input audio."),

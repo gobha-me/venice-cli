@@ -121,6 +121,12 @@ def register(subparsers) -> None:
                    help="Aspect ratio (aspect-ratio/resolution-tier models).")
     p.add_argument("--resolution", default=None, metavar="TIER",
                    help="Resolution tier, e.g. 1K/2K/4K (tier models).")
+    p.add_argument(
+        "--transparent-background",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Request a transparent background from models that support it.",
+    )
     # Shared style templating (local; applies to single + batch).
     p.add_argument(
         "--style-prefix",
@@ -291,6 +297,7 @@ def _build_body(prompt: str, args) -> dict:
             args, "disable_prompt_optimization_thinking", None
         ),
         "enhance_prompt": getattr(args, "enhance_prompt", None),
+        "transparent_background": getattr(args, "transparent_background", None),
     }
     for k, v in optional.items():
         if v is not None:
@@ -774,6 +781,7 @@ _REPLAY_FIELDS = (
     "style_preset", "style_references", "variants", "safe_mode",
     "hide_watermark", "embed_exif_metadata", "lora_strength", "quality",
     "enable_web_search", "disable_prompt_optimization_thinking", "enhance_prompt",
+    "transparent_background",
 )
 
 

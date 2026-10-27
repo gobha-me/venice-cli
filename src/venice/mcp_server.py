@@ -375,6 +375,7 @@ def build_server(client, doc=None, root=None, host_image_content=False) -> MCPSe
         enable_web_search: Optional[bool] = None,
         disable_prompt_optimization_thinking: Optional[bool] = None,
         enhance_prompt: Optional[bool] = None,
+        transparent_background: Optional[bool] = None,
         safe_mode: Optional[bool] = None,
         hide_watermark: Optional[bool] = None,
         output_dir: Optional[str] = None,
@@ -404,6 +405,7 @@ def build_server(client, doc=None, root=None, host_image_content=False) -> MCPSe
                     disable_prompt_optimization_thinking
                 ),
                 enhance_prompt=enhance_prompt, safe_mode=safe_mode,
+                transparent_background=transparent_background,
                 hide_watermark=hide_watermark, output_dir=output_dir,
                 confirm=confirm, max_spend=max_spend,
                 path_authority=path_authority,
@@ -622,6 +624,7 @@ def build_server(client, doc=None, root=None, host_image_content=False) -> MCPSe
         aspect_ratio: Optional[str] = None,
         no_audio: Optional[bool] = None,
         image_url: Optional[str] = None,
+        image_strength: Optional[float] = None,
         end_image_url: Optional[str] = None,
         video_url: Optional[str] = None,
         audio_url: Optional[str] = None,
@@ -654,6 +657,7 @@ def build_server(client, doc=None, root=None, host_image_content=False) -> MCPSe
                 model=model, duration=duration,
                 negative_prompt=negative_prompt, resolution=resolution,
                 aspect_ratio=aspect_ratio, no_audio=no_audio, image_url=image_url,
+                image_strength=image_strength,
                 end_image_url=end_image_url, video_url=video_url, audio_url=audio_url,
                 reference_image_urls=reference_image_urls,
                 reference_video_urls=reference_video_urls,
@@ -678,6 +682,7 @@ def build_server(client, doc=None, root=None, host_image_content=False) -> MCPSe
         quality: Optional[str] = None,
         disable_prompt_optimization_thinking: Optional[bool] = None,
         enhance_prompt: Optional[bool] = None,
+        transparent_background: Optional[bool] = None,
         safe_mode: Optional[bool] = None,
         output_dir: Optional[str] = None,
         confirm: bool = False,
@@ -699,6 +704,7 @@ def build_server(client, doc=None, root=None, host_image_content=False) -> MCPSe
                     disable_prompt_optimization_thinking
                 ),
                 enhance_prompt=enhance_prompt, safe_mode=safe_mode,
+                transparent_background=transparent_background,
                 output_dir=output_dir, confirm=confirm,
                 max_spend=max_spend, path_authority=path_authority,
             )),
@@ -1081,6 +1087,7 @@ def build_http_server(
             negative_prompt: Optional[str] = None, seed: Optional[int] = None,
             aspect_ratio: Optional[str] = None, resolution: Optional[str] = None,
             style_references: Optional[List[dict]] = None,
+            transparent_background: Optional[bool] = None,
             confirm: bool = False,
         ) -> types.CallToolResult:
             """Generate images into private storage. Every paid call requires confirm."""
@@ -1088,6 +1095,7 @@ def build_http_server(
                 model=model, variants=variants, format=format, width=width, height=height,
                 negative_prompt=negative_prompt, seed=seed, aspect_ratio=aspect_ratio,
                 resolution=resolution, style_references=style_references,
+                transparent_background=transparent_background,
             ))
             try:
                 refs = []
@@ -1194,7 +1202,8 @@ def build_http_server(
             prompt: str, media_uri: str, layer_media_uris: Optional[List[str]] = None,
             model: Optional[str] = None, aspect_ratio: Optional[str] = None,
             resolution: Optional[str] = None, output_format: Optional[str] = None,
-            quality: Optional[str] = None, confirm: bool = False,
+            quality: Optional[str] = None,
+            transparent_background: Optional[bool] = None, confirm: bool = False,
         ) -> types.CallToolResult:
             """Edit owner-bound images. Disabled unless dynamic spend is enabled."""
             disabled = _dynamic_disabled("image-edit")
@@ -1210,6 +1219,7 @@ def build_http_server(
             args = _remote_media_args("image_edit", dict(
                 model=model, aspect_ratio=aspect_ratio, resolution=resolution,
                 output_format=output_format, quality=quality,
+                transparent_background=transparent_background,
             ))
             args.pop("image_url", None)
             return _stored_call("image", 1, confirm, lambda output: _mcp.image_edit_tool(
@@ -1320,6 +1330,7 @@ def build_http_server(
             resolution: Optional[str] = None, aspect_ratio: Optional[str] = None,
             no_audio: Optional[bool] = None,
             image_media_uri: Optional[str] = None,
+            image_strength: Optional[float] = None,
             end_image_media_uri: Optional[str] = None,
             video_media_uri: Optional[str] = None,
             audio_media_uri: Optional[str] = None,
@@ -1348,6 +1359,7 @@ def build_http_server(
             args = _remote_media_args("video", dict(
                 model=model, duration=duration, negative_prompt=negative_prompt,
                 resolution=resolution, aspect_ratio=aspect_ratio, no_audio=no_audio,
+                image_strength=image_strength,
                 **inputs,
             ))
             args.pop("max_wait", None)
