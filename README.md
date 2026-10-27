@@ -349,8 +349,9 @@ Formats: `png` (default), `webp`, `jpeg`. Aspect-ratio/resolution-tier
 models take `--aspect-ratio`/`--resolution` instead of `--width`/`--height`.
 Native controls include repeatable `--style-reference JSON`, `--quality`,
 `--lora-strength`, `--embed-exif-metadata`, `--web-search`,
-`--disable-prompt-optimization-thinking`, and `--enhance-prompt` (with explicit
-inverse forms for boolean options). Style-reference image data is bounded below
+`--transparent-background`, `--disable-prompt-optimization-thinking`, and
+`--enhance-prompt` (with explicit inverse forms for boolean options).
+Style-reference image data is bounded below
 8 MiB; local files are checked as recognized images and encoded as data URLs.
 Raw base64 is accepted and preserved. Reference count,
 reference-strength support, and quality are validated against the selected
@@ -442,8 +443,8 @@ venice image-edit card.png -p "brighter" --dry-run
 
 Provide exactly one base source: a positional file (base64-encoded under 25 MB)
 or `--image-url`. `--prompt/-p` is required. Optional `--model`, `--aspect-ratio`,
-`--resolution`, `--output-format`, prompt optimization controls, and
-`--safe-mode`/`--no-safe-mode` map straight to the API. `--quality` applies only
+`--resolution`, `--output-format`, `--transparent-background`, prompt optimization
+controls, and `--safe-mode`/`--no-safe-mode` map straight to the API. `--quality` applies only
 to multi-edit and is checked against that model's advertised qualities. These
 preferences are config-backable via `defaults.image_edit.*`;
 omit them to take the model defaults (`firered-image-edit`, PNG for 1K). Pricing
@@ -502,6 +503,11 @@ minutes, not seconds, so it polls less often and waits longer by default
 `default`-trait video model. Duration, resolution, and aspect ratio are checked
 against that selected model's live catalog constraints before the quote;
 media-input support also varies by model.
+This includes `--aspect-ratio 2:1` and `--resolution 768p` when the selected
+model advertises them. Prompts and negative prompts accept up to 32,000
+characters each. `--image-strength` sets model-dependent image conditioning
+strength from 0 to 1; it is sent only to the queue, alongside `--image` when
+needed by the model.
 
 ```sh
 # Quote only -- no spend.
@@ -2182,11 +2188,12 @@ safety), it should be settable in config." Currently config-backable:
   `negative_prompt`, `cfg_scale`, `steps`, `style_preset`, `style_references`,
   `embed_exif_metadata`, `lora_strength`, `quality`, `enable_web_search`,
   `disable_prompt_optimization_thinking`, `enhance_prompt`, `hide_watermark`,
-  `safe_mode` (tri-state `--safe-mode`/`--no-safe-mode`; set `false` to skip
+  `transparent_background`, `safe_mode` (tri-state `--safe-mode`/`--no-safe-mode`; set `false` to skip
   Venice's safety blur). Note `variants` is a **cost multiplier** — it is
   reflected in the confirmation prompt before anything is charged
 - `defaults.image_edit.*` — `model`, `aspect_ratio`, `resolution`, `output_format`,
-  `quality`, `disable_prompt_optimization_thinking`, `enhance_prompt`, `safe_mode`
+  `quality`, `disable_prompt_optimization_thinking`, `enhance_prompt`,
+  `transparent_background`, `safe_mode`
   (tri-state `--safe-mode`/`--no-safe-mode`)
 - `defaults.tts.*` — `model`, `format`, `voice`, `speed`, `play`
 - `defaults.sfx.*` — `model`, `duration`, `play`, `master`, `loop`,
@@ -2203,7 +2210,8 @@ safety), it should be settable in config." Currently config-backable:
   `venice sfx`/`venice music` **`--master` toggle** is the key
   `defaults.sfx.master` / `defaults.music.master`, not this table
 - `defaults.video.*` — `model`, `duration`, `resolution`, `aspect_ratio`,
-  `negative_prompt`, `no_audio`, `no_cleanup`, `poll_interval`, `max_wait`
+  `negative_prompt`, `image_strength`, `no_audio`, `no_cleanup`, `poll_interval`,
+  `max_wait`
 - `defaults.upscale.*` — `scale`, `creativity`
 - `defaults.contact_sheet.*` — `cols`, `cell`, `label`, `background`, `padding`,
   `engine`. Note the **underscore**: the command is `contact-sheet`, but config

@@ -430,6 +430,8 @@
                 "tts-elevenlabs-turbo-v2-5",
                 "tts-gemini-3-1-flash",
                 "tts-gradium-v1",
+                "tts-heygen-voice",
+                "tts-heygen-voice-turbo",
                 "tts-inworld-1-5-max",
                 "tts-kokoro",
                 "tts-minimax-speech-02-hd",
@@ -617,6 +619,15 @@
                                     },
                                     "image_url": {
                                       "properties": {
+                                        "detail": {
+                                          "enum": [
+                                            "auto",
+                                            "high",
+                                            "low",
+                                            "original"
+                                          ],
+                                          "type": "string"
+                                        },
                                         "url": {
                                           "format": "uri",
                                           "type": "string"
@@ -812,6 +823,23 @@
                   },
                   {
                     "properties": {
+                      "cache_control": {
+                        "properties": {
+                          "ttl": {
+                            "type": "string"
+                          },
+                          "type": {
+                            "enum": [
+                              "ephemeral"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "type"
+                        ],
+                        "type": "object"
+                      },
                       "content": {
                         "anyOf": [
                           {
@@ -923,6 +951,23 @@
                   },
                   {
                     "properties": {
+                      "cache_control": {
+                        "properties": {
+                          "ttl": {
+                            "type": "string"
+                          },
+                          "type": {
+                            "enum": [
+                              "ephemeral"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "type"
+                        ],
+                        "type": "object"
+                      },
                       "content": {
                         "type": "string"
                       },
@@ -1663,6 +1708,7 @@
               "enum": [
                 "firered-image-edit",
                 "flux-2-max-edit",
+                "flux-3-image-edit",
                 "gpt-image-1-5-edit",
                 "gpt-image-2-5-flare-edit",
                 "gpt-image-2-5-sunburst-edit",
@@ -1670,13 +1716,17 @@
                 "grok-imagine-edit",
                 "grok-imagine-image-2-0-edit",
                 "grok-imagine-quality-edit",
+                "ideogram-v4-5-edit",
                 "luma-uni-1-edit",
                 "luma-uni-1-max-edit",
                 "muse-image-edit",
+                "nano-banana-2-1-edit",
                 "nano-banana-2-edit",
                 "nano-banana-2-lite-edit",
                 "nano-banana-pro-edit",
                 "qwen-edit-uncensored",
+                "qwen-image-2-1-pro-edit",
+                "qwen-image-2-1-turbo-edit",
                 "qwen-image-2-edit",
                 "qwen-image-2-pro-edit",
                 "qwen-image-3-edit",
@@ -1708,6 +1758,9 @@
               "type": "string"
             },
             "safe_mode": {
+              "type": "boolean"
+            },
+            "transparent_background": {
               "type": "boolean"
             }
           },
@@ -1768,6 +1821,7 @@
               "enum": [
                 "firered-image-edit",
                 "flux-2-max-edit",
+                "flux-3-image-edit",
                 "gpt-image-1-5-edit",
                 "gpt-image-2-5-flare-edit",
                 "gpt-image-2-5-sunburst-edit",
@@ -1775,13 +1829,17 @@
                 "grok-imagine-edit",
                 "grok-imagine-image-2-0-edit",
                 "grok-imagine-quality-edit",
+                "ideogram-v4-5-edit",
                 "luma-uni-1-edit",
                 "luma-uni-1-max-edit",
                 "muse-image-edit",
+                "nano-banana-2-1-edit",
                 "nano-banana-2-edit",
                 "nano-banana-2-lite-edit",
                 "nano-banana-pro-edit",
                 "qwen-edit-uncensored",
+                "qwen-image-2-1-pro-edit",
+                "qwen-image-2-1-turbo-edit",
                 "qwen-image-2-edit",
                 "qwen-image-2-pro-edit",
                 "qwen-image-3-edit",
@@ -1813,6 +1871,9 @@
               "type": "string"
             },
             "safe_mode": {
+              "type": "boolean"
+            },
+            "transparent_background": {
               "type": "boolean"
             }
           },
@@ -1961,6 +2022,9 @@
               },
               "type": "array"
             },
+            "transparent_background": {
+              "type": "boolean"
+            },
             "variants": {
               "maximum": 4,
               "minimum": 1,
@@ -2034,6 +2098,7 @@
               "enum": [
                 "firered-image-edit",
                 "flux-2-max-edit",
+                "flux-3-image-edit",
                 "gpt-image-1-5-edit",
                 "gpt-image-2-5-flare-edit",
                 "gpt-image-2-5-sunburst-edit",
@@ -2041,11 +2106,15 @@
                 "grok-imagine-edit",
                 "grok-imagine-image-2-0-edit",
                 "grok-imagine-quality-edit",
+                "ideogram-v4-5-edit",
                 "muse-image-edit",
+                "nano-banana-2-1-edit",
                 "nano-banana-2-edit",
                 "nano-banana-2-lite-edit",
                 "nano-banana-pro-edit",
                 "qwen-edit-uncensored",
+                "qwen-image-2-1-pro-edit",
+                "qwen-image-2-1-turbo-edit",
                 "qwen-image-2-edit",
                 "qwen-image-2-pro-edit",
                 "qwen-image-3-edit",
@@ -2085,6 +2154,9 @@
               "type": "string"
             },
             "safe_mode": {
+              "type": "boolean"
+            },
+            "transparent_background": {
               "type": "boolean"
             }
           },
@@ -2135,6 +2207,7 @@
               "enum": [
                 "firered-image-edit",
                 "flux-2-max-edit",
+                "flux-3-image-edit",
                 "gpt-image-1-5-edit",
                 "gpt-image-2-5-flare-edit",
                 "gpt-image-2-5-sunburst-edit",
@@ -2142,11 +2215,15 @@
                 "grok-imagine-edit",
                 "grok-imagine-image-2-0-edit",
                 "grok-imagine-quality-edit",
+                "ideogram-v4-5-edit",
                 "muse-image-edit",
+                "nano-banana-2-1-edit",
                 "nano-banana-2-edit",
                 "nano-banana-2-lite-edit",
                 "nano-banana-pro-edit",
                 "qwen-edit-uncensored",
+                "qwen-image-2-1-pro-edit",
+                "qwen-image-2-1-turbo-edit",
                 "qwen-image-2-edit",
                 "qwen-image-2-pro-edit",
                 "qwen-image-3-edit",
@@ -2186,6 +2263,9 @@
               "type": "string"
             },
             "safe_mode": {
+              "type": "boolean"
+            },
+            "transparent_background": {
               "type": "boolean"
             }
           },
@@ -2286,6 +2366,7 @@
                 "16:9",
                 "1:1",
                 "21:9",
+                "2:1",
                 "2:3",
                 "3:2",
                 "3:4",
@@ -2463,6 +2544,11 @@
               "minimum": 0,
               "type": "number"
             },
+            "image_strength": {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
             "image_url": {
               "type": "string"
             },
@@ -2490,7 +2576,7 @@
               "type": "string"
             },
             "negative_prompt": {
-              "maxLength": 20000,
+              "maxLength": 32000,
               "type": "string"
             },
             "noise": {
@@ -2515,7 +2601,7 @@
               "type": "string"
             },
             "prompt": {
-              "maxLength": 20000,
+              "maxLength": 32000,
               "minLength": 1,
               "type": "string"
             },
@@ -2577,6 +2663,7 @@
                 "580p",
                 "720p",
                 "768P",
+                "768p",
                 "true_1080p"
               ],
               "type": "string"
@@ -2641,6 +2728,7 @@
                 "16:9",
                 "1:1",
                 "21:9",
+                "2:1",
                 "2:3",
                 "3:2",
                 "3:4",
@@ -2726,6 +2814,7 @@
                 "580p",
                 "720p",
                 "768P",
+                "768p",
                 "true_1080p"
               ],
               "type": "string"
@@ -2789,8 +2878,8 @@
     }
   },
   "source": {
-    "sha256": "330c28802c27b5222fe3849aeaa78bc9ac674e66a714e71f6e28e5f61605bc60",
+    "sha256": "11e9fead672ea14e0f3e878fd48c62d72bc7aa2fd583e66048a2d03649d76d9b",
     "url": "https://docs.venice.ai/swagger.yaml",
-    "version": "20260918.184256"
+    "version": "20261026.193006"
   }
 }

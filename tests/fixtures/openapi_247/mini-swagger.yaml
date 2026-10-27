@@ -1,0 +1,75 @@
+# Offline stand-in for https://docs.venice.ai/swagger.yaml (#247 drift tests).
+#
+# Deliberately small but shaped like the real document: a $ref'd request body,
+# an allOf-merged body, a header parameter, an unimplemented operation, and
+# UNQUOTED colon enums (16:9, 2:1) that YAML 1.1 would otherwise read as
+# sexagesimal integers. Served only through a faked urlopen; never fetched.
+openapi: 3.0.0
+info:
+  title: Venice drift fixture
+  version: "20261023.234127"
+paths:
+  /video/queue:
+    post:
+      operationId: queueVideo
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QueueVideoRequest'
+  /image/generate:
+    post:
+      operationId: generateImage
+      parameters:
+        - name: Accept-Encoding
+          in: header
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/ImageBase'
+                - type: object
+                  properties:
+                    transparent_background:
+                      type: boolean
+  /models:
+    get:
+      operationId: listModels
+components:
+  schemas:
+    ImageBase:
+      type: object
+      required: [model, prompt]
+      properties:
+        model:
+          type: string
+        prompt:
+          type: string
+          minLength: 1
+          maxLength: 7500
+    QueueVideoRequest:
+      type: object
+      required: [model, prompt]
+      properties:
+        model:
+          type: string
+        prompt:
+          type: string
+          minLength: 1
+          maxLength: 32000
+        negative_prompt:
+          type: string
+          maxLength: 32000
+        image_strength:
+          type: number
+          minimum: 0
+          maximum: 1
+        aspect_ratio:
+          type: string
+          enum: [16:9, 9:16, 2:1]
+        resolution:
+          type: string
+          enum: [720p, 1080p, 768p]

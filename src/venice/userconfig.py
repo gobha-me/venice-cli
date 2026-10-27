@@ -536,6 +536,7 @@ _COMMAND_MAP = {
         "max_tokens": ("max_tokens", int),
     },
     "image": {
+        "transparent_background": ("transparent_background", _as_bool),
         # `--hide-watermark` / `--safe-mode` are tri-state (default None) so these
         # defaults can win; an explicit CLI flag still wins over config.
         "hide_watermark": ("hide_watermark", _as_bool),
@@ -571,6 +572,7 @@ _COMMAND_MAP = {
         "variants": ("variants", int),
     },
     "image_edit": {
+        "transparent_background": ("transparent_background", _as_bool),
         # #57 Class B: tri-stated --safe-mode/--no-safe-mode, matching
         # defaults.image.safe_mode (the dest was renamed off `no_safe_mode` so
         # the two image commands read alike here and on the tool surfaces).
@@ -664,6 +666,7 @@ _COMMAND_MAP = {
         "loop": ("loop", _as_bool),
     },
     "video": {
+        "image_strength": ("image_strength", _numeric.finite_float),
         # #57 Class C: literal now lives in `video._run_generate`. `_run_status`
         # already snapshots/restores args.model around apply_defaults, since
         # there the model is job identity rather than a preference.

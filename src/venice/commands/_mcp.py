@@ -228,6 +228,7 @@ def image_tool(
     enable_web_search: Optional[bool] = None,
     disable_prompt_optimization_thinking: Optional[bool] = None,
     enhance_prompt: Optional[bool] = None,
+    transparent_background: Optional[bool] = None,
     safe_mode: bool = True,
     hide_watermark: bool = False,
     output_dir: Optional[str] = None,
@@ -265,6 +266,7 @@ def image_tool(
         enable_web_search=enable_web_search,
         disable_prompt_optimization_thinking=disable_prompt_optimization_thinking,
         enhance_prompt=enhance_prompt, style_prefix=None,
+        transparent_background=transparent_background,
     )
     try:
         price = _image.prepare_request(
@@ -914,6 +916,7 @@ def video_tool(
     aspect_ratio: Optional[str] = None,
     no_audio: Optional[bool] = None,
     image_url: Optional[str] = None,
+    image_strength: Optional[float] = None,
     end_image_url: Optional[str] = None,
     video_url: Optional[str] = None,
     audio_url: Optional[str] = None,
@@ -946,6 +949,10 @@ def video_tool(
     """
     if not prompt or not prompt.strip():
         return _err("video: prompt is required")
+    try:
+        _video.validate_queue_options(prompt, negative_prompt, image_strength)
+    except ValueError as e:
+        return _err(f"video: {e}")
     try:
         max_wait = _numeric.non_negative_float(max_wait)
     except ValueError as e:
@@ -1010,7 +1017,7 @@ def video_tool(
         return gate
 
     queue_body = _video.queue_body(
-        model, prompt.strip(), extra, queue_media, negative_prompt
+        model, prompt.strip(), extra, queue_media, negative_prompt, image_strength
     )
     try:
         queued = client.post_json("/video/queue", queue_body)
@@ -1322,6 +1329,7 @@ def image_edit_tool(
     quality: Optional[str] = None,
     disable_prompt_optimization_thinking: Optional[bool] = None,
     enhance_prompt: Optional[bool] = None,
+    transparent_background: Optional[bool] = None,
     safe_mode: Optional[bool] = None,
     output_dir: Optional[str] = None,
     confirm: bool = False,
@@ -1376,6 +1384,7 @@ def image_edit_tool(
         output_format=output_format, quality=quality, safe_mode=safe_mode,
         disable_prompt_optimization_thinking=disable_prompt_optimization_thinking,
         enhance_prompt=enhance_prompt,
+        transparent_background=transparent_background,
     )
     rc = _image_edit._validate(ns)  # stderr warnings only
     if rc is not None:

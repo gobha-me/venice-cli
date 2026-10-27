@@ -56,6 +56,7 @@ ELEMENTS_MAX = 4
 ELEMENT_REF_IMAGE_MAX = 3
 
 DEFAULT_VIDEO_DURATION = "5s"
+MAX_PROMPT = 32000
 
 
 def register(subparsers) -> None:
@@ -117,6 +118,10 @@ def register(subparsers) -> None:
     p.add_argument(
         "--image", default=None, metavar="PATH|URL",
         help="Start-frame image for image-to-video (local file or URL).",
+    )
+    p.add_argument(
+        "--image-strength", type=_numeric.finite_float, default=None,
+        metavar="N", help="Image conditioning strength (0-1; model-dependent).",
     )
     p.add_argument(
         "--end-image", default=None, dest="end_image", metavar="PATH|URL",
@@ -230,13 +235,34 @@ def quote_body(model: str, shared: dict, media: dict) -> dict:
     return body
 
 
+def validate_queue_options(prompt, negative_prompt=None, image_strength=None) -> None:
+    """Validate queue-only fields before catalog, quote, or paid requests."""
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise ValueError("prompt is required")
+    if len(prompt) > MAX_PROMPT:
+        raise ValueError(f"prompt exceeds {MAX_PROMPT} chars")
+    if negative_prompt is not None:
+        if not isinstance(negative_prompt, str):
+            raise ValueError("negative_prompt must be a string")
+        if len(negative_prompt) > MAX_PROMPT:
+            raise ValueError(f"negative_prompt exceeds {MAX_PROMPT} chars")
+    if image_strength is not None:
+        strength = _numeric.finite_float(image_strength)
+        if not 0 <= strength <= 1:
+            raise ValueError("image_strength must be between 0 and 1")
+
+
 def queue_body(
-    model: str, prompt: str, shared: dict, media: dict, negative_prompt=None
+    model: str, prompt: str, shared: dict, media: dict, negative_prompt=None,
+    image_strength=None,
 ) -> dict:
+    validate_queue_options(prompt, negative_prompt, image_strength)
     body = {"model": model, "prompt": prompt}
     body.update(shared)
     if negative_prompt:
         body["negative_prompt"] = negative_prompt
+    if image_strength is not None:
+        body["image_strength"] = _numeric.finite_float(image_strength)
     body.update(media)
     return body
 
@@ -498,6 +524,13 @@ def _run_generate(args) -> int:
     if not args.prompt:
         print("video: prompt required (or use: venice video-status <id>)", file=sys.stderr)
         return 2
+    try:
+        validate_queue_options(
+            args.prompt, args.negative_prompt, getattr(args, "image_strength", None)
+        )
+    except ValueError as e:
+        print(f"video: {e}", file=sys.stderr)
+        return 2
 
     client, rc = _queue.build_client()
     if rc != 0:
@@ -570,7 +603,8 @@ def _run_generate(args) -> int:
             return rc
 
     queue_request = queue_body(
-        model, args.prompt, extra, queue_media, args.negative_prompt
+        model, args.prompt, extra, queue_media, args.negative_prompt,
+        getattr(args, "image_strength", None),
     )
 
     try:
