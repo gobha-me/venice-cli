@@ -2341,6 +2341,7 @@
           "additionalProperties": false,
           "properties": {
             "model": {
+              "deprecated": true,
               "type": "string"
             },
             "queue_id": {
@@ -2348,7 +2349,6 @@
             }
           },
           "required": [
-            "model",
             "queue_id"
           ],
           "type": "object"
@@ -2878,8 +2878,8 @@
     }
   },
   "source": {
-    "sha256": "11e9fead672ea14e0f3e878fd48c62d72bc7aa2fd583e66048a2d03649d76d9b",
+    "sha256": "ef6561d9ff9f98cff00404e502dea8eb41a69520d9bbed98108214b41daf1d3b",
     "url": "https://docs.venice.ai/swagger.yaml",
-    "version": "20261026.193006"
+    "version": "20261027.204242"
   }
 }
