@@ -114,24 +114,24 @@ def build_server(client, doc=None, root=None, host_image_content=False) -> MCPSe
         status=confirmation_required and you must re-call with confirm=true."""
         return _mcp.image_tool(
             client, prompt,
-            **_merged(_defaults["image"], dict(
-                model=model, variants=variants, format=format,
-                width=width, height=height, negative_prompt=negative_prompt,
-                seed=seed, cfg_scale=cfg_scale, steps=steps,
-                style_preset=style_preset, style_references=style_references,
-                aspect_ratio=aspect_ratio, resolution=resolution,
-                embed_exif_metadata=embed_exif_metadata,
-                lora_strength=lora_strength, quality=quality,
-                enable_web_search=enable_web_search,
-                disable_prompt_optimization_thinking=(
+            **_merged(_defaults["image"], {
+                "model": model, "variants": variants, "format": format,
+                "width": width, "height": height, "negative_prompt": negative_prompt,
+                "seed": seed, "cfg_scale": cfg_scale, "steps": steps,
+                "style_preset": style_preset, "style_references": style_references,
+                "aspect_ratio": aspect_ratio, "resolution": resolution,
+                "embed_exif_metadata": embed_exif_metadata,
+                "lora_strength": lora_strength, "quality": quality,
+                "enable_web_search": enable_web_search,
+                "disable_prompt_optimization_thinking": (
                     disable_prompt_optimization_thinking
                 ),
-                enhance_prompt=enhance_prompt, safe_mode=safe_mode,
-                transparent_background=transparent_background,
-                hide_watermark=hide_watermark, output_dir=output_dir,
-                confirm=confirm, max_spend=max_spend,
-                path_authority=path_authority,
-            )),
+                "enhance_prompt": enhance_prompt, "safe_mode": safe_mode,
+                "transparent_background": transparent_background,
+                "hide_watermark": hide_watermark, "output_dir": output_dir,
+                "confirm": confirm, "max_spend": max_spend,
+                "path_authority": path_authority,
+            }),
         )
 
     @server.tool()
@@ -152,10 +152,10 @@ def build_server(client, doc=None, root=None, host_image_content=False) -> MCPSe
         format default."""
         return _mcp.tts_tool(
             client, text,
-            **_merged(_defaults["tts"], dict(
-                model=model, voice=voice, format=format, speed=speed,
-                output_dir=output_dir, confirm=confirm, max_spend=max_spend,
-            )),
+            **_merged(_defaults["tts"], {
+                "model": model, "voice": voice, "format": format, "speed": speed,
+                "output_dir": output_dir, "confirm": confirm, "max_spend": max_spend,
+            }),
         )
 
     @server.tool()
@@ -174,10 +174,10 @@ def build_server(client, doc=None, root=None, host_image_content=False) -> MCPSe
         (model=elevenlabs-sound-effects-v2, duration=5)."""
         return _mcp.sfx_tool(
             client, prompt,
-            **_merged(_defaults["sfx"], dict(
-                model=model, duration=duration, output_dir=output_dir,
-                confirm=confirm, max_spend=max_spend,
-            )),
+            **_merged(_defaults["sfx"], {
+                "model": model, "duration": duration, "output_dir": output_dir,
+                "confirm": confirm, "max_spend": max_spend,
+            }),
         )
 
     @server.tool()
@@ -198,11 +198,11 @@ def build_server(client, doc=None, root=None, host_image_content=False) -> MCPSe
         falls back to defaults.music.model, then to elevenlabs-music."""
         return _mcp.music_tool(
             client, prompt,
-            **_merged(_defaults["music"], dict(
-                model=model, duration=duration, instrumental=instrumental,
-                lyrics=lyrics, speed=speed, output_dir=output_dir, confirm=confirm,
-                max_spend=max_spend,
-            )),
+            **_merged(_defaults["music"], {
+                "model": model, "duration": duration, "instrumental": instrumental,
+                "lyrics": lyrics, "speed": speed, "output_dir": output_dir, "confirm": confirm,
+                "max_spend": max_spend,
+            }),
         )
 
     @server.tool()
@@ -228,11 +228,11 @@ def build_server(client, doc=None, root=None, host_image_content=False) -> MCPSe
             }
         return _mcp.upscale_tool(
             client, input_path,
-            **_merged(_defaults["upscale"], dict(
-                scale=scale, creativity=creativity,
-                output_dir=output_dir, confirm=confirm,
-                max_spend=max_spend, path_authority=path_authority,
-            )),
+            **_merged(_defaults["upscale"], {
+                "scale": scale, "creativity": creativity,
+                "output_dir": output_dir, "confirm": confirm,
+                "max_spend": max_spend, "path_authority": path_authority,
+            }),
         )
 
     @server.tool()
@@ -249,11 +249,11 @@ def build_server(client, doc=None, root=None, host_image_content=False) -> MCPSe
         confirm=true."""
         return _mcp.bg_remove_tool(
             client, input_path,
-            **_merged(_defaults["bg_remove"], dict(
-                image_url=image_url, output_dir=output_dir,
-                confirm=confirm, max_spend=max_spend,
-                path_authority=path_authority,
-            )),
+            **_merged(_defaults["bg_remove"], {
+                "image_url": image_url, "output_dir": output_dir,
+                "confirm": confirm, "max_spend": max_spend,
+                "path_authority": path_authority,
+            }),
         )
 
     @server.tool()
@@ -271,10 +271,10 @@ def build_server(client, doc=None, root=None, host_image_content=False) -> MCPSe
         spend-gated. Requires the [openai] extra."""
         return _mcp.chat_tool(
             client, message,
-            **_merged(_defaults["chat"], dict(
-                model=model, system=system, temperature=temperature,
-                max_tokens=max_tokens, web_search=web_search, character=character,
-            )),
+            **_merged(_defaults["chat"], {
+                "model": model, "system": system, "temperature": temperature,
+                "max_tokens": max_tokens, "web_search": web_search, "character": character,
+            }),
         )
 
     @server.tool()
@@ -295,10 +295,10 @@ def build_server(client, doc=None, root=None, host_image_content=False) -> MCPSe
         mode=delegate always delegates. model and max_tokens configure only the
         delegated path. Omitted args use defaults.vision.*, then mode=auto.
         """
-        args = _merged(_defaults["vision"], dict(
-            input_path=input_path, image_url=image_url, prompt=prompt,
-            model=model, max_tokens=max_tokens, mode=mode,
-        ))
+        args = _merged(_defaults["vision"], {
+            "input_path": input_path, "image_url": image_url, "prompt": prompt,
+            "model": model, "max_tokens": max_tokens, "mode": mode,
+        })
         selected = args.pop("mode", None) or "auto"
 
         if selected == "native":
@@ -375,20 +375,20 @@ def build_server(client, doc=None, root=None, host_image_content=False) -> MCPSe
         live catalog constraints before quote or spend."""
         return _mcp.video_tool(
             client, prompt,
-            **_merged(_defaults["video"], dict(
-                model=model, duration=duration,
-                negative_prompt=negative_prompt, resolution=resolution,
-                aspect_ratio=aspect_ratio, no_audio=no_audio, image_url=image_url,
-                image_strength=image_strength,
-                end_image_url=end_image_url, video_url=video_url, audio_url=audio_url,
-                reference_image_urls=reference_image_urls,
-                reference_video_urls=reference_video_urls,
-                reference_audio_urls=reference_audio_urls,
-                scene_image_urls=scene_image_urls,
-                reference_video_duration=reference_video_duration,
-                output_dir=output_dir, confirm=confirm, max_spend=max_spend,
-                max_wait=max_wait, path_authority=path_authority,
-            )),
+            **_merged(_defaults["video"], {
+                "model": model, "duration": duration,
+                "negative_prompt": negative_prompt, "resolution": resolution,
+                "aspect_ratio": aspect_ratio, "no_audio": no_audio, "image_url": image_url,
+                "image_strength": image_strength,
+                "end_image_url": end_image_url, "video_url": video_url, "audio_url": audio_url,
+                "reference_image_urls": reference_image_urls,
+                "reference_video_urls": reference_video_urls,
+                "reference_audio_urls": reference_audio_urls,
+                "scene_image_urls": scene_image_urls,
+                "reference_video_duration": reference_video_duration,
+                "output_dir": output_dir, "confirm": confirm, "max_spend": max_spend,
+                "max_wait": max_wait, "path_authority": path_authority,
+            }),
         )
 
     @server.tool()
@@ -417,19 +417,19 @@ def build_server(client, doc=None, root=None, host_image_content=False) -> MCPSe
         so this ALWAYS requires confirm=true."""
         return _mcp.image_edit_tool(
             client, prompt,
-            **_merged(_defaults["image_edit"], dict(
-                input_path=input_path, image_url=image_url,
-                layer_paths=layer_paths, model=model, aspect_ratio=aspect_ratio,
-                resolution=resolution, output_format=output_format,
-                quality=quality,
-                disable_prompt_optimization_thinking=(
+            **_merged(_defaults["image_edit"], {
+                "input_path": input_path, "image_url": image_url,
+                "layer_paths": layer_paths, "model": model, "aspect_ratio": aspect_ratio,
+                "resolution": resolution, "output_format": output_format,
+                "quality": quality,
+                "disable_prompt_optimization_thinking": (
                     disable_prompt_optimization_thinking
                 ),
-                enhance_prompt=enhance_prompt, safe_mode=safe_mode,
-                transparent_background=transparent_background,
-                output_dir=output_dir, confirm=confirm,
-                max_spend=max_spend, path_authority=path_authority,
-            )),
+                "enhance_prompt": enhance_prompt, "safe_mode": safe_mode,
+                "transparent_background": transparent_background,
+                "output_dir": output_dir, "confirm": confirm,
+                "max_spend": max_spend, "path_authority": path_authority,
+            }),
         )
 
     return server

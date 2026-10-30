@@ -3,8 +3,9 @@
 Keep transport authentication independent from tool registration. This module
 requires the optional MCP SDK and is never imported by the base CLI dispatcher.
 """
+from __future__ import annotations
+
 from pathlib import Path
-from typing import Optional
 
 import anyio
 import jwt
@@ -125,7 +126,7 @@ def _http_auth(request: Request, issuer_url: str, required_scopes):
     return owner, None
 
 
-def _byte_range(value: Optional[str], size: int):
+def _byte_range(value: str | None, size: int):
     """Parse one RFC 7233 byte range; multiple ranges are deliberately refused."""
     if not value:
         return 0, size - 1, False

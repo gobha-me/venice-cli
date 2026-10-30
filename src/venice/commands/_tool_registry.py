@@ -16,7 +16,7 @@ from . import video as _video
 from .models import MODEL_TYPES
 
 
-def _p(typ: str, desc: Optional[str] = None) -> dict:
+def _p(typ: str, desc: Optional[str] = None) -> dict:  # noqa: UP045  # reason: Python 3.9 runtime type-hint evaluation needs Optional
     """Describe one primitive tool argument."""
     d = {"type": typ}
     if desc:
@@ -24,7 +24,7 @@ def _p(typ: str, desc: Optional[str] = None) -> dict:
     return d
 
 
-def _obj(props: dict, required: Optional[list[str]] = None) -> dict:
+def _obj(props: dict, required: Optional[list[str]] = None) -> dict:  # noqa: UP045  # reason: Python 3.9 runtime type-hint evaluation needs Optional
     """Describe an object schema with explicit required fields."""
     schema: dict = {"type": "object", "properties": props}
     if required:
@@ -674,7 +674,7 @@ _CODE_ASSET_BUILTINS = [
 _REGISTRY = _BUILTINS + _CODE_ASSET_BUILTINS
 
 
-def get(name: str) -> Optional[ToolSpec]:
+def get(name: str) -> Optional[ToolSpec]:  # noqa: UP045  # reason: Python 3.9 runtime type-hint evaluation needs Optional
     """The registry row for `name` (metadata only, no client), or None."""
     for spec in _REGISTRY:
         if spec.name == name:
