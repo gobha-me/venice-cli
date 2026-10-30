@@ -25,8 +25,15 @@ from unittest import mock
 
 import venice
 from tests._r1_loopback import (
-    MP3, MP4, LoopbackVenice, Reply, bytes_reply, echo_bearer, json_reply,
-    model_catalog, video_model,
+    MP3,
+    MP4,
+    LoopbackVenice,
+    Reply,
+    bytes_reply,
+    echo_bearer,
+    json_reply,
+    model_catalog,
+    video_model,
 )
 from venice import _redact, config
 from venice.client import VeniceAPIError, VeniceClient
@@ -75,7 +82,7 @@ class _Env(unittest.TestCase):
         """No n-character window of ``secret`` (any variant) appears in ``text``."""
         text = str(text)
         for name, form in variants(secret).items():
-            for i in range(0, max(1, len(form) - n + 1)):
+            for i in range(max(1, len(form) - n + 1)):
                 window = form[i:i + n]
                 self.assertNotIn(window, text, f"{name} fragment {window!r} leaked")
 
@@ -120,7 +127,7 @@ class CliVideoStatusCleanup(_Env):
         return subprocess.run(
             [sys.executable, "-m", "venice", "video-status", *argv,
              "--poll-interval", "0", "--max-wait", "10"],
-            cwd=str(self.tmp), env=env, capture_output=True, text=True, timeout=60,
+            cwd=str(self.tmp), env=env, capture_output=True, text=True, timeout=60, check=False,
         )
 
     def test_cleanup_posts_only_queue_id_after_saving(self):

@@ -33,7 +33,13 @@ from pathlib import Path
 
 import venice
 from tests._r1_loopback import (
-    MP3, MP4, PNG, LoopbackVenice, bytes_reply, echo_bearer, json_reply,
+    MP3,
+    MP4,
+    PNG,
+    LoopbackVenice,
+    bytes_reply,
+    echo_bearer,
+    json_reply,
 )
 from venice import config
 from venice.client import VeniceClient
@@ -143,9 +149,11 @@ class _Harness(unittest.TestCase):
 
     async def rejected(self, session, name, arguments):
         """A protocol- or tool-level refusal; never a silent success."""
+        from mcp.shared.exceptions import MCPError
+
         try:
             result = await session.call_tool(name, arguments)
-        except Exception:  # the SDK may raise McpError for protocol errors
+        except MCPError:  # the SDK raises MCPError for protocol errors
             return None
         self.assertTrue(result.is_error, (name, arguments, result))
         return result
@@ -218,6 +226,7 @@ class LocalProfile(_Harness):
 
     def test_every_stdio_tool_in_process(self):
         from mcp import Client
+
         from venice.mcp_server import build_server
 
         async def run(api):
@@ -298,13 +307,11 @@ class RemoteProfiles(_Harness):
                 enable_dns_rebinding_protection=True, allowed_hosts=["mcp.example.test"],
                 allowed_origins=["https://allowed.example"]),
         )
-        async with server.session_manager.run():
-            async with httpx2.AsyncClient(
-                transport=httpx2.ASGITransport(app=app), base_url=self.PUBLIC,
-                headers={"Authorization": "Bearer r1-mcp-token"},
-            ) as http:
-                async with Client(streamable_http_client(self.PUBLIC, http_client=http)) as session:
-                    return await body(session)
+        async with server.session_manager.run(), httpx2.AsyncClient(
+            transport=httpx2.ASGITransport(app=app), base_url=self.PUBLIC,
+            headers={"Authorization": "Bearer r1-mcp-token"},
+        ) as http, Client(streamable_http_client(self.PUBLIC, http_client=http)) as session:
+            return await body(session)
 
     def test_every_media_tool_and_job_lifecycle(self):
         async def body(session):

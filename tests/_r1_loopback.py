@@ -22,7 +22,10 @@ import threading
 import urllib.parse
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable
+
+if TYPE_CHECKING:  # annotation-only (postponed); no runtime dependency
+    from typing_extensions import Self
 
 PREFIX = "/api/v1"
 
@@ -97,7 +100,7 @@ class LoopbackVenice:
         self._lock = threading.Lock()
 
     # -- scripting --------------------------------------------------------- #
-    def on(self, method: str, path: str, *replies) -> "LoopbackVenice":
+    def on(self, method: str, path: str, *replies) -> LoopbackVenice:
         """Script ``method path``. Replies are consumed in order; the last one
         repeats. Each is a ``Reply`` or a ``Responder`` callable."""
         if not replies:
@@ -119,7 +122,7 @@ class LoopbackVenice:
             return queue.pop(0) if len(queue) > 1 else queue[0]
 
     # -- lifecycle --------------------------------------------------------- #
-    def __enter__(self) -> "LoopbackVenice":
+    def __enter__(self) -> Self:
         fixture = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -129,8 +132,7 @@ class LoopbackVenice:
             def _handle(self, method):
                 parsed = urllib.parse.urlsplit(self.path)
                 path = parsed.path
-                if path.startswith(PREFIX):
-                    path = path[len(PREFIX):]
+                path = path.removeprefix(PREFIX)
                 raw = b""
                 length = int(self.headers.get("Content-Length") or 0)
                 if length:
@@ -161,13 +163,13 @@ class LoopbackVenice:
                 self.end_headers()
                 self.wfile.write(payload)
 
-            def do_GET(self):  # noqa: N802 - stdlib hook name
+            def do_GET(self):
                 self._handle("GET")
 
-            def do_POST(self):  # noqa: N802 - stdlib hook name
+            def do_POST(self):
                 self._handle("POST")
 
-            def do_DELETE(self):  # noqa: N802 - stdlib hook name
+            def do_DELETE(self):
                 self._handle("DELETE")
 
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -202,7 +204,7 @@ def echo_bearer(status: int, template: str, content_type="application/json") -> 
     return respond
 
 
-def model_catalog(by_type: Optional[dict] = None) -> Responder:
+def model_catalog(by_type: dict | None = None) -> Responder:
     """GET /models answering per ``?type=`` from ``by_type`` (empty list default)."""
     table = by_type or {}
 
