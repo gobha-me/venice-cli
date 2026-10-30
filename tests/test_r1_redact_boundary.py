@@ -15,10 +15,12 @@ Only the Venice HTTP peer is faked (``tests/_r1_loopback.py``, 127.0.0.1).
 unmodified. Every credential here is synthetic; nothing is read from the real
 credentials file.
 
-The ``expectedFailure`` cases at the bottom are red-first: they pin redaction
-gaps that exist today (see FINDINGS-for-lead.md). src/ is not changed in this
-branch, so they are expected to fail until the code is fixed.
+The ``expected_leak`` cases at the bottom are red-first: they pin redaction
+gaps that exist today. src/ is not changed in this branch, so they are
+expected to fail, at their leak assertion only, until the code is fixed.
+Their preconditions are separate ``*_precondition`` tests that must pass.
 """
+import functools
 import json
 import os
 import re
@@ -229,23 +231,56 @@ class RedactEncodedForms(_Isolated):
                 self.assertEqual(_redact.redact_text(text), text)
 
 
+def _reraise(exc):
+    raise exc
+
+
+def expected_leak(test):
+    """Red-first marker: only an AssertionError counts as the expected failure.
+
+    ``unittest.expectedFailure`` alone would also absorb setup errors (e.g. a
+    broken ``load_key``). Any other exception is re-raised from a cleanup,
+    which unittest runs outside the expected-failure scope, so it is reported
+    as an ERROR. A pass is still an unexpected success, which fails the run.
+    """
+
+    @functools.wraps(test)
+    def wrapper(self):
+        try:
+            test(self)
+        except AssertionError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - re-raised below as an ERROR
+            self.addCleanup(_reraise, exc)
+
+    return unittest.expectedFailure(wrapper)
+
+
 # --------------------------------------------------------------------------- #
 # 2. Red-first: redaction gaps that exist today (src unchanged in this branch)
 # --------------------------------------------------------------------------- #
 
 class KnownRedactionGaps(_Isolated):
-    # Finding F-fu-1 (FINDINGS-for-lead.md): _mcp._err calls
+    # Each red-first test below is marked @expected_leak and holds only the
+    # leak assertion and what follows it. The preconditions it relies on
+    # live in an unmarked *_precondition test that must pass on its own, so
+    # a broken precondition can never be absorbed as an expected failure.
+
+    # Finding F-fu-1: _mcp._err calls
     # _redact.redact_text(message) with no explicit secret, so it can only
     # redact $VENICE_API_KEY. When the key came from the credentials file
     # (no env var), a tool argument that reflects that key into the error
     # envelope is returned to the MCP host unredacted.
-    @unittest.expectedFailure
-    def test_file_loaded_key_reflected_into_mcp_error_envelope_is_redacted(self):
+    def _write_file_key(self):
         file_key = "r1-fu-file-only-synthetic-Zp8"
         creds = self.home / ".config" / "venice" / "credentials"
         creds.parent.mkdir(parents=True)
         creds.write_text(file_key + "\n", encoding="utf-8")
         creds.chmod(0o600)
+        return file_key, creds
+
+    def test_file_loaded_key_reflected_into_mcp_error_envelope_is_redacted_precondition(self):
+        file_key, creds = self._write_file_key()
         with LoopbackVenice() as api, mock.patch.object(config, "CREDS_FILE", creds):
             os.environ[config.ENV_BASE_URL] = api.base_url
             self.assertNotIn(config.ENV_API_KEY, os.environ)
@@ -254,16 +289,34 @@ class KnownRedactionGaps(_Isolated):
             result = _mcp.job_status_tool(client, queue_id="q", type=file_key, model="m")
         self.assertEqual(api.seen, [])
         self.assertEqual(result["status"], "error")
+
+    @expected_leak
+    def test_file_loaded_key_reflected_into_mcp_error_envelope_is_redacted(self):
+        file_key, creds = self._write_file_key()
+        with LoopbackVenice() as api, mock.patch.object(config, "CREDS_FILE", creds):
+            os.environ[config.ENV_BASE_URL] = api.base_url
+            client = build_client_from_auth()
+            result = _mcp.job_status_tool(client, queue_id="q", type=file_key, model="m")
         self.assertNotIn(file_key, json.dumps(result))
 
     # Finding F-fu-2: percent-escapes are case-insensitive (RFC 3986 2.1), but
     # _redact only removes urllib's uppercase form, so '%2f' / '%2b' echoes of
     # the credential survive into VeniceAPIError.body.
-    @unittest.expectedFailure
-    def test_lowercase_percent_escapes_are_redacted(self):
-        lower = re.sub(r"%[0-9A-F]{2}", lambda m: m.group(0).lower(),
-                       urllib.parse.quote(SECRET, safe=""))
+    @staticmethod
+    def _lowercase_escaped():
+        return re.sub(r"%[0-9A-F]{2}", lambda m: m.group(0).lower(),
+                      urllib.parse.quote(SECRET, safe=""))
+
+    def test_lowercase_percent_escapes_are_redacted_precondition(self):
+        lower = self._lowercase_escaped()
         self.assertIn("%2f", lower)
+        # errors_for's own checks (a VeniceAPIError per body, no unexpected
+        # request) run here, outside the expected-failure scope.
+        _error, = self.errors_for(["callback /cb/" + lower])
+
+    @expected_leak
+    def test_lowercase_percent_escapes_are_redacted(self):
+        lower = self._lowercase_escaped()
         error, = self.errors_for(["callback /cb/" + lower])
         self.assertNotIn(lower, error.body)
         self.assertIn(MARK, error.body)
@@ -271,16 +324,25 @@ class KnownRedactionGaps(_Isolated):
     # Finding F-fu-3: JSON allows (and PHP / some Java encoders emit) '\/' for
     # '/'. _redact only knows json.dumps's form, which leaves '/' bare, so an
     # upstream that escapes slashes echoes the credential past redaction.
-    @unittest.expectedFailure
-    def test_json_solidus_escaped_credential_is_redacted(self):
+    @staticmethod
+    def _solidus_escaped():
         slashed = encodings(SECRET)["json"].replace("/", "\\/")
-        self.assertNotEqual(slashed, encodings(SECRET)["json"])
         body = '{"error": {"message": "bad key ' + slashed + '"}}'
+        return slashed, body
+
+    def test_json_solidus_escaped_credential_is_redacted_precondition(self):
+        slashed, body = self._solidus_escaped()
+        self.assertNotEqual(slashed, encodings(SECRET)["json"])
         self.assertEqual(json.loads(body)["error"]["message"], "bad key " + SECRET)
+        # errors_for's own checks run here, outside the expected-failure scope.
+        _error, = self.errors_for([body], "application/json")
+
+    @expected_leak
+    def test_json_solidus_escaped_credential_is_redacted(self):
+        slashed, body = self._solidus_escaped()
         error, = self.errors_for([body], "application/json")
         self.assertNotIn(slashed, error.body)
         self.assertIn(MARK, error.body)
-
 
 if __name__ == "__main__":
     unittest.main()
