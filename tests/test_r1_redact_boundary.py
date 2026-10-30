@@ -239,18 +239,21 @@ def expected_leak(test):
     """Red-first marker: only an AssertionError counts as the expected failure.
 
     ``unittest.expectedFailure`` alone would also absorb setup errors (e.g. a
-    broken ``load_key``). Any other exception is re-raised from a cleanup,
-    which unittest runs outside the expected-failure scope, so it is reported
-    as an ERROR. A pass is still an unexpected success, which fails the run.
+    broken ``load_key``) and even ``SystemExit``. AssertionError, SkipTest and
+    KeyboardInterrupt propagate unchanged, so a skip stays a skip and Ctrl-C
+    still stops the run. Any other exception, ``BaseException`` subclasses
+    such as ``SystemExit`` included, is re-raised from a cleanup, which
+    unittest runs outside the expected-failure scope, so it is reported as an
+    ERROR. A pass is still an unexpected success, which fails the run.
     """
 
     @functools.wraps(test)
     def wrapper(self):
         try:
             test(self)
-        except AssertionError:
+        except (AssertionError, unittest.SkipTest, KeyboardInterrupt):
             raise
-        except Exception as exc:  # noqa: BLE001 - re-raised below as an ERROR
+        except BaseException as exc:  # noqa: BLE001 - re-raised below as an ERROR
             self.addCleanup(_reraise, exc)
 
     return unittest.expectedFailure(wrapper)
