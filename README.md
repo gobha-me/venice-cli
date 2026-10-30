@@ -2492,7 +2492,7 @@ The base Python 3.9 import graph includes `_redact` and `commands._tool_registry
 Keep their annotations compatible with 3.9, including evaluated type hints;
 `typing.Optional` is intentional. `_mcp_auth`, `_mcp_common`, and `_mcp_stdio`
 are loaded only when the optional MCP server is invoked (Python 3.10+).
-The audit and complete API/MCP surface inventories are linked from [REPORT.md](REPORT.md).
+The audit findings are tracked in [issue #252](https://github.com/gobha-me/venice-cli/issues/252).
 
 ### `venice.__init__`
 

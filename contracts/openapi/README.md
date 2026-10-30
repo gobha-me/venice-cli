@@ -63,4 +63,4 @@ negotiated schemas for all three MCP profiles.
 Regenerate the full inventories with `scripts/openapi_surface.py` and
 `scripts/mcp_surface.py` as described in the README module guide. They complement
 the existing curated request drift gate and do not change its fail-on-drift policy.
-See [REPORT.md](../../REPORT.md) for test results and audit limitations.
+See [issue #252](https://github.com/gobha-me/venice-cli/issues/252) for the audit findings and limitations.
