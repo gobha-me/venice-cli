@@ -12,8 +12,9 @@ import mimetypes
 import os
 import stat
 import sys
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Callable, Iterable, List, Optional, Tuple, Union
+from typing import Callable, List, Optional, Tuple, Union
 
 from .. import _numeric, billing
 from ..client import VeniceAPIError

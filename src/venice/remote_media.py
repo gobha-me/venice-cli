@@ -23,7 +23,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-
 DEFAULT_TTL_SECONDS = 24 * 60 * 60
 DEFAULT_MAX_OBJECTS = 100
 DEFAULT_PRINCIPAL_MAX_BYTES = 1024 * 1024 * 1024

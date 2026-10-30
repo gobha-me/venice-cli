@@ -110,7 +110,7 @@ def _run(args) -> int:
                 )
             except (TypeError, ValueError):
                 print(f"  DIEM allow.:  {diem}")
-        print(f"  monthly:      (not exposed via inference key; drains before cash)")
+        print("  monthly:      (not exposed via inference key; drains before cash)")
         print(f"  USD cash:     {format_usd(usd)}")
         print(f"Spend order:    {' -> '.join(SPEND_ORDER)}")
         print(f"Key expires:    {key_exp or 'never'}")

@@ -38,7 +38,6 @@ from typing import List, Optional
 from .. import config
 from . import _agent, _compact, _context_archive, _models, _persona, _session, _steer
 
-
 _PROMPT = "you> "
 _CONT_PROMPT = "... "  # continuation prompt for /paste block mode (#65)
 

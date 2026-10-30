@@ -10,8 +10,8 @@ from __future__ import annotations
 import html as _htmlmod
 import os
 import re
-import signal
 import shutil
+import signal
 import subprocess
 import tempfile
 import urllib.error
@@ -20,6 +20,7 @@ import urllib.request
 from typing import List, Optional, Tuple
 
 from venice import _egress
+
 from . import _browser_proxy
 from ._exec import MAX_OUTPUT_CHARS
 
@@ -122,7 +123,7 @@ def _bounded_int(value, default, *, minimum=1, maximum):
 
 def _decode(raw: bytes, content_type: str) -> str:
     charset = "utf-8"
-    match = re.search(r"charset=([\w\-]+)", content_type or "", re.I)
+    match = re.search(r"charset=([\w\-]+)", content_type or "", re.IGNORECASE)
     if match:
         charset = match.group(1)
     try:

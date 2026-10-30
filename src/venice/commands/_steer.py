@@ -55,7 +55,7 @@ class _Pending:
         self.requested = False
 
 
-def _make_handler(state: "_Pending"):
+def _make_handler(state: _Pending):
     """A SIGINT handler that arms a steer on the first hit and aborts on the second.
 
     First Ctrl+C: set ``requested`` and return (the in-flight syscall resumes, PEP 475).
@@ -132,7 +132,7 @@ def _read_steer_line(prompt: Optional[Callable[[str], str]] = None) -> str:
             return ""
 
 
-def _make_drain(session_id, state: "_Pending",
+def _make_drain(session_id, state: _Pending,
                 prompt: Optional[Callable[[str], str]] = None) -> Callable[[], List[str]]:
     """Compose the #78 mailbox drain with a tty prompt gated on the armed flag.
 
