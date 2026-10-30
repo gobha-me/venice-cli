@@ -23,7 +23,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import List, Optional
 
-from .. import _numeric
+from .. import _numeric, _redact
 from ..client import VeniceAPIError
 from . import (
     _audio, _browser, _index, _memory, _models, _openai, _queue, _shared,
@@ -163,7 +163,7 @@ def _write(path: Path, data: bytes) -> Optional[str]:
 
 
 def _err(message: str) -> dict:
-    return {"status": "error", "message": message}
+    return {"status": "error", "message": _redact.redact_text(message)}
 
 
 # ---- async job handles (#62: background media renders) -----------------------
@@ -755,7 +755,7 @@ def chat_tool(
     try:
         resp = oai.chat.completions.create(**kwargs)
     except openai.OpenAIError as e:
-        return _err(f"chat: API error: {e}")
+        return _err(f"chat: API error: {_openai._safe_api_error(e, getattr(e, 'status_code', None))}")
 
     content = ""
     if getattr(resp, "choices", None):
@@ -893,7 +893,7 @@ def vision_tool(
     try:
         resp = oai.chat.completions.create(**kwargs)
     except openai.OpenAIError as e:
-        return _err(f"vision: API error: {e}")
+        return _err(f"vision: API error: {_openai._safe_api_error(e, getattr(e, 'status_code', None))}")
 
     content = ""
     if getattr(resp, "choices", None):
@@ -1097,7 +1097,7 @@ def video_tool(
             )
 
     try:  # best-effort cleanup; the file is already saved
-        client.post_json("/video/complete", _video.job_body(model, queue_id))
+        client.post_json("/video/complete", _video.complete_body(queue_id))
     except VeniceAPIError:
         pass
     return {
@@ -1302,7 +1302,7 @@ def complete_job(client, *, queue_id: str, type: str, model: str, job_store=None
         body = (
             _audio.job_body(model, queue_id)
             if base == "audio"
-            else _video.job_body(model, queue_id)
+            else _video.complete_body(queue_id)
         )
         client.post_json(f"/{base}/complete", body)
     except VeniceAPIError:

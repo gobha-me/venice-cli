@@ -2483,3 +2483,336 @@ file permissions are the only protection.
   what's on screen when sharing a terminal.
 - If a key is exposed, revoke and rotate it at
   <https://venice.ai/settings/api>.
+
+## Module guide
+
+Each runtime module has one responsibility described below. Optional MCP SDK imports
+are confined to server modules; ordinary CLI registration keeps SDK imports lazy.
+The base Python 3.9 import graph includes `_redact` and `commands._tool_registry`.
+Keep their annotations compatible with 3.9, including evaluated type hints;
+`typing.Optional` is intentional. `_mcp_auth`, `_mcp_common`, and `_mcp_stdio`
+are loaded only when the optional MCP server is invoked (Python 3.10+).
+The audit findings are tracked in [issue #252](https://github.com/gobha-me/venice-cli/issues/252).
+
+### `venice.__init__`
+
+Package version metadata. Keep import-time work limited to constants so importing the CLI stays cheap.
+
+### `venice.__main__`
+
+Module execution entry point. Keep this adapter thin and delegate parser and exit-code behavior to cli.
+
+### `venice._egress`
+
+Public HTTPS destination validation, DNS pinning, and redirect policy. Keep these checks together so web and media downloads share one egress policy.
+
+### `venice._mcp_auth`
+
+OAuth JWT verification, authenticated principal resolution, and HTTP range streaming. Extracted from mcp_server to isolate transport trust from tool registration; imported only with the MCP extra.
+
+### `venice._mcp_common`
+
+MCP argument precedence and text result envelopes shared by both server profiles. A small shared module avoids coupling either profile to the other.
+
+### `venice._mcp_http`
+
+Named remote tool and HTTP media handlers. Each receives explicit server context
+for client defaults, principal resolution, storage quotas, spend policy, and jobs.
+The job adapter takes its store and owner directly. Principal identity is resolved
+per request; SDK registration and schemas stay in mcp_server.
+
+### `venice._mcp_stdio`
+
+The ten local MCP wrappers, project media authority, and optional native image content. Extracted from mcp_server; concrete annotations preserve SDK schema generation.
+
+### `venice._numeric`
+
+Strict finite-number validation. Keep one small shared implementation for CLI, config, spend gates, and transport checks.
+
+### `venice._redact`
+
+Credential redaction for diagnostics, including JSON and URL encodings. Uses explicit secrets or environment values and never reads credential files.
+
+### `venice.audio_player`
+
+Optional local player discovery and playback. Keep separate from API requests because playback failures are nonfatal.
+
+### `venice.audio_post`
+
+Local ffmpeg mastering, loudness probing, and mastering flags. Keep subprocess handling separate from paid audio generation.
+
+### `venice.auth`
+
+Hidden credential prompts and private credential/named-secret persistence. Keep secret storage separate from ordinary configuration; diagnostic output must never include secret values.
+
+### `venice.billing`
+
+Balance extraction and currency display from rate-limit metadata. Keep presentation separate from transport and spend authority.
+
+### `venice.cli`
+
+Top-level argparse dispatch and error handling. Keep command-specific behavior in commands modules.
+
+### `venice.client`
+
+Authenticated stdlib JSON/media transport, polling, and bounded video downloads. Preserve unredirected Authorization headers and redact known credentials before rendering API errors.
+
+### `venice.commands.__init__`
+
+Single registration list for CLI subcommands. Keep feature imports and registration in one place without importing optional SDKs.
+
+### `venice.commands._agent`
+
+Tool invocation loop, confirmation policy, and disposable agent execution. Static schemas and capability selection live in _tool_registry; accounting lives in _cost_ledger. Retains the historical CostLedger and accounting-helper aliases for callers.
+
+### `venice.commands._audio`
+
+Shared audio retrieve/save/complete workflow and content-type mapping. Keep audio postprocessing here while endpoint-neutral helpers remain in _queue.
+
+### `venice.commands._browser`
+
+Web fetch and sandboxed browser capture. Keep browser lifecycle here and delegate destination policy to _egress and _browser_proxy.
+
+### `venice.commands._browser_proxy`
+
+Ephemeral loopback browser proxy with destination and transfer budgets. Keep proxy connection enforcement separate from browser orchestration.
+
+### `venice.commands._code`
+
+Project roots, file tools, execution adapters, and coding tool composition. Keep filesystem authority here and generic shell policy in _exec.
+
+### `venice.commands._compact`
+
+Context budgeting and compaction. Keep message transformation separate from exact evidence persistence in _context_archive.
+
+### `venice.commands._context_archive`
+
+Private disk-backed exact context archive and retrieval tools. Keep persistence and limits in the archive object; compaction consumes its interface.
+
+### `venice.commands._cost_ledger`
+
+CostLedger usage counters, catalog pricing, cache diagnostics, persisted accounting,
+and session budgets. Owns the coordinated accounting state and its helpers without
+importing the agent execution loop or optional SDKs. `_agent` retains aliases for
+the existing accounting import surface.
+
+### `venice.commands._exec`
+
+Shell/git subprocess policy, output limits, and scrubbed environments. Share these rails across coding and browser helpers instead of duplicating them.
+
+### `venice.commands._index`
+
+Semantic index construction, incremental embedding reuse, and search. Keep backend resolution and index integrity together; CLI adapters live in index and search.
+
+### `venice.commands._mailbox`
+
+Atomic session steering-message delivery. Keep its on-disk queue separate from interactive terminal signal handling.
+
+### `venice.commands._mcp`
+
+Print-free Venice tool implementations shared by MCP wrappers and the agent. SDK imports stay lazy; command request builders remain the API contract authority. Retain the shared spend and media-path helpers here to avoid diverging enforcement.
+
+### `venice.commands._mcp_client`
+
+External MCP connections, secret-reference resolution, and synchronous/async bridging. Keep transport lifecycle here, separate from the hosted MCP server.
+
+### `venice.commands._memory`
+
+Persistent project/global agent memory and task state. Keep validation and atomic storage here; memory is the CLI adapter.
+
+### `venice.commands._models`
+
+Catalog fetching, default-trait selection, and capability checks. Keep reusable model resolution separate from catalog presentation.
+
+### `venice.commands._openai`
+
+Lazy OpenAI SDK import, client construction, cache-affinity helpers, and diagnostic exit mapping. Share these functions across chat, embeddings, and delegated vision.
+
+### `venice.commands._persona`
+
+Named local prompt loading and path validation. Keep personas separate from session history and generated memory.
+
+### `venice.commands._queue`
+
+Endpoint-neutral async-queue status mapping, progress, and output naming. Retain this small shared helper instead of merging it into audio and duplicating it for video.
+
+### `venice.commands._repl`
+
+Interactive chat input, slash commands, and multi-turn execution. Keep terminal interaction separate from one-shot parsing; its stateful dispatcher remains cohesive.
+
+### `venice.commands._review`
+
+Diff collection, evidence limits, and cold-context review orchestration. Keep review policy separate from the generic agent loop.
+
+### `venice.commands._session`
+
+Chat/code session serialization and atomic persistence. Keep storage compatibility here and CLI listing/steering in sessions.
+
+### `venice.commands._shared`
+
+Media read authority plus common CLI budget, confirmation, and binary-output helpers. Reuse this boundary across media commands instead of allowing command-specific authority checks.
+
+### `venice.commands._steer`
+
+Attached-terminal signal handling and mid-run steering input. Keep terminal ownership separate from mailbox delivery.
+
+### `venice.commands._tool_registry`
+
+Static built-in tool schemas, metadata, and capability selectors. Extracted from _agent; contains no client or execution state and imports no optional SDK.
+
+### `venice.commands._video_jobs`
+
+Private server-issued video download metadata. Keep URLs out of model-facing tool results and separate from ordinary session state.
+
+### `venice.commands.balance`
+
+Balance command parser and display. Delegate account metadata parsing and formatting to billing.
+
+### `venice.commands.bg_remove`
+
+Background-removal command and JSON image input validation. Reuse shared binary-output and confirmation helpers.
+
+### `venice.commands.cache_probe`
+
+Explicit live prefix-cache diagnostics across selected models. This command can consume credits and is outside the audit harness/live-call allowance.
+
+### `venice.commands.chat`
+
+Chat CLI arguments and one-shot/agent selection. Keep the execution loop, REPL, and SDK plumbing in their dedicated modules.
+
+### `venice.commands.code`
+
+Coding-agent CLI arguments, resume behavior, and run setup. Its size is largely parser and orchestration work; filesystem execution remains in _code and _exec.
+
+### `venice.commands.completion`
+
+Bash/zsh completion generation from the actual parser graph. Keep shell script templates together with parser walking.
+
+### `venice.commands.config`
+
+Configuration inspection and mutation commands. Delegate schema validation and persistence to userconfig.
+
+### `venice.commands.contact_sheet`
+
+Contact-sheet CLI arguments and exit mapping. Delegate local rendering to image_montage.
+
+### `venice.commands.embed`
+
+Embedding input parsing, alternate backend setup, and output formatting. Reuse _openai for SDK construction and _index for reusable backend behavior.
+
+### `venice.commands.image`
+
+Image generation arguments, request building, catalog validation, and batch handling. Keep reusable request validation here because CLI, MCP, and agent tools share it.
+
+### `venice.commands.image_edit`
+
+Single-image and multi-image edit routing and request builders. Keep these related paths together while preserving their different model/modelId fields.
+
+### `venice.commands.index`
+
+Semantic-index CLI setup. Delegate indexing and cache reuse to _index.
+
+### `venice.commands.login`
+
+Interactive hidden-key login adapter. Delegate private persistence to auth; there is no API-key argument.
+
+### `venice.commands.master`
+
+Local audio mastering adapter. Delegate ffmpeg work to audio_post.
+
+### `venice.commands.mcp_serve`
+
+MCP startup arguments, optional dependency checks, and validated remote settings. Keep startup configuration separate from server registration.
+
+### `venice.commands.memory`
+
+Memory/task inspection CLI. Delegate storage and search semantics to _memory.
+
+### `venice.commands.models`
+
+Catalog filtering and human/JSON presentation. Catalog resolution for other commands remains in _models.
+
+### `venice.commands.music`
+
+Music quote/queue construction and model-specific validation. Reuse _audio and _queue for retrieval and cleanup.
+
+### `venice.commands.review`
+
+Review command arguments and result display. Delegate diff policy and iteration to _review.
+
+### `venice.commands.search`
+
+Semantic-search CLI output. Delegate retrieval and index checks to _index.
+
+### `venice.commands.secret`
+
+Hidden named-secret entry, name/length listing, and deletion. Keep values off argv and output; persistence belongs to auth.
+
+### `venice.commands.sessions`
+
+Session listing, bounded display, removal, and steering-message submission. Delegate storage to _session and delivery to _mailbox.
+
+### `venice.commands.sfx`
+
+Sound-effect quote/queue construction and duration validation. Reuse _audio for async retrieval and cleanup.
+
+### `venice.commands.tts`
+
+Speech input handling, live format validation, pricing, and binary persistence. Keep catalog-derived format choice with the request builder.
+
+### `venice.commands.upscale`
+
+Image upscale arguments and scale/creativity validation. Keep retired-parameter checks here so CLI and MCP enforce the same contract.
+
+### `venice.commands.video`
+
+Video catalog constraints, media conditioning, quote/queue/retrieve, and cleanup builders. complete_body sends only queue_id; job_body still includes model for retrieve. Keep private download metadata in _video_jobs.
+
+### `venice.config`
+
+Default constants, paths, and environment variable names. Keep this module free of filesystem reads and writes.
+
+### `venice.image_montage`
+
+Local contact-sheet construction with ImageMagick or ffmpeg. Keep renderer selection independent of image generation.
+
+### `venice.mcp_server`
+
+Authenticated remote MCP registration, concrete SDK schemas, server construction,
+and transport entry points. Retains public build_server/serve and JWKSJWTVerifier
+aliases. Remote handler bodies live in _mcp_http and receive explicit context;
+local registration and authentication remain in their dedicated modules.
+
+### `venice.remote_media`
+
+Private per-principal media storage with reservations, quotas, expiry, and job state. Keep mutations inside the storage abstraction so tools cannot bypass accounting.
+
+### `venice.userconfig`
+
+Persistent configuration validation and precedence for command, environment, and stored defaults. Keep the shared schema and precedence engine together; named secrets remain owned by auth.
+
+### `scripts.openapi_contract`
+
+Public Swagger fetch, curated request normalization, implementation classification,
+and offline/live drift gates. Keep the lock and manifest review separate from
+surface discovery. `make openapi-check` is offline; `make openapi-live` fetches only
+the unauthenticated public spec.
+
+### `scripts.openapi_surface`
+
+Complete public endpoint and request/response field inventory. Run
+`python scripts/openapi_surface.py` after reviewing drift, or pass `--spec-file`
+to reuse an already fetched Swagger. The generated JSON and Markdown classify
+existing unsupported operations without advertising them as implemented tools.
+
+### `scripts.mcp_surface`
+
+List negotiated schemas for local, minimal remote, and media-enabled remote MCP
+profiles. Run `python scripts/mcp_surface.py contracts/openapi/mcp-surface.json`
+with the MCP extra installed. Explicit empty configuration and a placeholder
+client keep this inventory free of credential loading and API calls.
+
+### `scripts.verify_release`
+
+Offline release metadata, wheel/sdist, and package-content checks. Keep artifact
+verification separate from runtime command dispatch.
