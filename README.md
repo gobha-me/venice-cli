@@ -2514,6 +2514,13 @@ OAuth JWT verification, authenticated principal resolution, and HTTP range strea
 
 MCP argument precedence and text result envelopes shared by both server profiles. A small shared module avoids coupling either profile to the other.
 
+### `venice._mcp_http`
+
+Named remote tool and HTTP media handlers. Each receives explicit server context
+for client defaults, principal resolution, storage quotas, spend policy, and jobs.
+The job adapter takes its store and owner directly. Principal identity is resolved
+per request; SDK registration and schemas stay in mcp_server.
+
 ### `venice._mcp_stdio`
 
 The ten local MCP wrappers, project media authority, and optional native image content. Extracted from mcp_server; concrete annotations preserve SDK schema generation.
@@ -2771,7 +2778,10 @@ Local contact-sheet construction with ImageMagick or ffmpeg. Keep renderer selec
 
 ### `venice.mcp_server`
 
-Authenticated remote MCP chat, vision, media ownership, job lifecycle, and HTTP routes. Retains public build_server/serve aliases; local registration and auth helpers now live in dedicated modules. Remote registration remains together because its closures share storage, quotas, and principal authority.
+Authenticated remote MCP registration, concrete SDK schemas, server construction,
+and transport entry points. Retains public build_server/serve and JWKSJWTVerifier
+aliases. Remote handler bodies live in _mcp_http and receive explicit context;
+local registration and authentication remain in their dedicated modules.
 
 ### `venice.remote_media`
 
