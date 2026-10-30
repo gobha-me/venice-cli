@@ -159,6 +159,11 @@ def build_http_server(
         audience=audience,
         required_scopes=scopes,
     )
+    # Our verifier checks its configured JWT audience itself. SDK 2.1.1 has
+    # no resource-validation switch; newer 2.x releases warn if it is omitted.
+    auth_options = {}
+    if "validate_token_resource" in AuthSettings.model_fields:
+        auth_options["validate_token_resource"] = False
     server = MCPServer(
         "venice",
         token_verifier=verifier,
@@ -166,6 +171,7 @@ def build_http_server(
             issuer_url=issuer_url,
             resource_server_url=public_url,
             required_scopes=list(scopes),
+            **auth_options,
         ),
     )
     chat_defaults = userconfig.config_defaults_for("chat", _mcp.chat_tool, doc)
