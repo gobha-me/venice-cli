@@ -2556,7 +2556,7 @@ Single registration list for CLI subcommands. Keep feature imports and registrat
 
 ### `venice.commands._agent`
 
-Tool invocation loop, usage ledger, confirmation policy, and disposable agent execution. Static schemas and capability selection now live in _tool_registry. The remaining CostLedger is large but owns coordinated usage and budget state; further extraction needs a separate accounting-focused change.
+Tool invocation loop, confirmation policy, and disposable agent execution. Static schemas and capability selection live in _tool_registry; accounting lives in _cost_ledger. Retains the historical CostLedger and accounting-helper aliases for callers.
 
 ### `venice.commands._audio`
 
@@ -2581,6 +2581,13 @@ Context budgeting and compaction. Keep message transformation separate from exac
 ### `venice.commands._context_archive`
 
 Private disk-backed exact context archive and retrieval tools. Keep persistence and limits in the archive object; compaction consumes its interface.
+
+### `venice.commands._cost_ledger`
+
+CostLedger usage counters, catalog pricing, cache diagnostics, persisted accounting,
+and session budgets. Owns the coordinated accounting state and its helpers without
+importing the agent execution loop or optional SDKs. `_agent` retains aliases for
+the existing accounting import surface.
 
 ### `venice.commands._exec`
 
