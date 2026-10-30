@@ -2,6 +2,8 @@
 
 No MCP SDK, client, loop state, or HTTP calls belong here. The loop binds each
 ToolSpec implementation name at runtime and owns confirmation/spend authority.
+The base CLI imports this module on Python 3.9; retain 3.9-compatible type hints
+and keep optional SDK imports behind their feature boundary.
 """
 from __future__ import annotations
 

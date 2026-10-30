@@ -2488,6 +2488,10 @@ file permissions are the only protection.
 
 Each runtime module has one responsibility described below. Optional MCP SDK imports
 are confined to server modules; ordinary CLI registration keeps SDK imports lazy.
+The base Python 3.9 import graph includes `_redact` and `commands._tool_registry`.
+Keep their annotations compatible with 3.9, including evaluated type hints;
+`typing.Optional` is intentional. `_mcp_auth`, `_mcp_common`, and `_mcp_stdio`
+are loaded only when the optional MCP server is invoked (Python 3.10+).
 The audit and complete API/MCP surface inventories are linked from [REPORT.md](REPORT.md).
 
 ### `venice.__init__`
