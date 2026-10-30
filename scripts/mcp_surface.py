@@ -4,6 +4,7 @@ Uses a placeholder client and explicit empty config; never loads credentials or
 contacts Venice. Requires the optional MCP extra.
 """
 import asyncio
+import inspect
 import json
 import sys
 import tempfile
@@ -36,6 +37,9 @@ async def inventory():
                     tool.name: tool.model_dump(mode="json", exclude_none=True)
                     for tool in listed.tools
                 }
+                for tool in result[profile].values():
+                    if "description" in tool:
+                        tool["description"] = inspect.cleandoc(tool["description"])
         return result
 
 

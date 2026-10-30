@@ -2790,6 +2790,8 @@ List negotiated schemas for local, minimal remote, and media-enabled remote MCP
 profiles. Run `python scripts/mcp_surface.py contracts/openapi/mcp-surface.json`
 with the MCP extra installed. Explicit empty configuration and a placeholder
 client keep this inventory free of credential loading and API calls.
+Tool descriptions are normalised with `inspect.cleandoc` so the snapshot is
+Python-version independent.
 
 ### `scripts.verify_release`
 
