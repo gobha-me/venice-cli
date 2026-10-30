@@ -4,7 +4,7 @@ Typed wrappers bind a client, config defaults, and project media authority.
 Concrete annotations are required by the optional MCP SDK schema generator.
 """
 import os
-from typing import Annotated, List, Literal, Optional
+from typing import Annotated, Literal, Optional
 
 from mcp import types
 from mcp.server.mcpserver import MCPServer
@@ -78,31 +78,31 @@ def build_server(client, doc=None, root=None, host_image_content=False) -> MCPSe
     @server.tool()
     def venice_image(
         prompt: str,
-        model: Optional[str] = None,
-        variants: Optional[int] = None,
-        format: Optional[str] = None,
-        width: Optional[int] = None,
-        height: Optional[int] = None,
-        negative_prompt: Optional[str] = None,
-        seed: Optional[int] = None,
-        cfg_scale: Optional[float] = None,
-        steps: Optional[int] = None,
-        style_preset: Optional[str] = None,
-        style_references: Optional[List[dict]] = None,
-        aspect_ratio: Optional[str] = None,
-        resolution: Optional[str] = None,
-        embed_exif_metadata: Optional[bool] = None,
-        lora_strength: Optional[int] = None,
-        quality: Optional[str] = None,
-        enable_web_search: Optional[bool] = None,
-        disable_prompt_optimization_thinking: Optional[bool] = None,
-        enhance_prompt: Optional[bool] = None,
-        transparent_background: Optional[bool] = None,
-        safe_mode: Optional[bool] = None,
-        hide_watermark: Optional[bool] = None,
-        output_dir: Optional[str] = None,
+        model: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        variants: Optional[int] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        format: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        width: Optional[int] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        height: Optional[int] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        negative_prompt: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        seed: Optional[int] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        cfg_scale: Optional[float] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        steps: Optional[int] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        style_preset: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        style_references: Optional[list[dict]] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        aspect_ratio: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        resolution: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        embed_exif_metadata: Optional[bool] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        lora_strength: Optional[int] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        quality: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        enable_web_search: Optional[bool] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        disable_prompt_optimization_thinking: Optional[bool] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        enhance_prompt: Optional[bool] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        transparent_background: Optional[bool] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        safe_mode: Optional[bool] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        hide_watermark: Optional[bool] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        output_dir: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
         confirm: bool = False,
-        max_spend: Optional[float] = None,
+        max_spend: Optional[float] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
     ) -> dict:
         """Generate 1-4 image variants from a text prompt via Venice /image/generate.
         Writes PNG/WebP/JPEG file(s) and returns their paths (never inline blobs).
@@ -137,13 +137,13 @@ def build_server(client, doc=None, root=None, host_image_content=False) -> MCPSe
     @server.tool()
     def venice_tts(
         text: str,
-        model: Optional[str] = None,
-        voice: Optional[str] = None,
-        format: Optional[str] = None,
-        speed: Optional[float] = None,
-        output_dir: Optional[str] = None,
+        model: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        voice: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        format: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        speed: Optional[float] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        output_dir: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
         confirm: bool = False,
-        max_spend: Optional[float] = None,
+        max_spend: Optional[float] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
     ) -> dict:
         """Synthesize speech from text via Venice /audio/speech. Writes an audio file
         and returns its path. Paid: cost is estimated per character; over-cap calls
@@ -161,11 +161,11 @@ def build_server(client, doc=None, root=None, host_image_content=False) -> MCPSe
     @server.tool()
     def venice_sfx(
         prompt: str,
-        model: Optional[str] = None,
-        duration: Optional[int] = None,
-        output_dir: Optional[str] = None,
+        model: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        duration: Optional[int] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        output_dir: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
         confirm: bool = False,
-        max_spend: Optional[float] = None,
+        max_spend: Optional[float] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
     ) -> dict:
         """Generate a short sound effect via Venice's async audio queue (blocks with a
         capped wait until ready). Writes an audio file and returns its path. Paid: a
@@ -183,14 +183,14 @@ def build_server(client, doc=None, root=None, host_image_content=False) -> MCPSe
     @server.tool()
     def venice_music(
         prompt: str,
-        model: Optional[str] = None,
-        duration: Optional[int] = None,
-        instrumental: Optional[bool] = None,
-        lyrics: Optional[str] = None,
-        speed: Optional[float] = None,
-        output_dir: Optional[str] = None,
+        model: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        duration: Optional[int] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        instrumental: Optional[bool] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        lyrics: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        speed: Optional[float] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        output_dir: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
         confirm: bool = False,
-        max_spend: Optional[float] = None,
+        max_spend: Optional[float] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
     ) -> dict:
         """Generate long-form music/ambience (~60-90s) via Venice's async audio queue
         (blocks with a capped wait). Writes an audio file and returns its path. Paid:
@@ -208,14 +208,14 @@ def build_server(client, doc=None, root=None, host_image_content=False) -> MCPSe
     @server.tool()
     def venice_upscale(
         input_path: str,
-        scale: Optional[Literal[2, 4]] = None,
-        creativity: Optional[
+        scale: Optional[Literal[2, 4]] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        creativity: Optional[  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
             Annotated[float, Field(ge=_upscale.MIN_CREATIVITY,
                                    le=_upscale.MAX_CREATIVITY)]
         ] = None,
-        output_dir: Optional[str] = None,
+        output_dir: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
         confirm: bool = False,
-        max_spend: Optional[float] = None,
+        max_spend: Optional[float] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
     ) -> dict:
         """Upscale a local image (factor 2 or 4) via Venice /image/upscale. Writes
         the result and returns its path. Pricing is dynamic (no up-front estimate), so
@@ -237,11 +237,11 @@ def build_server(client, doc=None, root=None, host_image_content=False) -> MCPSe
 
     @server.tool()
     def venice_bg_remove(
-        input_path: Optional[str] = None,
-        image_url: Optional[str] = None,
-        output_dir: Optional[str] = None,
+        input_path: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        image_url: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        output_dir: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
         confirm: bool = False,
-        max_spend: Optional[float] = None,
+        max_spend: Optional[float] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
     ) -> dict:
         """Remove an image's background via Venice /image/background-remove, returning a
         transparent PNG. Source is a local file (input_path) OR an image_url. Writes
@@ -259,12 +259,12 @@ def build_server(client, doc=None, root=None, host_image_content=False) -> MCPSe
     @server.tool()
     def venice_chat(
         message: str,
-        model: Optional[str] = None,
-        system: Optional[str] = None,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
-        web_search: Optional[str] = None,
-        character: Optional[str] = None,
+        model: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        system: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        temperature: Optional[float] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        max_tokens: Optional[int] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        web_search: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        character: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
     ) -> dict:
         """One-shot chat completion via Venice /chat/completions; returns the reply
         text (and token usage when available). web_search is one of auto/on/off. Not
@@ -279,12 +279,12 @@ def build_server(client, doc=None, root=None, host_image_content=False) -> MCPSe
 
     @server.tool()
     def venice_vision(
-        input_path: Optional[str] = None,
-        image_url: Optional[str] = None,
-        prompt: Optional[str] = None,
-        model: Optional[str] = None,
-        max_tokens: Optional[int] = None,
-        mode: Optional[Literal["auto", "native", "delegate"]] = None,
+        input_path: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        image_url: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        prompt: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        model: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        max_tokens: Optional[int] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        mode: Optional[Literal["auto", "native", "delegate"]] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
     ) -> types.CallToolResult:
         """Inspect one image natively or through a delegated Venice vision model.
 
@@ -339,31 +339,31 @@ def build_server(client, doc=None, root=None, host_image_content=False) -> MCPSe
     @server.tool()
     def venice_video(
         prompt: str,
-        model: Optional[str] = None,
-        duration: Optional[str] = None,
-        negative_prompt: Optional[str] = None,
-        resolution: Optional[str] = None,
-        aspect_ratio: Optional[str] = None,
-        no_audio: Optional[bool] = None,
-        image_url: Optional[str] = None,
-        image_strength: Optional[float] = None,
-        end_image_url: Optional[str] = None,
-        video_url: Optional[str] = None,
-        audio_url: Optional[str] = None,
-        reference_image_urls: Optional[List[str]] = None,
-        reference_video_urls: Optional[List[str]] = None,
-        reference_audio_urls: Optional[List[str]] = None,
-        scene_image_urls: Optional[List[str]] = None,
-        reference_video_duration: Optional[float] = None,
-        output_dir: Optional[str] = None,
+        model: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        duration: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        negative_prompt: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        resolution: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        aspect_ratio: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        no_audio: Optional[bool] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        image_url: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        image_strength: Optional[float] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        end_image_url: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        video_url: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        audio_url: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        reference_image_urls: Optional[list[str]] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        reference_video_urls: Optional[list[str]] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        reference_audio_urls: Optional[list[str]] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        scene_image_urls: Optional[list[str]] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        reference_video_duration: Optional[float] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        output_dir: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
         confirm: bool = False,
-        max_spend: Optional[float] = None,
+        max_spend: Optional[float] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
         # #57 Class C2: Optional/None, NOT the concrete constant. `_merged` drops
         # only None, so a concrete default here is non-None on every call and
         # silently beats `defaults.video.max_wait` -- while the CLI path looks
         # perfectly correct. When neither host nor config supplies one,
         # `_mcp.video_tool`'s own signature default applies.
-        max_wait: Optional[float] = None,
+        max_wait: Optional[float] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
     ) -> dict:
         """Generate a video via Venice's async /video queue and return the file path.
         Text-to-video (prompt) plus optional image/reference conditioning: each *_url
@@ -394,21 +394,21 @@ def build_server(client, doc=None, root=None, host_image_content=False) -> MCPSe
     @server.tool()
     def venice_image_edit(
         prompt: str,
-        input_path: Optional[str] = None,
-        image_url: Optional[str] = None,
-        layer_paths: Optional[List[str]] = None,
-        model: Optional[str] = None,
-        aspect_ratio: Optional[str] = None,
-        resolution: Optional[str] = None,
-        output_format: Optional[str] = None,
-        quality: Optional[str] = None,
-        disable_prompt_optimization_thinking: Optional[bool] = None,
-        enhance_prompt: Optional[bool] = None,
-        transparent_background: Optional[bool] = None,
-        safe_mode: Optional[bool] = None,
-        output_dir: Optional[str] = None,
+        input_path: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        image_url: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        layer_paths: Optional[list[str]] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        model: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        aspect_ratio: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        resolution: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        output_format: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        quality: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        disable_prompt_optimization_thinking: Optional[bool] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        enhance_prompt: Optional[bool] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        transparent_background: Optional[bool] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        safe_mode: Optional[bool] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        output_dir: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
         confirm: bool = False,
-        max_spend: Optional[float] = None,
+        max_spend: Optional[float] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
     ) -> dict:
         """Edit/inpaint an image via Venice /image/edit and return the file path. Base
         image is a local input_path OR an image_url; repeatable layer_paths (masks/

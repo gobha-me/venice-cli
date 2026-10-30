@@ -17,23 +17,25 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import List, Literal, Optional
+from typing import Literal, Optional
 
 from mcp import types
 from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.auth.settings import AuthSettings
-from mcp.server.mcpserver.exceptions import ResourceError, ResourceNotFoundError
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ResourceError, ResourceNotFoundError
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 
-from . import _egress, remote_media, userconfig
-from .commands import _mcp, _shared, _video_jobs
-from ._mcp_auth import JWKSJWTVerifier as JWKSJWTVerifier
+from . import _egress, _mcp_auth, _mcp_stdio, remote_media, userconfig
 from ._mcp_auth import _byte_range, _file_chunks, _http_auth
 from ._mcp_common import _merged, _vision_text_result
-from ._mcp_stdio import build_server as build_server, serve as serve
+from .commands import _mcp, _shared, _video_jobs
+
+JWKSJWTVerifier = _mcp_auth.JWKSJWTVerifier
+build_server = _mcp_stdio.build_server
+serve = _mcp_stdio.serve
 
 
 REMOTE_DATA_URL_MAX_CHARS = 4 * 1024 * 1024
@@ -204,12 +206,12 @@ def build_http_server(
     )
     def remote_chat(
         message: str,
-        model: Optional[str] = None,
-        system: Optional[str] = None,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
-        web_search: Optional[str] = None,
-        character: Optional[str] = None,
+        model: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        system: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        temperature: Optional[float] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        max_tokens: Optional[int] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        web_search: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+        character: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
     ) -> dict:
         """Run one Venice chat completion. This consumes API credits and has no
         pre-call spend quote. Omitted values use defaults.chat.*, then built-ins."""
@@ -234,9 +236,9 @@ def build_http_server(
         )
         def remote_vision(
             image_url: str,
-            prompt: Optional[str] = None,
-            model: Optional[str] = None,
-            max_tokens: Optional[int] = None,
+            prompt: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+            model: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+            max_tokens: Optional[int] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
         ) -> types.CallToolResult:
             """Inspect one remote HTTP(S) or data image through a delegated Venice
             vision model. Server-local paths and native host content are unavailable."""
@@ -265,11 +267,11 @@ def build_http_server(
             annotations=remote_annotations,
         )
         def remote_media_vision(
-            media_uri: Optional[str] = None,
-            image_url: Optional[str] = None,
-            prompt: Optional[str] = None,
-            model: Optional[str] = None,
-            max_tokens: Optional[int] = None,
+            media_uri: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+            image_url: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+            prompt: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+            model: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+            max_tokens: Optional[int] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
         ) -> types.CallToolResult:
             """Inspect exactly one owner-bound media URI or bounded remote image URL."""
             if bool(media_uri) == bool(image_url):
@@ -318,7 +320,7 @@ def build_http_server(
             args.update({name: value for name, value in supplied.items() if value is not None})
             return args
 
-        def _owned(uri: str, expected_kind: Optional[str] = None):
+        def _owned(uri: str, expected_kind: Optional[str] = None):  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
             record = media_store.get_uri(_remote_owner(issuer_url), uri)
             if expected_kind is not None and record.kind != expected_kind:
                 raise remote_media.MediaValidationError(
@@ -488,13 +490,13 @@ def build_http_server(
             annotations=remote_annotations,
         )
         def remote_image(
-            prompt: str, model: Optional[str] = None,
-            variants: Optional[int] = None, format: Optional[str] = None,
-            width: Optional[int] = None, height: Optional[int] = None,
-            negative_prompt: Optional[str] = None, seed: Optional[int] = None,
-            aspect_ratio: Optional[str] = None, resolution: Optional[str] = None,
-            style_references: Optional[List[dict]] = None,
-            transparent_background: Optional[bool] = None,
+            prompt: str, model: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+            variants: Optional[int] = None, format: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+            width: Optional[int] = None, height: Optional[int] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+            negative_prompt: Optional[str] = None, seed: Optional[int] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+            aspect_ratio: Optional[str] = None, resolution: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+            style_references: Optional[list[dict]] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+            transparent_background: Optional[bool] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
             confirm: bool = False,
         ) -> types.CallToolResult:
             """Generate images into private storage. Every paid call requires confirm."""
@@ -529,8 +531,8 @@ def build_http_server(
             annotations=remote_annotations,
         )
         def remote_tts(
-            text: str, model: Optional[str] = None, voice: Optional[str] = None,
-            format: Optional[str] = None, speed: Optional[float] = None,
+            text: str, model: Optional[str] = None, voice: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+            format: Optional[str] = None, speed: Optional[float] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
             confirm: bool = False,
         ) -> types.CallToolResult:
             """Synthesize speech into private storage. Every paid call requires confirm."""
@@ -556,8 +558,8 @@ def build_http_server(
             annotations=remote_annotations,
         )
         def remote_upscale(
-            media_uri: str, scale: Optional[Literal[2, 4]] = None,
-            creativity: Optional[float] = None, confirm: bool = False,
+            media_uri: str, scale: Optional[Literal[2, 4]] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+            creativity: Optional[float] = None, confirm: bool = False,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
         ) -> types.CallToolResult:
             """Upscale an owner-bound image. Disabled unless dynamic spend is enabled."""
             disabled = _dynamic_disabled("upscale")
@@ -606,11 +608,11 @@ def build_http_server(
             annotations=remote_annotations,
         )
         def remote_image_edit(
-            prompt: str, media_uri: str, layer_media_uris: Optional[List[str]] = None,
-            model: Optional[str] = None, aspect_ratio: Optional[str] = None,
-            resolution: Optional[str] = None, output_format: Optional[str] = None,
-            quality: Optional[str] = None,
-            transparent_background: Optional[bool] = None, confirm: bool = False,
+            prompt: str, media_uri: str, layer_media_uris: Optional[list[str]] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+            model: Optional[str] = None, aspect_ratio: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+            resolution: Optional[str] = None, output_format: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+            quality: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+            transparent_background: Optional[bool] = None, confirm: bool = False,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
         ) -> types.CallToolResult:
             """Edit owner-bound images. Disabled unless dynamic spend is enabled."""
             disabled = _dynamic_disabled("image-edit")
@@ -695,8 +697,8 @@ def build_http_server(
             annotations=remote_annotations,
         )
         def remote_sfx(
-            prompt: str, model: Optional[str] = None,
-            duration: Optional[int] = None, confirm: bool = False,
+            prompt: str, model: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+            duration: Optional[int] = None, confirm: bool = False,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
         ) -> types.CallToolResult:
             """Queue sound-effect generation. Use job_result with the returned job ID."""
             args = _remote_media_args("sfx", dict(model=model, duration=duration))
@@ -711,9 +713,9 @@ def build_http_server(
             annotations=remote_annotations,
         )
         def remote_music(
-            prompt: str, model: Optional[str] = None,
-            duration: Optional[int] = None, instrumental: Optional[bool] = None,
-            lyrics: Optional[str] = None, speed: Optional[float] = None,
+            prompt: str, model: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+            duration: Optional[int] = None, instrumental: Optional[bool] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+            lyrics: Optional[str] = None, speed: Optional[float] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
             confirm: bool = False,
         ) -> types.CallToolResult:
             """Queue music generation. Use job_result with the returned job ID."""
@@ -732,19 +734,19 @@ def build_http_server(
             annotations=remote_annotations,
         )
         def remote_video(
-            prompt: str, model: Optional[str] = None,
-            duration: Optional[str] = None, negative_prompt: Optional[str] = None,
-            resolution: Optional[str] = None, aspect_ratio: Optional[str] = None,
-            no_audio: Optional[bool] = None,
-            image_media_uri: Optional[str] = None,
-            image_strength: Optional[float] = None,
-            end_image_media_uri: Optional[str] = None,
-            video_media_uri: Optional[str] = None,
-            audio_media_uri: Optional[str] = None,
-            reference_image_media_uris: Optional[List[str]] = None,
-            reference_video_media_uris: Optional[List[str]] = None,
-            reference_audio_media_uris: Optional[List[str]] = None,
-            scene_image_media_uris: Optional[List[str]] = None,
+            prompt: str, model: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+            duration: Optional[str] = None, negative_prompt: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+            resolution: Optional[str] = None, aspect_ratio: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+            no_audio: Optional[bool] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+            image_media_uri: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+            image_strength: Optional[float] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+            end_image_media_uri: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+            video_media_uri: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+            audio_media_uri: Optional[str] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+            reference_image_media_uris: Optional[list[str]] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+            reference_video_media_uris: Optional[list[str]] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+            reference_audio_media_uris: Optional[list[str]] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
+            scene_image_media_uris: Optional[list[str]] = None,  # noqa: FA100  # reason: MCP SDK builds schemas from concrete annotations
             confirm: bool = False,
         ) -> types.CallToolResult:
             """Queue video generation using only owner-bound conditioning media."""

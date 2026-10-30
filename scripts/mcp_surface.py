@@ -18,10 +18,10 @@ from venice.mcp_server import build_http_server, build_server
 async def inventory():
     """Negotiate local MCP sessions and list schemas, with all I/O kept local."""
     lean = VeniceClient("test-fake-key")
-    remote = dict(
-        public_url="https://mcp.example.test/mcp", issuer_url="https://auth.example.test",
-        jwks_url="https://auth.example.test/jwks", audience="audit", scopes=["venice:mcp"],
-    )
+    remote = {
+        "public_url": "https://mcp.example.test/mcp", "issuer_url": "https://auth.example.test",
+        "jwks_url": "https://auth.example.test/jwks", "audience": "audit", "scopes": ["venice:mcp"],
+    }
     with tempfile.TemporaryDirectory(prefix="venice-mcp-surface-") as temp:
         servers = {
             "stdio": build_server(lean, doc={}, root=temp),

@@ -11,7 +11,6 @@ from pathlib import Path
 
 import openapi_contract as contract
 
-
 DEFAULT_OUTPUT = contract.ROOT / "contracts/openapi/surface.json"
 
 

@@ -5,7 +5,7 @@ ToolSpec implementation name at runtime and owns confirmation/spend authority.
 """
 from __future__ import annotations
 
-from typing import List, NamedTuple, Optional, Tuple
+from typing import NamedTuple, Optional
 
 from . import _memory
 from . import image as _image
@@ -22,7 +22,7 @@ def _p(typ: str, desc: Optional[str] = None) -> dict:
     return d
 
 
-def _obj(props: dict, required: Optional[List[str]] = None) -> dict:
+def _obj(props: dict, required: Optional[list[str]] = None) -> dict:
     """Describe an object schema with explicit required fields."""
     schema: dict = {"type": "object", "properties": props}
     if required:
@@ -464,7 +464,7 @@ class ToolSpec(NamedTuple):
     parameters: dict
     paid: bool
     category: str
-    tags: Tuple[str, ...] = ()
+    tags: tuple[str, ...] = ()
 
 
 # The built-in venice tools. ``category`` reproduces the hand-maintained `only=`

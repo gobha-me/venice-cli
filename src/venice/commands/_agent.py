@@ -39,62 +39,54 @@ from typing import Callable, Dict, List, NamedTuple, Optional, Tuple
 
 # Aliased: a bare `config` would be shadowed by the `config=None` keyword argument
 # that `browser_tools` (and its callers) already take further down this module.
-from .. import _numeric
+from .. import _numeric, userconfig
 from .. import config as _config
-from .. import userconfig
-from . import _exec
-from . import _mcp
-from . import _models
-from . import _compact
-from . import _openai
-from . import _shared
-from . import upscale as _upscale
-
 
 # Preserve the existing import surface while keeping static schemas out of the loop.
-from ._tool_registry import (
-    _video as _video,
-    _p as _p,
-    _obj as _obj,
-    _IMAGE_SCHEMA as _IMAGE_SCHEMA,
-    _TTS_SCHEMA as _TTS_SCHEMA,
-    _BACKGROUND_PARAM as _BACKGROUND_PARAM,
-    _SFX_SCHEMA as _SFX_SCHEMA,
-    _MUSIC_SCHEMA as _MUSIC_SCHEMA,
-    _JOB_STATUS_SCHEMA as _JOB_STATUS_SCHEMA,
-    _JOB_RESULT_SCHEMA as _JOB_RESULT_SCHEMA,
-    _UPSCALE_SCHEMA as _UPSCALE_SCHEMA,
-    _BG_REMOVE_SCHEMA as _BG_REMOVE_SCHEMA,
-    _CHAT_SCHEMA as _CHAT_SCHEMA,
-    _WEB_SEARCH_SCHEMA as _WEB_SEARCH_SCHEMA,
-    _SEARCH_SCHEMA as _SEARCH_SCHEMA,
-    _REINDEX_SCHEMA as _REINDEX_SCHEMA,
-    _SCOPE_PROP as _SCOPE_PROP,
-    _TASK_STATUS_PROP as _TASK_STATUS_PROP,
-    _MEMORY_WRITE_SCHEMA as _MEMORY_WRITE_SCHEMA,
-    _MEMORY_READ_SCHEMA as _MEMORY_READ_SCHEMA,
-    _MEMORY_SEARCH_SCHEMA as _MEMORY_SEARCH_SCHEMA,
-    _MEMORY_LIST_SCHEMA as _MEMORY_LIST_SCHEMA,
-    _TASK_ADD_SCHEMA as _TASK_ADD_SCHEMA,
-    _TASK_UPDATE_SCHEMA as _TASK_UPDATE_SCHEMA,
-    _TASK_LIST_SCHEMA as _TASK_LIST_SCHEMA,
-    _MODELS_SCHEMA as _MODELS_SCHEMA,
-    _MODEL_DETAILS_SCHEMA as _MODEL_DETAILS_SCHEMA,
-    VISION_MODE_CHOICES as VISION_MODE_CHOICES,
-    _VISION_SCHEMA as _VISION_SCHEMA,
-    _IMAGE_EDIT_SCHEMA as _IMAGE_EDIT_SCHEMA,
-    _VIDEO_SCHEMA as _VIDEO_SCHEMA,
-    _WEB_FETCH_SCHEMA as _WEB_FETCH_SCHEMA,
-    _BROWSER_CAPTURE_SCHEMA as _BROWSER_CAPTURE_SCHEMA,
-    ToolSpec as ToolSpec,
-    _BUILTINS as _BUILTINS,
-    _CODE_ASSET_BUILTINS as _CODE_ASSET_BUILTINS,
-    _REGISTRY as _REGISTRY,
-    get as get,
-    list_categories as list_categories,
-    tools_in as tools_in,
-    select as select,
-)
+from . import _compact, _exec, _mcp, _models, _openai, _shared, _tool_registry
+from . import upscale as _upscale
+
+_video = _tool_registry._video
+_p = _tool_registry._p
+_obj = _tool_registry._obj
+_IMAGE_SCHEMA = _tool_registry._IMAGE_SCHEMA
+_TTS_SCHEMA = _tool_registry._TTS_SCHEMA
+_BACKGROUND_PARAM = _tool_registry._BACKGROUND_PARAM
+_SFX_SCHEMA = _tool_registry._SFX_SCHEMA
+_MUSIC_SCHEMA = _tool_registry._MUSIC_SCHEMA
+_JOB_STATUS_SCHEMA = _tool_registry._JOB_STATUS_SCHEMA
+_JOB_RESULT_SCHEMA = _tool_registry._JOB_RESULT_SCHEMA
+_UPSCALE_SCHEMA = _tool_registry._UPSCALE_SCHEMA
+_BG_REMOVE_SCHEMA = _tool_registry._BG_REMOVE_SCHEMA
+_CHAT_SCHEMA = _tool_registry._CHAT_SCHEMA
+_WEB_SEARCH_SCHEMA = _tool_registry._WEB_SEARCH_SCHEMA
+_SEARCH_SCHEMA = _tool_registry._SEARCH_SCHEMA
+_REINDEX_SCHEMA = _tool_registry._REINDEX_SCHEMA
+_SCOPE_PROP = _tool_registry._SCOPE_PROP
+_TASK_STATUS_PROP = _tool_registry._TASK_STATUS_PROP
+_MEMORY_WRITE_SCHEMA = _tool_registry._MEMORY_WRITE_SCHEMA
+_MEMORY_READ_SCHEMA = _tool_registry._MEMORY_READ_SCHEMA
+_MEMORY_SEARCH_SCHEMA = _tool_registry._MEMORY_SEARCH_SCHEMA
+_MEMORY_LIST_SCHEMA = _tool_registry._MEMORY_LIST_SCHEMA
+_TASK_ADD_SCHEMA = _tool_registry._TASK_ADD_SCHEMA
+_TASK_UPDATE_SCHEMA = _tool_registry._TASK_UPDATE_SCHEMA
+_TASK_LIST_SCHEMA = _tool_registry._TASK_LIST_SCHEMA
+_MODELS_SCHEMA = _tool_registry._MODELS_SCHEMA
+_MODEL_DETAILS_SCHEMA = _tool_registry._MODEL_DETAILS_SCHEMA
+VISION_MODE_CHOICES = _tool_registry.VISION_MODE_CHOICES
+_VISION_SCHEMA = _tool_registry._VISION_SCHEMA
+_IMAGE_EDIT_SCHEMA = _tool_registry._IMAGE_EDIT_SCHEMA
+_VIDEO_SCHEMA = _tool_registry._VIDEO_SCHEMA
+_WEB_FETCH_SCHEMA = _tool_registry._WEB_FETCH_SCHEMA
+_BROWSER_CAPTURE_SCHEMA = _tool_registry._BROWSER_CAPTURE_SCHEMA
+ToolSpec = _tool_registry.ToolSpec
+_BUILTINS = _tool_registry._BUILTINS
+_CODE_ASSET_BUILTINS = _tool_registry._CODE_ASSET_BUILTINS
+_REGISTRY = _tool_registry._REGISTRY
+get = _tool_registry.get
+list_categories = _tool_registry.list_categories
+tools_in = _tool_registry.tools_in
+select = _tool_registry.select
 
 # --------------------------------------------------------------------------- #
 # Tool descriptor + derived structures (pure functions of a list[Tool])
