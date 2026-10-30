@@ -198,7 +198,7 @@ class CommittedInventoryTests(unittest.TestCase):
             "POST /image/upscale": set(upscale._build_body(
                 _namespace(scale=4.0, creativity=0.5), "base64"
             )),
-            "POST /video/complete": set(video.job_body("m", "q")),
+            "POST /video/complete": set(video.complete_body("q")),
             "POST /video/queue": set(video.queue_body(
                 "m", "prompt", shared_video, video_media, "none", image_strength=0.5
             )),
