@@ -118,4 +118,8 @@ pytest_add_cli_args_test_selection = [
   "tests/test_r1_audit.py",
   "tests/test_openapi_surface.py",
   "tests/test_openapi_contract.py",
+  "tests/test_r1_redact_boundary.py",
+  "tests/test_video.py",
+  "tests/test_video_jobs.py",
+  "tests/test_openapi_drift_regressions.py",
 ]

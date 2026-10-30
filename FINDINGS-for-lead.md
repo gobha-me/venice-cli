@@ -54,3 +54,49 @@ because each would be a failing test against current behaviour.
      and edited tests pass.
 6. **`flock` is refused** by the command policy, so mutmut was not run (see
    MUTATION-RESULTS.md).
+
+## Follow-up (option 1 ruling)
+
+### Redaction gaps now pinned by red-first tests
+
+Findings 1 and 2 above are now executable as `@unittest.expectedFailure`
+tests in `tests/test_r1_redact_boundary.py::KnownRedactionGaps`. Each one was
+run once without its decorator against unmodified `src/` and failed at the
+leak assertion (see BROKEN-COPY-RESULTS.md, "Red-first evidence"). When Codex
+fixes one, its test will report "unexpected success". Remove that decorator
+in the same change.
+
+* **F-fu-1** (= finding 1): a credentials-file key with no `$VENICE_API_KEY`,
+  reflected through `job_status_tool(type=...)`, reaches the `_mcp._err`
+  envelope unredacted. Suggested fix: thread `client.api_key` into `_err`.
+* **F-fu-2** (part of finding 2): lowercase percent-escapes (`%2f`, `%2b`) of
+  the key survive into `VeniceAPIError.body`. Suggested fix: match `%XX` case-
+  insensitively (for example, also add the lowercased-hex variant).
+* **F-fu-3** (part of finding 2): JSON `\/` escaping of `/` survives. Suggested
+  fix: add `json_variant.replace("/", "\\/")`.
+
+### SDK-gated tests (step 4)
+
+With `runs/test-r1-fu/venv`, `tests.test_mcp_harness` and
+`tests.test_openapi_surface` (including `LiveMcpInventory`) ran with no
+skips: **34 tests, OK**. None of my 7de7a07 SDK-gated tests needed a fix, and
+no code defect showed up. Blocker 5 above is resolved.
+
+### Blockers in this session
+
+7. **`cp -r src ../../runs/test-r1-fu/broken/` was refused** ("cp with flags
+   requires manual approval"), although it is the brief's exact allowed form.
+   Step 3 (broken copies) stopped there. The copy was not recreated any other
+   way. Planned breaks are in BROKEN-COPY-RESULTS.md.
+8. **mutmut 3.8.0 is incompatible with the venv's pytest 9.2.0**: the stats
+   phase dies on `item._nodeid` (removed in pytest 9.2). The lead's 9.1.1 run
+   was unaffected. No score was produced. See MUTATION-RESULTS.md.
+9. Two exploratory commands needed approval and were dropped, not retried
+   another way: a `python3 -c` one-liner to print the synthetic key's
+   encodings (the tests compute them instead), and `cat` of the lead's
+   mutation wrapper (not needed to run it).
+10. `make test`: 2154 run, **1 failure** (expected failures=3, skipped=1). The
+    failure is the pre-existing `test_install_scripts.test_bsd_readlink_...`
+    file-mode artefact (`1472 != 448`, item 5 above). That module is not
+    touched by this branch. The earlier `openai`-missing errors are gone with
+    the venv. `make lint` and `make scan` pass.

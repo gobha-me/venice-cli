@@ -88,6 +88,19 @@ executed here. See BROKEN-COPY-RESULTS.md, "Skipped".
 No other pre-existing test file was modified. `pyproject.toml` gained a
 `[tool.mutmut]` section for scoping only.
 
+## Follow-up (option 1 ruling): changes to existing tests
+
+**No existing assertion was edited.** Changes to existing files:
+
+| file | change | assertion affected? |
+|---|---|---|
+| `tests/test_openapi_surface.py` `_load_script` | module name `r1_<name>` -> `scripts.<name>` (plus docstring) | No. Helper only: the same file runs with the same `sys.path`; only `__name__` differs. Lets mutmut attribute the surface tests to `scripts.openapi_surface` mutants. Nothing in the suite read the old name. |
+| `pyproject.toml` `[tool.mutmut]` | test selection += `test_r1_redact_boundary`, `test_video`, `test_video_jobs`, `test_openapi_drift_regressions` | No. `only_mutate` is unchanged. |
+
+New file `tests/test_r1_redact_boundary.py`, written fresh, with no cases
+copied from `test_r1_audit`. It has 16 passing tests plus 3
+`expectedFailure` red-first gap tests (F-fu-1..3 in FINDINGS-for-lead.md).
+
 ## Tests written then removed in this re-make (unfalsifiable)
 
 * `redact_text` returns `str`: no realistic product break fails it.

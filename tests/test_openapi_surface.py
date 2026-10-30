@@ -45,8 +45,12 @@ def _read(name):
 
 
 def _load_script(name):
-    """Import scripts/<name>.py by path with scripts/ importable (as its CLI does)."""
-    spec = importlib.util.spec_from_file_location(f"r1_{name}", SCRIPTS / f"{name}.py")
+    """Import scripts/<name>.py by path with scripts/ importable (as its CLI does).
+
+    Named ``scripts.<name>`` -- the dotted name mutmut derives from the file
+    path -- so mutation runs can attribute these tests to the script's mutants.
+    """
+    spec = importlib.util.spec_from_file_location(f"scripts.{name}", SCRIPTS / f"{name}.py")
     module = importlib.util.module_from_spec(spec)
     with mock.patch.object(sys, "path", [str(SCRIPTS), *sys.path]):
         spec.loader.exec_module(module)
