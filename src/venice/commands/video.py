@@ -267,7 +267,13 @@ def queue_body(
     return body
 
 
+def complete_body(queue_id: str) -> dict:
+    """Clean up a video by queue ID; the upstream model field is deprecated."""
+    return {"queue_id": queue_id}
+
+
 def job_body(model: str, queue_id: str) -> dict:
+    """Build a retrieve request, which still requires the model identifier."""
     return {"model": model, "queue_id": queue_id}
 
 
@@ -805,7 +811,7 @@ def _retrieve_and_save(
 
     if not no_cleanup:
         try:
-            client.post_json("/video/complete", job_body(model, queue_id))
+            client.post_json("/video/complete", complete_body(queue_id))
         except VeniceAPIError as e:
             print(f"warning: cleanup call failed: {e}", file=sys.stderr)
     return 0

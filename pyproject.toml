@@ -101,3 +101,25 @@ include = [
   "/.dockerignore",
   "/deploy",
 ]
+
+# Mutation-testing scope for the r1 audit tests only (no project-wide minimum).
+# _mcp_common.py and scripts/mcp_surface.py import the optional `mcp` SDK at
+# module scope; add them here when running in an environment with `.[all]`.
+[tool.mutmut]
+source_paths = ["src", "scripts"]
+only_mutate = [
+  "src/venice/_redact.py",
+  "src/venice/commands/video.py",
+  "scripts/openapi_surface.py",
+]
+also_copy = ["contracts/"]
+mutate_only_covered_lines = true
+pytest_add_cli_args_test_selection = [
+  "tests/test_r1_audit.py",
+  "tests/test_openapi_surface.py",
+  "tests/test_openapi_contract.py",
+  "tests/test_r1_redact_boundary.py",
+  "tests/test_video.py",
+  "tests/test_video_jobs.py",
+  "tests/test_openapi_drift_regressions.py",
+]

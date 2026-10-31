@@ -18,6 +18,8 @@ import re
 import sys
 from typing import Optional
 
+from .. import _redact
+
 
 _PROMPT_CACHE_KEY = "prompt_cache_key"
 _HTTP_TITLES = {
@@ -27,7 +29,15 @@ _HTTP_TITLES = {
 
 def _safe_api_error(error, status) -> str:
     """Keep proxy HTML and unbounded response bodies out of terminal output."""
-    text = str(error).strip()
+    secrets = []
+    # SDK exceptions retain the request even when auth came from a file.
+    request = getattr(error, "request", None)
+    headers = getattr(request, "headers", None)
+    if headers is not None:
+        authorization = headers.get("authorization", "")
+        if isinstance(authorization, str) and authorization.lower().startswith("bearer "):
+            secrets.append(authorization[7:])
+    text = _redact.redact_text(error, *secrets).strip()
     if re.search(r"<\s*(?:!doctype|html|head|body)\b", text, re.IGNORECASE):
         title = _HTTP_TITLES.get(status, "HTTP error")
         return f"HTTP {status} {title}" if isinstance(status, int) else title
@@ -131,7 +141,7 @@ def status_to_exit(module, e, label: str) -> int:
     prefixes the message (e.g. "chat").
     """
     if isinstance(e, module.APIConnectionError):
-        print(f"{label}: connection error: {e}", file=sys.stderr)
+        print(f"{label}: connection error: {_safe_api_error(e, None)}", file=sys.stderr)
         return 8
     status = getattr(e, "status_code", None)
     print(f"{label}: API error: {_safe_api_error(e, status)}", file=sys.stderr)
