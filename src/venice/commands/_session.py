@@ -118,7 +118,7 @@ class Session:
         }
 
     @classmethod
-    def from_envelope(cls, d: dict) -> "Session":
+    def from_envelope(cls, d: dict) -> Session:
         """Hydrate from an envelope dict, tolerant of missing/foreign keys."""
         now = _now_iso()
         gk = d.get("gen_kwargs")

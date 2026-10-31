@@ -41,8 +41,19 @@ from typing import List, Optional
 
 from .. import _numeric, auth, config, userconfig
 from ..client import build_client_from_auth
-from . import (_agent, _code, _compact, _context_archive, _mailbox, _models, _openai,
-               _repl, _review, _session, _steer)
+from . import (
+    _agent,
+    _code,
+    _compact,
+    _context_archive,
+    _mailbox,
+    _models,
+    _openai,
+    _repl,
+    _review,
+    _session,
+    _steer,
+)
 
 _DEFAULT_MAX_TOOL_CALLS = 25
 

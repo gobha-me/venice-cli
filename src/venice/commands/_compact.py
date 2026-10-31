@@ -244,7 +244,7 @@ class Budget:
         return request_bytes_over(messages, self.request_bytes)
 
 
-def budget_from_args(args, archive=None) -> Optional["Budget"]:
+def budget_from_args(args, archive=None) -> Optional[Budget]:
     """The auto-compact Budget for a parsed-args namespace, or None when it
     isn't opted into (#48).
 
@@ -328,8 +328,7 @@ def split_for_compaction(
     boundaries so at most `keep_turns` conversation turns remain. Returns None
     when there's nothing worth summarizing (too few turns).
     """
-    if keep_turns < 1:
-        keep_turns = 1
+    keep_turns = max(keep_turns, 1)
     leading_systems = leading_system_count(messages)
     # None is the conservative compatibility path: every leading system
     # message is authoritative. Session-aware callers persist the exact count,

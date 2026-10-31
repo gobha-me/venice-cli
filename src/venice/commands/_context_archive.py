@@ -13,7 +13,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
-
 MAX_ARCHIVE_BYTES = 1024 * 1024 * 1024
 DEFAULT_ARCHIVE_MAX_MIB = MAX_ARCHIVE_BYTES // (1024 * 1024)
 MAX_ARCHIVE_ENTRIES = 8192
@@ -134,7 +133,7 @@ class ContextArchive:
     @classmethod
     def from_envelope(
         cls, raw, *, source_dir=None, max_bytes: Optional[int] = None,
-    ) -> "ContextArchive":
+    ) -> ContextArchive:
         if raw is None:
             return cls(source_dir=Path(source_dir) if source_dir else None,
                        max_bytes=max_bytes)

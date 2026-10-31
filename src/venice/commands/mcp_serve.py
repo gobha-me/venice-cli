@@ -23,7 +23,6 @@ from .. import _numeric, auth, remote_media, userconfig
 from ..client import build_client_from_auth
 from . import _mcp, _openai
 
-
 _SCOPE_RE = re.compile(r"[\x21\x23-\x5b\x5d-\x7e]{1,256}\Z")
 
 
