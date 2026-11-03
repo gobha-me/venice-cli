@@ -1,3 +1,4 @@
+"""Run the command dispatcher with ``python -m venice``."""
 import sys
 
 from .cli import main

@@ -42,3 +42,25 @@ The drift checker and scheduled workflow retain their existing behavior: every
 implemented-operation change, including additive review-required changes,
 fails `check-live` until reviewed and refreshed. Only the public Swagger was
 fetched for this update; no authenticated Venice endpoints were called.
+
+## 2026-10-29 (local R1 audit)
+
+Reviewed public Swagger version `20261027.204242`, SHA-256
+`ef6561d9ff9f98cff00404e502dea8eb41a69520d9bbed98108214b41daf1d3b`.
+The operation inventory remains at 55 endpoints; the 18 implemented request
+contracts differ in two places: `POST /video/complete.model` is now deprecated
+and no longer required. Cleanup now emits only `queue_id`; retrieve continues
+to send both `model` and `queue_id`.
+
+[surface.md](surface.md) lists every current endpoint and top-level request field,
+with support/omission classifications. [surface.json](surface.json) also records
+nested request and response schemas and response headers for all 55 operations.
+This establishes a response/unsupported-field baseline; the previous lock did
+not retain those schemas, so historical changes to those fields cannot be
+reconstructed from it. [mcp-surface.json](mcp-surface.json) records the actual
+negotiated schemas for all three MCP profiles.
+
+Regenerate the full inventories with `scripts/openapi_surface.py` and
+`scripts/mcp_surface.py` as described in the README module guide. They complement
+the existing curated request drift gate and do not change its fail-on-drift policy.
+See [issue #252](https://github.com/gobha-me/venice-cli/issues/252) for the audit findings and limitations.

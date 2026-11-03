@@ -39,11 +39,13 @@ class VeniceAPIError(Exception):
         code:   Venice API error code (e.g. INSUFFICIENT_BALANCE), if parseable.
     """
 
-    def __init__(self, status: int, url: str, body: str, code: Optional[str] = None):
+    def __init__(self, status: int, url: str, body: str, code: Optional[str] = None, *, secret: str = ""):
         self.status = status
-        self.url = _egress.safe_url(url) if "://" in str(url) else str(url)
-        self.body = body
-        self.code = code
+        self.url = _redact.redact_text(
+            _egress.safe_url(url) if "://" in str(url) else str(url), secret
+        )
+        self.body = body = _redact.redact_text(body, secret)
+        self.code = code = _redact.redact_text(code, secret) if code else None
         msg = f"HTTP {status} from {self.url}"
         if code:
             msg += f" [{code}]"
@@ -67,6 +69,8 @@ def _is_json_content_type(content_type: str) -> bool:
 
 
 class VeniceClient:
+    """Authenticated JSON/media transport with bounded video downloads."""
+
     def __init__(
         self,
         api_key: str,
@@ -397,9 +401,7 @@ class VeniceClient:
                         code = doc["error"].get("code")
         except Exception:
             pass
-        if code:
-            code = _redact.redact_text(code, self.api_key)
-        raise VeniceAPIError(status, _redact.redact_text(url, self.api_key), excerpt, code=code)
+        raise VeniceAPIError(status, url, excerpt, code=code, secret=self.api_key)
 
 
 def build_client_from_auth():

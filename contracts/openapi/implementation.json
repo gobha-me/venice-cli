@@ -463,10 +463,11 @@
       "request_bodies": {
         "application/json": {
           "implemented": [
-            "model",
             "queue_id"
           ],
-          "intentional_omissions": {}
+          "intentional_omissions": {
+            "model": "Deprecated and no longer required; video cleanup is identified by queue_id."
+          }
         }
       }
     },

@@ -1121,7 +1121,7 @@ def video_tool(
             )
 
     try:  # best-effort cleanup; the file is already saved
-        client.post_json("/video/complete", _video.job_body(model, queue_id))
+        client.post_json("/video/complete", _video.complete_body(queue_id))
     except VeniceAPIError:
         pass
     return {
@@ -1335,7 +1335,7 @@ def complete_job(client, *, queue_id: str, type: str, model: str, job_store=None
         body = (
             _audio.job_body(model, queue_id)
             if base == "audio"
-            else _video.job_body(model, queue_id)
+            else _video.complete_body(queue_id)
         )
         client.post_json(f"/{base}/complete", body)
     except VeniceAPIError:
