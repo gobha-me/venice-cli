@@ -17,7 +17,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Optional, Tuple, Union
 
-from . import __version__, _egress, _numeric, config
+from . import __version__, _egress, _numeric, _redact, config
 
 
 VIDEO_DOWNLOAD_MAX_BYTES = 512 * 1024 * 1024
@@ -136,12 +136,12 @@ class VeniceClient:
             if isinstance(e.reason, (TimeoutError, socket.timeout)):
                 detail = "request timed out"
             else:
-                detail = f"connection error: {e.reason}"
+                detail = _redact.redact_text(f"connection error: {e.reason}", self.api_key)
             raise VeniceAPIError(0, url, detail) from None
         except (TimeoutError, socket.timeout):
             raise VeniceAPIError(0, url, "request timed out") from None
         except OSError as e:
-            raise VeniceAPIError(0, url, f"connection error: {e}") from None
+            raise VeniceAPIError(0, url, _redact.redact_text(f"connection error: {e}", self.api_key)) from None
 
     def post_json(self, path: str, body: dict) -> dict:
         status, ctype, raw = self.request("POST", path, json_body=body)
@@ -383,13 +383,12 @@ class VeniceClient:
         data = doc.get("data") if isinstance(doc, dict) else None
         return data if isinstance(data, dict) else None
 
-    @staticmethod
-    def _raise_api_error(status: int, url: str, body: bytes, ctype: str):
+    def _raise_api_error(self, status: int, url: str, body: bytes, ctype: str):
         excerpt = ""
         code: Optional[str] = None
         try:
             text = body.decode("utf-8", errors="replace")
-            excerpt = text[:2048]
+            excerpt = _redact.redact_text(text, self.api_key)[:2048]
             if _is_json_content_type(ctype):
                 doc: Any = json.loads(text)
                 if isinstance(doc, dict):
@@ -398,7 +397,9 @@ class VeniceClient:
                         code = doc["error"].get("code")
         except Exception:
             pass
-        raise VeniceAPIError(status, url, excerpt, code=code)
+        if code:
+            code = _redact.redact_text(code, self.api_key)
+        raise VeniceAPIError(status, _redact.redact_text(url, self.api_key), excerpt, code=code)
 
 
 def build_client_from_auth():
