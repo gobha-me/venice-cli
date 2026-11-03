@@ -143,13 +143,13 @@ def media_path_authority(path_authority=None) -> _shared.MediaPathAuthority:
     return path_authority or _shared.MediaPathAuthority(os.getcwd())
 
 
-def _model_media_path(path_authority, value, *, kind: str, max_bytes: int, label: str):
+def _model_media_path(path_authority, value, *, kind: str, max_bytes: int, label: str, client=None):
     try:
         return media_path_authority(path_authority).resolve(
             value, kind=kind, max_bytes=max_bytes
         )
     except _shared.MediaPathError as e:
-        return _err(f"{label}: {e}")
+        return _err(f"{label}: {e}", client=client)
 
 
 def _write(path: Path, data: bytes) -> Optional[str]:
@@ -162,8 +162,10 @@ def _write(path: Path, data: bytes) -> Optional[str]:
     return None
 
 
-def _err(message: str) -> dict:
-    return {"status": "error", "message": _redact.redact_text(message)}
+def _err(message: str, *, client=None) -> dict:
+    # The client already holds the effective key, including file-origin keys.
+    # Never resolve auth here: many errors occur before authentication.
+    return {"status": "error", "message": _redact.redact_text(message, getattr(client, "api_key", ""))}
 
 
 # ---- async job handles (#62: background media renders) -----------------------
@@ -240,20 +242,22 @@ def image_tool(
 ) -> dict:
     """Generate 1-4 image variants via /image/generate; write files, return paths."""
     if not prompt or not prompt.strip():
-        return _err("image: prompt is required")
+        return _err("image: prompt is required", client=client)
     if not (_image.MIN_VARIANTS <= variants <= _image.MAX_VARIANTS):
         return _err(
             f"image: variants {variants} out of range "
-            f"({_image.MIN_VARIANTS}-{_image.MAX_VARIANTS})"
+            f"({_image.MIN_VARIANTS}-{_image.MAX_VARIANTS})",
+            client=client,
         )
     if format not in _image.FORMATS:
         return _err(
-            f"image: unknown format {format!r}; choose from {', '.join(_image.FORMATS)}"
+            f"image: unknown format {format!r}; choose from {', '.join(_image.FORMATS)}",
+            client=client,
         )
     try:
         _image.validate_lora_strength(lora_strength)
     except ValueError as e:
-        return _err(f"image: {e}")
+        return _err(f"image: {e}", client=client)
 
     prompt = prompt.strip()
     ns = SimpleNamespace(
@@ -274,7 +278,7 @@ def image_tool(
         )
         cost = _image._estimate_cost(price, variants)
     except ValueError as e:
-        return _err(f"image: {e}")
+        return _err(f"image: {e}", client=client)
     gate = check_spend(
         cost, confirm=confirm, max_spend=max_spend, label="image",
         hard_max_spend=hard_max_spend,
@@ -287,11 +291,11 @@ def image_tool(
     try:
         doc = client.post_json("/image/generate", body)
     except VeniceAPIError as e:
-        return _err(f"image failed: {e}")
+        return _err(f"image failed: {e}", client=client)
 
     images = _image._decode_images(doc)
     if not images:
-        return _err("image: server returned no images")
+        return _err("image: server returned no images", client=client)
 
     out_dir = resolve_output_dir(output_dir)
     ext = _image.EXT_BY_FORMAT.get(format, ".bin")
@@ -302,7 +306,7 @@ def image_tool(
         p = _image._variant_path(out_dir, base, i + 1, total, ext)
         werr = _write(p, data)
         if werr:
-            return _err(f"image: could not write {p}: {werr}")
+            return _err(f"image: could not write {p}: {werr}", client=client)
         paths.append(str(p.resolve()))
     return {
         "status": "ok",
@@ -330,16 +334,16 @@ def tts_tool(
 ) -> dict:
     """Synthesize speech via /audio/speech; write an audio file, return its path."""
     if not text or not text.strip():
-        return _err("tts: text is required")
+        return _err("tts: text is required", client=client)
     if speed is not None and not (0.25 <= speed <= 4.0):
-        return _err(f"tts: speed {speed} out of range (0.25-4.0)")
+        return _err(f"tts: speed {speed} out of range (0.25-4.0)", client=client)
 
     text = text.strip()
     try:
         resolved = _tts._resolve_tts(client, model, format)
         cost = _tts._estimate_cost(len(text), resolved.price_per_million)
     except ValueError as e:
-        return _err(f"tts: {e}")
+        return _err(f"tts: {e}", client=client)
     gate = check_spend(
         cost, confirm=confirm, max_spend=max_spend, label="tts",
         hard_max_spend=hard_max_spend,
@@ -354,9 +358,9 @@ def tts_tool(
     try:
         _status, ctype, audio = client.request("POST", "/audio/speech", json_body=body)
     except VeniceAPIError as e:
-        return _err(f"tts failed: {e}")
+        return _err(f"tts failed: {e}", client=client)
     if not audio:
-        return _err("tts: server returned empty body")
+        return _err("tts: server returned empty body", client=client)
 
     short = _tts._short_id(text, model, voice)
     output_format = _tts._response_format(ctype, resolved.output_format)
@@ -365,7 +369,7 @@ def tts_tool(
     )
     werr = _write(out_path, audio)
     if werr:
-        return _err(f"tts: could not write {out_path}: {werr}")
+        return _err(f"tts: could not write {out_path}: {werr}", client=client)
     return {
         "status": "ok",
         "path": str(out_path.resolve()),
@@ -412,7 +416,7 @@ def _queue_media(
         max_wait = _numeric.non_negative_float(max_wait)
         poll_interval = _numeric.non_negative_float(poll_interval)
     except ValueError as e:
-        return _err(f"{label}: {e}")
+        return _err(f"{label}: {e}", client=client)
 
     gate = check_spend(
         quote_value, confirm=confirm, max_spend=max_spend, label=label,
@@ -425,10 +429,10 @@ def _queue_media(
     try:
         queued = client.post_json("/audio/queue", queue_body)
     except VeniceAPIError as e:
-        return _err(f"{label} queue failed: {e}")
+        return _err(f"{label} queue failed: {e}", client=client)
     queue_id = queued.get("queue_id") or queued.get("id") or ""
     if not queue_id:
-        return _err(f"{label}: queue response missing queue_id")
+        return _err(f"{label}: queue response missing queue_id", client=client)
 
     if background:
         return _job_handle(queue_id, type=label, model=model, quote_value=quote_value)
@@ -441,12 +445,14 @@ def _queue_media(
     except VeniceAPIError as e:
         return _err(
             f"{label} retrieve failed: {e}; "
-            f"{_job_retry_hint(queue_id, type=label, model=model)}"
+            f"{_job_retry_hint(queue_id, type=label, model=model)}",
+            client=client,
         )
     except TimeoutError as e:
         return _err(
             f"{label}: {e}; the job may still finish server-side; "
-            f"{_job_retry_hint(queue_id, type=label, model=model)}"
+            f"{_job_retry_hint(queue_id, type=label, model=model)}",
+            client=client,
         )
 
     ext, _unknown = _audio.ext_for(ctype)
@@ -457,7 +463,8 @@ def _queue_media(
     if werr:
         return _err(
             f"{label}: could not write {out_path}: {werr}; "
-            f"{_job_retry_hint(queue_id, type=label, model=model)}"
+            f"{_job_retry_hint(queue_id, type=label, model=model)}",
+            client=client,
         )
 
     try:  # best-effort cleanup; the file is already saved
@@ -495,13 +502,13 @@ def sfx_tool(
     poll; fetch the audio later via `venice_job_result`.
     """
     if not prompt or not prompt.strip():
-        return _err("sfx: prompt is required")
+        return _err("sfx: prompt is required", client=client)
     try:
         max_wait = _numeric.non_negative_float(max_wait)
     except ValueError as e:
-        return _err(f"sfx: invalid max_wait: {e}")
+        return _err(f"sfx: invalid max_wait: {e}", client=client)
     if model not in _sfx.SFX_MODELS:
-        return _err(f"sfx: unknown model {model!r}; choose from {', '.join(sorted(_sfx.SFX_MODELS))}")
+        return _err(f"sfx: unknown model {model!r}; choose from {', '.join(sorted(_sfx.SFX_MODELS))}", client=client)
 
     duration = _sfx._clamp_duration(model, duration)  # stderr warnings only
     try:
@@ -509,7 +516,7 @@ def sfx_tool(
             "/audio/quote", _sfx.quote_body(model, duration)
         )
     except VeniceAPIError as e:
-        return _err(f"sfx quote rejected: {e}")
+        return _err(f"sfx quote rejected: {e}", client=client)
     quote_value = quote.get("quote", quote)
 
     return _queue_media(
@@ -554,11 +561,11 @@ def music_tool(
     poll; fetch the audio later via `venice_job_result`.
     """
     if not prompt or not prompt.strip():
-        return _err("music: prompt is required")
+        return _err("music: prompt is required", client=client)
     try:
         max_wait = _numeric.non_negative_float(max_wait)
     except ValueError as e:
-        return _err(f"music: invalid max_wait: {e}")
+        return _err(f"music: invalid max_wait: {e}", client=client)
 
     # NOTE: no `resolve_instrumental` here, deliberately. On this path a model's
     # explicit `instrumental=true` and an operator's defaults.music.instrumental
@@ -572,13 +579,13 @@ def music_tool(
     spec = _music.fetch_music_spec(client, model)
     rc = _music._validate(ns, spec)  # stderr warnings only
     if rc is not None:
-        return _err(f"music: request rejected by client-side validation (exit {rc})")
+        return _err(f"music: request rejected by client-side validation (exit {rc})", client=client)
 
     quote_body = _music.quote_body(model, duration)
     try:
         quote = client.post_json("/audio/quote", quote_body)
     except VeniceAPIError as e:
-        return _err(f"music quote rejected: {e}")
+        return _err(f"music quote rejected: {e}", client=client)
     quote_value = quote.get("quote", quote)
 
     queue_body = _music.queue_body(ns)
@@ -622,12 +629,12 @@ def _binary_op_tool(
     try:
         _ctype, payload = client.post_for_bytes_or_json(endpoint, body)
     except VeniceAPIError as e:
-        return _err(f"{label} failed: {e}")
+        return _err(f"{label} failed: {e}", client=client)
     if not isinstance(payload, (bytes, bytearray)):
-        return _err(f"{label}: unexpected non-image response from {endpoint}")
+        return _err(f"{label}: unexpected non-image response from {endpoint}", client=client)
     werr = _write(out_path, bytes(payload))
     if werr:
-        return _err(f"{label}: could not write {out_path}: {werr}")
+        return _err(f"{label}: could not write {out_path}: {werr}", client=client)
     return {
         "status": "ok",
         "path": str(out_path.resolve()),
@@ -653,6 +660,7 @@ def upscale_tool(
     resolved = _model_media_path(
         path_authority, input_path, kind="image",
         max_bytes=_shared.MAX_IMAGE_BYTES, label="upscale",
+        client=client,
     )
     if isinstance(resolved, dict):
         return resolved
@@ -660,7 +668,7 @@ def upscale_tool(
     ns = SimpleNamespace(input=inp, scale=scale, creativity=creativity)
     rc = _upscale._validate(ns)  # stderr warnings only
     if rc is not None:
-        return _err(f"upscale: invalid arguments (exit {rc})")
+        return _err(f"upscale: invalid arguments (exit {rc})", client=client)
 
     image_b64 = _shared.encode_base64(inp)
     body = _upscale._build_body(ns, image_b64)
@@ -687,12 +695,13 @@ def bg_remove_tool(
 ) -> dict:
     """Remove an image background via /image/background-remove (dynamic -> confirm)."""
     if bool(input_path) == bool(image_url):
-        return _err("bg-remove: exactly one of input_path or image_url is required")
+        return _err("bg-remove: exactly one of input_path or image_url is required", client=client)
     inp = None
     if input_path:
         resolved = _model_media_path(
             path_authority, input_path, kind="image",
             max_bytes=_shared.MAX_IMAGE_BYTES, label="bg-remove",
+            client=client,
         )
         if isinstance(resolved, dict):
             return resolved
@@ -700,7 +709,7 @@ def bg_remove_tool(
     ns = SimpleNamespace(input=inp, image_url=image_url)
     rc = _bg._validate(ns)  # stderr warnings only
     if rc is not None:
-        return _err(f"bg-remove: invalid arguments (exit {rc})")
+        return _err(f"bg-remove: invalid arguments (exit {rc})", client=client)
 
     body = _bg._build_body(ns)
     default_name = f"{inp.stem}-nobg.png" if inp is not None else _bg.URL_DEFAULT_NAME
@@ -730,11 +739,11 @@ def chat_tool(
     `[openai]` extra (Venice is OpenAI-compatible); returns an error dict if absent.
     """
     if not message or not message.strip():
-        return _err("chat: message is required")
+        return _err("chat: message is required", client=client)
 
     openai = _openai.import_openai("chat")  # stderr hint if missing
     if openai is None:
-        return _err('chat: needs the openai package: pip install "venice-cli[openai]"')
+        return _err('chat: needs the openai package: pip install "venice-cli[openai]"', client=client)
 
     models = _models.catalog(client, "text")
     resolved, rc = _models.resolve_model(
@@ -742,7 +751,7 @@ def chat_tool(
         config_key="defaults.chat.model",
     )
     if rc is not None:
-        return _err(f"chat: could not resolve model (exit {rc})")
+        return _err(f"chat: could not resolve model (exit {rc})", client=client)
 
     ns = SimpleNamespace(
         system=system, temperature=temperature, max_tokens=max_tokens,
@@ -755,7 +764,8 @@ def chat_tool(
     try:
         resp = oai.chat.completions.create(**kwargs)
     except openai.OpenAIError as e:
-        return _err(f"chat: API error: {_openai._safe_api_error(e, getattr(e, 'status_code', None))}")
+        detail = _openai._safe_api_error(e, getattr(e, "status_code", None), getattr(client, "api_key", ""))
+        return _err(f"chat: API error: {detail}", client=client)
 
     content = ""
     if getattr(resp, "choices", None):
@@ -788,6 +798,7 @@ def prepare_vision_input(
     *,
     image_url: Optional[str] = None,
     path_authority=None,
+    client=None,
 ) -> dict:
     """Validate one vision source and return its request-ready image URL.
 
@@ -797,12 +808,13 @@ def prepare_vision_input(
     active frontend model without buying a second completion.
     """
     if bool(input_path) == bool(image_url):
-        return _err("vision: exactly one of input_path or image_url is required")
+        return _err("vision: exactly one of input_path or image_url is required", client=client)
 
     if input_path:
         resolved = _model_media_path(
             path_authority, input_path, kind="image",
             max_bytes=_shared.MAX_IMAGE_BYTES, label="vision",
+            client=client,
         )
         if isinstance(resolved, dict):
             return resolved
@@ -840,7 +852,8 @@ def vision_tool(
     reaching this delegated implementation.
     """
     prepared = prepare_vision_input(
-        input_path, image_url=image_url, path_authority=path_authority
+        input_path, image_url=image_url, path_authority=path_authority,
+        client=client,
     )
     if prepared.get("status") != "ok":
         return prepared
@@ -848,7 +861,7 @@ def vision_tool(
 
     openai = _openai.import_openai("vision")  # stderr hint if missing
     if openai is None:
-        return _err('vision: needs the openai package: pip install "venice-cli[openai]"')
+        return _err('vision: needs the openai package: pip install "venice-cli[openai]"', client=client)
 
     models = _models.catalog(client, "text")
     if model:
@@ -858,20 +871,22 @@ def vision_tool(
             model, models, label="vision", noun="text model"
         )
         if rc is not None:
-            return _err(f"vision: could not resolve model (exit {rc})")
+            return _err(f"vision: could not resolve model (exit {rc})", client=client)
         if _models.supports_capability(models, resolved, "supportsVision") is False:
             return _err(
                 f"vision: model {resolved!r} does not advertise supportsVision; "
-                "pick a vision-capable model (see venice_model_details) or omit model"
+                "pick a vision-capable model (see venice_model_details) or omit model",
+                client=client,
             )
     else:
         if models is None:
-            return _err("vision: could not fetch the model catalog; pass model explicitly")
+            return _err("vision: could not fetch the model catalog; pass model explicitly", client=client)
         resolved = _vision_default(models)
         if resolved is None:
             return _err(
                 "vision: no vision-capable text model found in the catalog; "
-                "pass model (see venice_models / venice_model_details)"
+                "pass model (see venice_models / venice_model_details)",
+                client=client,
             )
 
     kwargs: dict = {
@@ -893,7 +908,8 @@ def vision_tool(
     try:
         resp = oai.chat.completions.create(**kwargs)
     except openai.OpenAIError as e:
-        return _err(f"vision: API error: {_openai._safe_api_error(e, getattr(e, 'status_code', None))}")
+        detail = _openai._safe_api_error(e, getattr(e, "status_code", None), getattr(client, "api_key", ""))
+        return _err(f"vision: API error: {detail}", client=client)
 
     content = ""
     if getattr(resp, "choices", None):
@@ -948,15 +964,15 @@ def video_tool(
     retained privately and is not returned to the model.
     """
     if not prompt or not prompt.strip():
-        return _err("video: prompt is required")
+        return _err("video: prompt is required", client=client)
     try:
         _video.validate_queue_options(prompt, negative_prompt, image_strength)
     except ValueError as e:
-        return _err(f"video: {e}")
+        return _err(f"video: {e}", client=client)
     try:
         max_wait = _numeric.non_negative_float(max_wait)
     except ValueError as e:
-        return _err(f"video: invalid max_wait: {e}")
+        return _err(f"video: invalid max_wait: {e}", client=client)
 
     ns = SimpleNamespace(
         duration=duration,
@@ -971,20 +987,21 @@ def video_tool(
         ns, path_authority=media_path_authority(path_authority)
     )  # stderr on bad media
     if rc is not None:
-        return _err(f"video: invalid media input (exit {rc})")
+        return _err(f"video: invalid media input (exit {rc})", client=client)
 
     models = _models.catalog(client, "video")
     if models is None:
         return _err(
             "video: could not fetch the live video catalog; cannot validate "
-            "model-specific options"
+            "model-specific options",
+            client=client,
         )
     model, rc = _models.resolve_model(
         model, models, label="video", noun="video model",
         config_key="defaults.video.model",
     )
     if rc is not None:
-        return _err(f"video: could not resolve model (exit {rc})")
+        return _err(f"video: could not resolve model (exit {rc})", client=client)
 
     try:
         _video.validate_model_options(
@@ -995,18 +1012,18 @@ def video_tool(
             aspect_ratio=aspect_ratio,
         )
     except ValueError as e:
-        return _err(f"video: {e}")
+        return _err(f"video: {e}", client=client)
 
     extra = _video._shared_params(ns)
     quote_body = _video.quote_body(model, extra, quote_media)
     try:
         quote = client.post_json("/video/quote", quote_body)
     except VeniceAPIError as e:
-        return _err(f"video quote rejected: {e}")
+        return _err(f"video quote rejected: {e}", client=client)
     try:
         quote_value = _shared.quote_cost(quote)
     except ValueError as e:
-        return _err(f"video: {e}")
+        return _err(f"video: {e}", client=client)
 
     gate = check_spend(
         quote_value, confirm=confirm, max_spend=max_spend, label="video",
@@ -1022,10 +1039,10 @@ def video_tool(
     try:
         queued = client.post_json("/video/queue", queue_body)
     except VeniceAPIError as e:
-        return _err(f"video queue failed: {e}")
+        return _err(f"video queue failed: {e}", client=client)
     queue_id = queued.get("queue_id") or queued.get("id") or ""
     if not queue_id:
-        return _err("video: queue response missing queue_id")
+        return _err("video: queue response missing queue_id", client=client)
     download_url = queued.get("download_url") or None
 
     if background:
@@ -1037,7 +1054,8 @@ def video_tool(
                 return _err(
                     f"video: queued as {queue_id}, but could not save private "
                     f"retrieval metadata: {e}; "
-                    f"{_job_retry_hint(queue_id, type='video', model=model)}"
+                    f"{_job_retry_hint(queue_id, type='video', model=model)}",
+                    client=client,
                 )
         return _job_handle(queue_id, type="video", model=model, quote_value=quote_value)
 
@@ -1047,7 +1065,8 @@ def video_tool(
     except OSError as e:
         return _err(
             f"video: could not create output directory {output_root}: {e}; "
-            f"{_job_retry_hint(queue_id, type='video', model=model)}"
+            f"{_job_retry_hint(queue_id, type='video', model=model)}",
+            client=client,
         )
     try:
         ctype, payload, byte_count = _video.retrieve_bytes(
@@ -1059,17 +1078,20 @@ def video_tool(
     except VeniceAPIError as e:
         return _err(
             f"video retrieve failed: {e}; "
-            f"{_job_retry_hint(queue_id, type='video', model=model)}"
+            f"{_job_retry_hint(queue_id, type='video', model=model)}",
+            client=client,
         )
     except TimeoutError as e:
         return _err(
             f"video: {e}; the job may still finish server-side; "
-            f"{_job_retry_hint(queue_id, type='video', model=model)}"
+            f"{_job_retry_hint(queue_id, type='video', model=model)}",
+            client=client,
         )
     except _video.NoVideoStream:
         return _err(
             f"video: job {queue_id} completed but returned no video stream; "
-            f"{_job_retry_hint(queue_id, type='video', model=model)}"
+            f"{_job_retry_hint(queue_id, type='video', model=model)}",
+            client=client,
         )
 
     ext, _unknown = _queue.ext_for(ctype, _video.VIDEO_EXT_BY_CTYPE, default=".mp4")
@@ -1086,14 +1108,16 @@ def video_tool(
                 pass
             return _err(
                 f"video: could not write {out_path}: {e}; "
-                f"{_job_retry_hint(queue_id, type='video', model=model)}"
+                f"{_job_retry_hint(queue_id, type='video', model=model)}",
+                client=client,
             )
     else:
         werr = _write(out_path, payload)
         if werr:
             return _err(
                 f"video: could not write {out_path}: {werr}; "
-                f"{_job_retry_hint(queue_id, type='video', model=model)}"
+                f"{_job_retry_hint(queue_id, type='video', model=model)}",
+                client=client,
             )
 
     try:  # best-effort cleanup; the file is already saved
@@ -1127,12 +1151,13 @@ def job_status_tool(client, *, queue_id: str, type: str, model: str) -> dict:
     once you expect completion, call `venice_job_result` (which writes the file).
     """
     if not queue_id:
-        return _err("job_status: queue_id is required")
+        return _err("job_status: queue_id is required", client=client)
     base = _job_route(type)
     if base is None:
         return _err(
             f"job_status: unknown type {type!r}; expected one of "
-            f"{', '.join(sorted(_JOB_ROUTE))}"
+            f"{', '.join(sorted(_JOB_ROUTE))}",
+            client=client,
         )
     try:
         body = (
@@ -1150,7 +1175,8 @@ def job_status_tool(client, *, queue_id: str, type: str, model: str) -> dict:
             }
         return _err(
             f"job_status: {e}; "
-            f"{_job_retry_hint(queue_id, type=type, model=model)}"
+            f"{_job_retry_hint(queue_id, type=type, model=model)}",
+            client=client,
         )
 
     if isinstance(payload, (bytes, bytearray)):
@@ -1190,16 +1216,17 @@ def job_result_tool(
     seconds. Writes to $VENICE_MCP_OUTPUT_DIR or the cwd.
     """
     if not queue_id:
-        return _err("job_result: queue_id is required")
+        return _err("job_result: queue_id is required", client=client)
     try:
         max_wait = _numeric.non_negative_float(max_wait)
     except ValueError as e:
-        return _err(f"job_result: invalid max_wait: {e}")
+        return _err(f"job_result: invalid max_wait: {e}", client=client)
     base = _job_route(type)
     if base is None:
         return _err(
             f"job_result: unknown type {type!r}; expected one of "
-            f"{', '.join(sorted(_JOB_ROUTE))}"
+            f"{', '.join(sorted(_JOB_ROUTE))}",
+            client=client,
         )
     try:
         if base == "audio":
@@ -1221,7 +1248,8 @@ def job_result_tool(
             except _video_jobs.VideoJobStoreError as e:
                 return _err(
                     f"job_result: cannot read private retrieval metadata: {e}; "
-                    f"{_job_retry_hint(queue_id, type=type, model=model)}"
+                    f"{_job_retry_hint(queue_id, type=type, model=model)}",
+                    client=client,
                 )
             output_root = resolve_output_dir(output_dir)
             try:
@@ -1229,7 +1257,8 @@ def job_result_tool(
             except OSError as e:
                 return _err(
                     f"job_result: could not create output directory: {e}; "
-                    f"{_job_retry_hint(queue_id, type=type, model=model)}"
+                    f"{_job_retry_hint(queue_id, type=type, model=model)}",
+                    client=client,
                 )
             ctype, data, byte_count = _video.retrieve_bytes(
                 client, model, queue_id,
@@ -1249,12 +1278,14 @@ def job_result_tool(
         return _err(
             f"job_result: video job {queue_id} completed but returned no stream; "
             "no private download metadata is available; "
-            f"{_job_retry_hint(queue_id, type=type, model=model)}"
+            f"{_job_retry_hint(queue_id, type=type, model=model)}",
+            client=client,
         )
     except VeniceAPIError as e:
         return _err(
             f"job_result: retrieve failed: {e}; "
-            f"{_job_retry_hint(queue_id, type=type, model=model)}"
+            f"{_job_retry_hint(queue_id, type=type, model=model)}",
+            client=client,
         )
 
     out_path = _queue.resolve_output_path(
@@ -1270,14 +1301,16 @@ def job_result_tool(
                 pass
             return _err(
                 f"job_result: could not write {out_path}: {e}; "
-                f"{_job_retry_hint(queue_id, type=type, model=model)}"
+                f"{_job_retry_hint(queue_id, type=type, model=model)}",
+                client=client,
             )
     else:
         werr = _write(out_path, data)
         if werr:
             return _err(
                 f"job_result: could not write {out_path}: {werr}; "
-                f"{_job_retry_hint(queue_id, type=type, model=model)}"
+                f"{_job_retry_hint(queue_id, type=type, model=model)}",
+                client=client,
             )
 
     if complete:
@@ -1345,18 +1378,19 @@ def image_edit_tool(
     result and returns its path.
     """
     if bool(input_path) == bool(image_url):
-        return _err("image-edit: exactly one of input_path or image_url is required")
+        return _err("image-edit: exactly one of input_path or image_url is required", client=client)
     if not prompt:
-        return _err("image-edit: prompt is required")
+        return _err("image-edit: prompt is required", client=client)
     if len(prompt) > _image_edit.MAX_PROMPT:
-        return _err(f"image-edit: prompt exceeds {_image_edit.MAX_PROMPT} chars")
+        return _err(f"image-edit: prompt exceeds {_image_edit.MAX_PROMPT} chars", client=client)
     if quality is not None and not layer_paths:
-        return _err("image-edit: quality is supported only with layer_paths")
+        return _err("image-edit: quality is supported only with layer_paths", client=client)
     inp = None
     if input_path:
         resolved = _model_media_path(
             path_authority, input_path, kind="image",
             max_bytes=_shared.MAX_IMAGE_BYTES, label="image-edit",
+            client=client,
         )
         if isinstance(resolved, dict):
             return resolved
@@ -1366,6 +1400,7 @@ def image_edit_tool(
         resolved = _model_media_path(
             path_authority, layer_path, kind="image",
             max_bytes=_shared.MAX_IMAGE_BYTES, label="image-edit",
+            client=client,
         )
         if isinstance(resolved, dict):
             return resolved
@@ -1377,7 +1412,7 @@ def image_edit_tool(
                 client, model, 1 + len(layers), quality
             )
         except ValueError as e:
-            return _err(f"image-edit: {e}")
+            return _err(f"image-edit: {e}", client=client)
     ns = SimpleNamespace(
         input=inp, image_url=image_url, prompt=prompt, layer=layers or None,
         model=model, aspect_ratio=aspect_ratio, resolution=resolution,
@@ -1388,7 +1423,7 @@ def image_edit_tool(
     )
     rc = _image_edit._validate(ns)  # stderr warnings only
     if rc is not None:
-        return _err(f"image-edit: invalid arguments (exit {rc})")
+        return _err(f"image-edit: invalid arguments (exit {rc})", client=client)
 
     base_image = _shared.encode_base64(inp) if inp is not None else image_url
     layers_b64 = [_shared.encode_base64(p) for p in layers]
@@ -1420,14 +1455,14 @@ def search_tool(client, query, *, k: int = 8) -> dict:
     query embedding.
     """
     if not query or not str(query).strip():
-        return _err("search: query is required")
+        return _err("search: query is required", client=client)
     store_dir = _index.discover_store(None)
     if store_dir is None:
-        return _err("search: no .venice index found; run `venice index` first")
+        return _err("search: no .venice index found; run `venice index` first", client=client)
     try:
         results = _index.search_index(store_dir, str(query), k=int(k or 8))
     except _index.IndexingError as e:
-        return _err(str(e) or f"search: failed (exit {e.exit_code})")
+        return _err(str(e) or f"search: failed (exit {e.exit_code})", client=client)
     return {"status": "ok", "results": results, "count": len(results)}
 
 
@@ -1451,10 +1486,10 @@ def reindex_tool(
     """
     store_dir = _index.discover_store(None)
     if store_dir is None:
-        return _err("reindex: no .venice index found; run `venice index` first")
+        return _err("reindex: no .venice index found; run `venice index` first", client=client)
     store = _index.load_store(_index.store_file(store_dir), strict=False)
     if store is None:
-        return _err("reindex: index store missing or unreadable; run `venice index`")
+        return _err("reindex: index store missing or unreadable; run `venice index`", client=client)
     meta = store["meta"]
     root = _index._root_of(store_dir)
 
@@ -1472,7 +1507,7 @@ def reindex_tool(
     try:
         summary = _index.build_index(str(root), **kwargs)
     except _index.IndexingError as e:
-        return _err(str(e) or f"reindex: failed (exit {e.exit_code})")
+        return _err(str(e) or f"reindex: failed (exit {e.exit_code})", client=client)
     return {"status": "ok", **summary}
 
 
@@ -1494,7 +1529,7 @@ def memory_write_tool(client, *, name, content, scope: str = "project",
         meta = _memory.write_entry(
             name, content, scope=scope, type=type, description=description)
     except _memory.MemStoreError as e:
-        return _err(f"memory_write: {e}")
+        return _err(f"memory_write: {e}", client=client)
     return {"status": "ok", **meta}
 
 
@@ -1503,9 +1538,9 @@ def memory_read_tool(client, *, name, scope=None) -> dict:
     try:
         entry = _memory.read_entry(name, scope=scope)
     except _memory.MemStoreError as e:
-        return _err(f"memory_read: {e}")
+        return _err(f"memory_read: {e}", client=client)
     if entry is None:
-        return _err(f"memory_read: no memory named {str(name)!r}")
+        return _err(f"memory_read: no memory named {str(name)!r}", client=client)
     return {"status": "ok", **entry}
 
 
@@ -1515,7 +1550,7 @@ def memory_search_tool(client, *, query, scope=None) -> dict:
     try:
         results = _memory.search_entries(query, scope=scope)
     except _memory.MemStoreError as e:
-        return _err(f"memory_search: {e}")
+        return _err(f"memory_search: {e}", client=client)
     return {"status": "ok", "results": results, "count": len(results)}
 
 
@@ -1525,7 +1560,7 @@ def memory_list_tool(client, *, scope=None) -> dict:
     try:
         entries = _memory.list_entries(scope=scope)
     except _memory.MemStoreError as e:
-        return _err(f"memory_list: {e}")
+        return _err(f"memory_list: {e}", client=client)
     return {"status": "ok", "entries": entries, "count": len(entries)}
 
 
@@ -1534,7 +1569,7 @@ def task_add_tool(client, *, text) -> dict:
     try:
         task = _memory.add_task(text)
     except _memory.MemStoreError as e:
-        return _err(f"task_add: {e}")
+        return _err(f"task_add: {e}", client=client)
     return {"status": "ok", "task": task}
 
 
@@ -1543,7 +1578,7 @@ def task_update_tool(client, *, id, status=None, text=None) -> dict:
     try:
         task = _memory.update_task(id, status=status, text=text)
     except _memory.MemStoreError as e:
-        return _err(f"task_update: {e}")
+        return _err(f"task_update: {e}", client=client)
     return {"status": "ok", "task": task}
 
 
@@ -1552,7 +1587,7 @@ def task_list_tool(client, *, status=None) -> dict:
     try:
         tasks = _memory.list_tasks(status=status)
     except _memory.MemStoreError as e:
-        return _err(f"task_list: {e}")
+        return _err(f"task_list: {e}", client=client)
     return {"status": "ok", "tasks": tasks, "count": len(tasks)}
 
 
@@ -1628,13 +1663,14 @@ def models_tool(client, *, type: str) -> dict:
     if type != "all" and type not in valid:
         return _err(
             f"models: unknown type {type!r}; choose from "
-            + ", ".join(("all", *valid))
+            + ", ".join(("all", *valid)),
+            client=client,
         )
     if type == "all":
         try:
             catalog = _models_cmd._fetch_all(client)
         except VeniceAPIError:
-            return _err("models: /models catalog unavailable for type 'all'")
+            return _err("models: /models catalog unavailable for type 'all'", client=client)
         by_type = {
             t: [m["id"] for m in cat
                 if isinstance(m, dict) and m.get("id")]
@@ -1645,7 +1681,7 @@ def models_tool(client, *, type: str) -> dict:
                 "models": by_type}
     cat = _models.catalog(client, type)
     if cat is None:
-        return _err(f"models: /models catalog unavailable for type {type!r}")
+        return _err(f"models: /models catalog unavailable for type {type!r}", client=client)
     models = [m["id"] for m in cat
               if isinstance(m, dict) and m.get("id")]
     return {"status": "ok", "type": type,
@@ -1665,10 +1701,10 @@ def model_details_tool(client, *, model: str) -> dict:
     spend-gated. May scan the catalog by type to locate the id.
     """
     if not model or not str(model).strip():
-        return _err("models: a model id is required")
+        return _err("models: a model id is required", client=client)
     m = _models_cmd._find_model(client, str(model).strip())
     if m is None:
-        return _err(f"models: no model with id {model!r}")
+        return _err(f"models: no model with id {model!r}", client=client)
     spec = m.get("model_spec") if isinstance(m.get("model_spec"), dict) else {}
     constraints = spec.get("constraints")
     if not isinstance(constraints, dict):

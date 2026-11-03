@@ -15,12 +15,12 @@ import contextlib
 import json
 import math
 import sys
-from typing import Iterable, List, Optional, Tuple
+from collections.abc import Iterable
+from typing import List, Optional, Tuple
 
 from .. import _numeric, auth, billing, userconfig
 from ..client import VeniceAPIError, build_client_from_auth
 from . import _models, _shared
-
 
 DEFAULT_PREFIX_TOKENS = 8192
 DEFAULT_REPEAT = 2

@@ -858,7 +858,7 @@ def apply_defaults(args, command: str, doc=None) -> None:
     sources = getattr(args, "_config_sources", None)
     if not isinstance(sources, dict):
         sources = {}
-        setattr(args, "_config_sources", sources)
+        args._config_sources = sources
     mapping = rows_for(command)
     for key, (dest, coerce) in mapping.items():
         if not hasattr(args, dest):

@@ -37,7 +37,7 @@ def _key(queue_id: str, model: str) -> str:
         raise VideoJobStoreError("queue_id is required")
     if not isinstance(model, str) or not model:
         raise VideoJobStoreError("model is required")
-    return hashlib.sha256(f"{model}\0{queue_id}".encode("utf-8")).hexdigest()
+    return hashlib.sha256(f"{model}\0{queue_id}".encode()).hexdigest()
 
 
 def _fresh() -> dict:

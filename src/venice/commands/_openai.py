@@ -27,17 +27,16 @@ _HTTP_TITLES = {
 }
 
 
-def _safe_api_error(error, status) -> str:
+def _safe_api_error(error, status, *secrets: str) -> str:
     """Keep proxy HTML and unbounded response bodies out of terminal output."""
-    secrets = []
-    # SDK exceptions retain the request even when auth came from a file.
-    request = getattr(error, "request", None)
-    headers = getattr(request, "headers", None)
+    # Explicit client keys cover SDK errors with no retained request headers.
+    known = list(secrets)
+    headers = getattr(getattr(error, "request", None), "headers", None)
     if headers is not None:
         authorization = headers.get("authorization", "")
         if isinstance(authorization, str) and authorization.lower().startswith("bearer "):
-            secrets.append(authorization[7:])
-    text = _redact.redact_text(error, *secrets).strip()
+            known.append(authorization[7:])
+    text = _redact.redact_text(error, *known).strip()
     if re.search(r"<\s*(?:!doctype|html|head|body)\b", text, re.IGNORECASE):
         title = _HTTP_TITLES.get(status, "HTTP error")
         return f"HTTP {status} {title}" if isinstance(status, int) else title

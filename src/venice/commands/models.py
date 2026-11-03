@@ -4,7 +4,8 @@ from __future__ import annotations
 import json
 import math
 import sys
-from typing import Iterable, List, Optional
+from collections.abc import Iterable
+from typing import List, Optional
 
 from .. import auth
 from ..client import VeniceAPIError, build_client_from_auth

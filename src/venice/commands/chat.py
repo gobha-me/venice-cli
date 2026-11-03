@@ -22,8 +22,16 @@ from typing import Optional
 from .. import _numeric, auth, userconfig
 from ..client import build_client_from_auth
 from . import (
-    _agent, _compact, _context_archive, _mcp, _mcp_client, _models, _openai, _persona,
-    _repl, _session,
+    _agent,
+    _compact,
+    _context_archive,
+    _mcp,
+    _mcp_client,
+    _models,
+    _openai,
+    _persona,
+    _repl,
+    _session,
 )
 
 # Named so `defaults.chat.web_search` can be validated against the same set the

@@ -107,7 +107,7 @@ class DestinationPolicy:
     @classmethod
     def create(
         cls, *, allow=(), deny=(), private_hosts=(), private_ranges=()
-    ) -> "DestinationPolicy":
+    ) -> DestinationPolicy:
         hosts = tuple(_canonical_host(host) for host in (private_hosts or ()))
         ranges = tuple(_private_authority_network(value) for value in (private_ranges or ()))
         return cls(

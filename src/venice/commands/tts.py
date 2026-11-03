@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 from typing import NamedTuple, Optional, Tuple
 
-from .. import _numeric, audio_player, auth, billing, config, userconfig
+from .. import _numeric, audio_player, auth, billing, userconfig
 from ..client import VeniceAPIError, build_client_from_auth
 from . import _shared
 

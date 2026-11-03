@@ -42,8 +42,7 @@ import sys
 import threading
 from typing import Dict, List, Optional, Tuple
 
-from .. import _numeric, auth
-from .. import userconfig
+from .. import _numeric, auth, userconfig
 from . import _agent
 
 
@@ -237,8 +236,8 @@ class _Bridge:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
         self._request_q: Optional[asyncio.Queue] = None
-        self._ready: "concurrent.futures.Future" = concurrent.futures.Future()
-        self._supervisor_future: Optional["concurrent.futures.Future"] = None
+        self._ready: concurrent.futures.Future = concurrent.futures.Future()
+        self._supervisor_future: Optional[concurrent.futures.Future] = None
         self._closed = False
 
     # -- lifecycle --------------------------------------------------------- #
@@ -426,7 +425,7 @@ class _Bridge:
                     ),
                 }
             args = _clean_args(arguments)
-            fut: "concurrent.futures.Future" = concurrent.futures.Future()
+            fut: concurrent.futures.Future = concurrent.futures.Future()
             try:
                 self._loop.call_soon_threadsafe(
                     self._request_q.put_nowait, (server, real, args, fut)
@@ -446,7 +445,7 @@ class _Bridge:
         return invoke
 
 
-def _safe_set(fut: "concurrent.futures.Future", value) -> None:
+def _safe_set(fut: concurrent.futures.Future, value) -> None:
     """Set a result unless the sync side already abandoned the future (post-timeout)."""
     if not fut.done():
         with contextlib.suppress(concurrent.futures.InvalidStateError):

@@ -20,7 +20,6 @@ from typing import List, Optional
 from .. import _numeric, auth, userconfig
 from ..client import build_client_from_auth
 from . import _models
-from .image import QUALITY_CHOICES
 from ._shared import (
     add_balance_flag,
     check_image_file,
@@ -32,6 +31,7 @@ from ._shared import (
     print_estimate,
     resolve_output,
 )
+from .image import QUALITY_CHOICES
 
 EDIT_ENDPOINT = "/image/edit"
 MULTI_EDIT_ENDPOINT = "/image/multi-edit"

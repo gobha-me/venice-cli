@@ -46,19 +46,16 @@ from pathlib import Path
 from typing import List, Optional
 
 from .. import _numeric
-from . import _agent, _exec, _index, _mcp, _memory, _shared
+from . import _agent, _index, _mcp, _memory, _shared
 from ._exec import (  # shared exec rails (#33): one gate for `code` and chat --shell
+    _GIT_SCHEMA,
+    _RUN_SCHEMA,
     DEFAULT_EXEC_TIMEOUT,
-    MAX_OUTPUT_CHARS,
     _confirm,
     _err,
-    _GIT_SCHEMA,
     _obj,
     _ok,
     _p,
-    _RUN_SCHEMA,
-    _scrubbed_env,
-    _SECRET_ENV,
     git_cmd,
     run_cmd,
 )
@@ -189,7 +186,7 @@ class Roots:
 # --------------------------------------------------------------------------- #
 # Path sandbox
 # --------------------------------------------------------------------------- #
-def _safe_path(roots: "Roots", arg, *, must_exist: bool = False, write: bool = False):
+def _safe_path(roots: Roots, arg, *, must_exist: bool = False, write: bool = False):
     """Resolve `arg` (relative to the active root) and enforce the roots + denylists.
 
     Returns ``(real_abspath, rel_posix)``. Raises :class:`_PathError` if the path
@@ -212,7 +209,7 @@ def _safe_path(roots: "Roots", arg, *, must_exist: bool = False, write: bool = F
     return real, rel
 
 
-def _safe_git_path(roots: "Roots", arg) -> str:
+def _safe_git_path(roots: Roots, arg) -> str:
     """Resolve a literal Git pathspec inside the active repository root.
 
     File tools may read any attached root, but one Git invocation is bound to the
@@ -551,7 +548,7 @@ def apply_patch(roots, patches, *, confirm: bool = False,
                total_edits=sum(r["edits"] for r in results))
 
 
-def attach_root(roots: "Roots", path, *, write: bool = True,
+def attach_root(roots: Roots, path, *, write: bool = True,
                 activate: bool = True) -> dict:
     """Register another project root so the file tools can work across repos (#76).
 
