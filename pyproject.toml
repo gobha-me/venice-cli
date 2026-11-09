@@ -101,3 +101,6 @@ include = [
   "/.dockerignore",
   "/deploy",
 ]
+
+[tool.mutmut]
+also_copy = ["scripts/"]
