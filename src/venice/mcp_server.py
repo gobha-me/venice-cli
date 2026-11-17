@@ -14,6 +14,7 @@ input schema via typing.get_type_hints, so the annotations must stay concrete
 """
 import base64
 import binascii
+import inspect
 import json
 import os
 import shutil
@@ -46,6 +47,17 @@ REMOTE_TOKEN_MAX_BYTES = 16 * 1024
 REMOTE_JWT_ALGORITHMS = ("RS256", "ES256", "EdDSA")
 REMOTE_DATA_URL_MAX_CHARS = 4 * 1024 * 1024
 REMOTE_IMPORT_TIMEOUT_SECONDS = 30
+
+
+def _tool(server, *, description=None, **options):
+    """Normalize descriptions before the SDK inspects the original tool function."""
+    def register(fn):
+        return server.tool(
+            description=inspect.cleandoc(description or fn.__doc__ or ""),
+            **options,
+        )(fn)
+
+    return register
 
 
 def _valid_remote_image_url(value):
@@ -230,7 +242,7 @@ def _remote_result(result: dict, *, store=None, records=()) -> types.CallToolRes
             name=record.filename,
             title=record.filename,
             uri=store.resource_uri(record.id),
-            description=(
+            description=inspect.cleandoc(
                 "Principal-bound Venice media; expires automatically. Read with "
                 "MCP resources/read or download over authenticated HTTPS."
             ),
@@ -353,7 +365,7 @@ def build_server(client, doc=None, root=None, host_image_content=False) -> MCPSe
     }
     _retired_upscale_config = _upscale.retired_config_keys(doc)
 
-    @server.tool()
+    @_tool(server)
     def venice_image(
         prompt: str,
         model: Optional[str] = None,
@@ -412,7 +424,7 @@ def build_server(client, doc=None, root=None, host_image_content=False) -> MCPSe
             )),
         )
 
-    @server.tool()
+    @_tool(server)
     def venice_tts(
         text: str,
         model: Optional[str] = None,
@@ -436,7 +448,7 @@ def build_server(client, doc=None, root=None, host_image_content=False) -> MCPSe
             )),
         )
 
-    @server.tool()
+    @_tool(server)
     def venice_sfx(
         prompt: str,
         model: Optional[str] = None,
@@ -458,7 +470,7 @@ def build_server(client, doc=None, root=None, host_image_content=False) -> MCPSe
             )),
         )
 
-    @server.tool()
+    @_tool(server)
     def venice_music(
         prompt: str,
         model: Optional[str] = None,
@@ -483,7 +495,7 @@ def build_server(client, doc=None, root=None, host_image_content=False) -> MCPSe
             )),
         )
 
-    @server.tool()
+    @_tool(server)
     def venice_upscale(
         input_path: str,
         scale: Optional[Literal[2, 4]] = None,
@@ -513,7 +525,7 @@ def build_server(client, doc=None, root=None, host_image_content=False) -> MCPSe
             )),
         )
 
-    @server.tool()
+    @_tool(server)
     def venice_bg_remove(
         input_path: Optional[str] = None,
         image_url: Optional[str] = None,
@@ -534,7 +546,7 @@ def build_server(client, doc=None, root=None, host_image_content=False) -> MCPSe
             )),
         )
 
-    @server.tool()
+    @_tool(server)
     def venice_chat(
         message: str,
         model: Optional[str] = None,
@@ -555,7 +567,7 @@ def build_server(client, doc=None, root=None, host_image_content=False) -> MCPSe
             )),
         )
 
-    @server.tool()
+    @_tool(server)
     def venice_vision(
         input_path: Optional[str] = None,
         image_url: Optional[str] = None,
@@ -614,7 +626,7 @@ def build_server(client, doc=None, root=None, host_image_content=False) -> MCPSe
             **{**args, "path_authority": path_authority},
         ))
 
-    @server.tool()
+    @_tool(server)
     def venice_video(
         prompt: str,
         model: Optional[str] = None,
@@ -669,7 +681,7 @@ def build_server(client, doc=None, root=None, host_image_content=False) -> MCPSe
             )),
         )
 
-    @server.tool()
+    @_tool(server)
     def venice_image_edit(
         prompt: str,
         input_path: Optional[str] = None,
@@ -790,7 +802,8 @@ def build_http_server(
             mcp_read_max_bytes=media_mcp_read_max_bytes,
         )
 
-    @server.tool(
+    @_tool(
+        server,
         name="venice_chat",
         title="Venice chat completion",
         annotations=remote_annotations,
@@ -820,7 +833,8 @@ def build_http_server(
         )
 
     if media_store is None:
-        @server.tool(
+        @_tool(
+            server,
             name="venice_vision",
             title="Venice remote image analysis",
             annotations=remote_annotations,
@@ -852,7 +866,8 @@ def build_http_server(
                 client, input_path=None, mode="delegate", **args,
             ))
     else:
-        @server.tool(
+        @_tool(
+            server,
             name="venice_vision",
             title="Venice remote image analysis",
             annotations=remote_annotations,
@@ -965,7 +980,8 @@ def build_http_server(
                         media_store.release(owner, reservation)
                 shutil.rmtree(work_dir, ignore_errors=True)
 
-        @server.tool(
+        @_tool(
+            server,
             name="venice_media_import", title="Import media into private storage",
             annotations=remote_annotations,
         )
@@ -1061,7 +1077,8 @@ def build_http_server(
                 except FileNotFoundError:
                     pass
 
-        @server.tool(
+        @_tool(
+            server,
             name="venice_media_delete", title="Delete private media",
             annotations=types.ToolAnnotations(
                 read_only_hint=False, destructive_hint=True, open_world_hint=False,
@@ -1076,7 +1093,8 @@ def build_http_server(
             except remote_media.MediaStoreError:
                 return {"status": "error", "message": "media resource not found"}
 
-        @server.tool(
+        @_tool(
+            server,
             name="venice_image", title="Generate stored images",
             annotations=remote_annotations,
         )
@@ -1117,7 +1135,8 @@ def build_http_server(
                 require_confirmation=True, path_authority=media_path_authority,
             ))
 
-        @server.tool(
+        @_tool(
+            server,
             name="venice_tts", title="Generate stored speech",
             annotations=remote_annotations,
         )
@@ -1144,7 +1163,8 @@ def build_http_server(
                 "price; the operator may explicitly enable dynamic spend"
             )
 
-        @server.tool(
+        @_tool(
+            server,
             name="venice_upscale", title="Upscale stored image",
             annotations=remote_annotations,
         )
@@ -1170,7 +1190,8 @@ def build_http_server(
                 path_authority=media_path_authority,
             ))
 
-        @server.tool(
+        @_tool(
+            server,
             name="venice_bg_remove", title="Remove stored image background",
             annotations=remote_annotations,
         )
@@ -1194,7 +1215,8 @@ def build_http_server(
                 path_authority=media_path_authority,
             ))
 
-        @server.tool(
+        @_tool(
+            server,
             name="venice_image_edit", title="Edit stored image",
             annotations=remote_annotations,
         )
@@ -1283,7 +1305,8 @@ def build_http_server(
                 if reservation:
                     media_store.release(owner, reservation)
 
-        @server.tool(
+        @_tool(
+            server,
             name="venice_sfx", title="Queue stored sound effect",
             annotations=remote_annotations,
         )
@@ -1299,7 +1322,8 @@ def build_http_server(
                 require_confirmation=True, background=True,
             ))
 
-        @server.tool(
+        @_tool(
+            server,
             name="venice_music", title="Queue stored music",
             annotations=remote_annotations,
         )
@@ -1320,7 +1344,8 @@ def build_http_server(
                 require_confirmation=True, background=True,
             ))
 
-        @server.tool(
+        @_tool(
+            server,
             name="venice_video", title="Queue stored video",
             annotations=remote_annotations,
         )
@@ -1421,7 +1446,8 @@ def build_http_server(
             except remote_media.MediaStoreError as exc:
                 return _media_error(exc)
 
-        @server.tool(
+        @_tool(
+            server,
             name="venice_job_status", title="Check stored media job",
             annotations=types.ToolAnnotations(
                 read_only_hint=True, destructive_hint=False, open_world_hint=True,
@@ -1431,7 +1457,8 @@ def build_http_server(
             """Non-blocking status probe; completed media is stored immediately."""
             return _finish_remote_job(job_id)
 
-        @server.tool(
+        @_tool(
+            server,
             name="venice_job_result", title="Fetch stored media job result",
             annotations=remote_annotations,
         )
@@ -1445,7 +1472,9 @@ def build_http_server(
             resource_template,
             name="venice_media",
             title="Venice private media",
-            description="Read one authenticated, principal-bound media resource.",
+            description=inspect.cleandoc(
+                "Read one authenticated, principal-bound media resource."
+            ),
             mime_type="application/octet-stream",
         )
         def remote_media_resource(resource_id: str) -> bytes:
