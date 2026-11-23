@@ -121,11 +121,15 @@ class TestMemoryUnhappyPaths(unittest.TestCase):
                     f"[--scope {{project,global}}]{positional}\n"
                     f"venice memory {action}: error: argument --scope: "
                     "invalid choice: 'elsewhere' "
-                    "(choose from 'project', 'global')\n"
                 )
-                self.assertEqual(
+                # Argparse's Python 3.12.16 diagnostic omits choice quotes;
+                # retain exact complete messages for both observed spellings.
+                self.assertIn(
                     self.invoke(action, *arguments, "--scope", "elsewhere"),
-                    (2, "", expected),
+                    (
+                        (2, "", expected + "(choose from 'project', 'global')\n"),
+                        (2, "", expected + "(choose from project, global)\n"),
+                    ),
                 )
                 self.assertEqual(self.snapshot(), original)
 
@@ -305,18 +309,23 @@ class TestMemoryUnhappyPaths(unittest.TestCase):
 
     def test_unknown_task_status_rejects_without_creating_files(self):
         original = self.snapshot()
-        self.assertEqual(
+        expected = (
+            "usage: venice memory tasks [-h] "
+            "[--status {pending,in_progress,done}]\n"
+            "venice memory tasks: error: argument --status: "
+            "invalid choice: 'elsewhere' "
+        )
+        # Only the observed argparse quote formatting may vary; the status,
+        # output channels, complete choice set/order and other bytes stay exact.
+        self.assertIn(
             self.invoke("tasks", "--status", "elsewhere"),
             (
-                2,
-                "",
                 (
-                    "usage: venice memory tasks [-h] "
-                    "[--status {pending,in_progress,done}]\n"
-                    "venice memory tasks: error: argument --status: "
-                    "invalid choice: 'elsewhere' "
-                    "(choose from 'pending', 'in_progress', 'done')\n"
+                    2,
+                    "",
+                    expected + "(choose from 'pending', 'in_progress', 'done')\n",
                 ),
+                (2, "", expected + "(choose from pending, in_progress, done)\n"),
             ),
         )
         self.assertEqual(self.snapshot(), original)
