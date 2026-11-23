@@ -149,6 +149,56 @@ class TestMemoryUnhappyPaths(unittest.TestCase):
         )
         self.assertEqual(self.snapshot(), original)
 
+    def test_ls_and_list_alias_with_no_stores_preserve_the_empty_state(self):
+        original = self.snapshot()
+        for action in ("ls", "list"):
+            with self.subTest(action=action):
+                self.assertEqual(
+                    self.invoke(action),
+                    (
+                        0,
+                        "",
+                        (
+                            "no saved memory notes (project/global). "
+                            "The agent writes them with `venice chat --memory` / "
+                            "`venice code --memory`.\n"
+                        ),
+                    ),
+                )
+                self.assertEqual(self.snapshot(), original)
+
+    def test_missing_note_aliases_preserve_populated_stores(self):
+        self.seed_notes()
+        original = self.snapshot()
+        for arguments, expected in (
+            (("cat", "missing-note"), "memory: no note named 'missing-note'\n"),
+            (
+                ("remove", "missing-note", "--scope", "global"),
+                "memory: no note named 'missing-note' in global\n",
+            ),
+        ):
+            with self.subTest(action=arguments[0]):
+                self.assertEqual(self.invoke(*arguments), (1, "", expected))
+                self.assertEqual(self.snapshot(), original)
+
+    def test_invalid_note_name_reports_an_error_without_changing_stores(self):
+        self.seed_notes()
+        original = self.snapshot()
+        for action in ("show", "cat", "rm", "remove"):
+            with self.subTest(action=action):
+                self.assertEqual(
+                    self.invoke(action, "has space"),
+                    (
+                        1,
+                        "",
+                        (
+                            "memory: invalid memory name 'has space' "
+                            "(allowed: letters, digits, '_', '.', '-')\n"
+                        ),
+                    ),
+                )
+                self.assertEqual(self.snapshot(), original)
+
     def test_rm_missing_note_in_populated_stores_preserves_both_tiers(self):
         self.seed_notes()
         original = self.snapshot()
