@@ -34,6 +34,10 @@ class SessionsErrorTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.store = self.root / "sessions"
+        working_directory = self.root / "working-directory"
+        working_directory.mkdir()
+        self.addCleanup(os.chdir, Path.cwd())
+        os.chdir(working_directory)
         env = {
             "HOME": str(self.root),
             "XDG_CONFIG_HOME": str(self.root / "config"),
@@ -48,14 +52,18 @@ class SessionsErrorTests(unittest.TestCase):
 
     def _run(self, *args, stdin=""):
         out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
-                mock.patch.object(sys, "stdin", io.StringIO(stdin)):
+        with (
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(err),
+            mock.patch.object(sys, "stdin", io.StringIO(stdin)),
+        ):
             code = cli.main(["sessions", *args])
         return code, out.getvalue(), err.getvalue()
 
     def _saved(self, command="code"):
         session = sessions.new_session(
-            command, model="fixture-model",
+            command,
+            model="fixture-model",
             messages=[{"role": "user", "content": "retain this conversation"}],
         )
         sessions.save(session)
@@ -80,7 +88,11 @@ class SessionsErrorTests(unittest.TestCase):
         }
         for action, message in expected.items():
             with self.subTest(action=action):
-                args = (action, "absent", "hello") if action == "send" else (action, "absent")
+                args = (
+                    (action, "absent", "hello")
+                    if action == "send"
+                    else (action, "absent")
+                )
                 self.assertEqual(self._run(*args), (1, "", message))
                 self.assertFalse(self.store.exists())
 
@@ -119,7 +131,10 @@ class SessionsErrorTests(unittest.TestCase):
         path = self.store / "broken.json"
         for payload, diagnostic in (
             ("", "Expecting value: line 1 column 1 (char 0)"),
-            ("{", "Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"),
+            (
+                "{",
+                "Expecting property name enclosed in double quotes: line 1 column 2 (char 1)",
+            ),
             ('{"truncated":', "Expecting value: line 1 column 14 (char 13)"),
         ):
             with self.subTest(payload=payload):
@@ -127,7 +142,11 @@ class SessionsErrorTests(unittest.TestCase):
                 before = self._snapshot()
                 self.assertEqual(
                     self._run("show", "broken"),
-                    (1, "", f"sessions: invalid session JSON in {path}: {diagnostic}\n"),
+                    (
+                        1,
+                        "",
+                        f"sessions: invalid session JSON in {path}: {diagnostic}\n",
+                    ),
                 )
                 self.assertEqual(self._snapshot(), before)
 
@@ -140,7 +159,11 @@ class SessionsErrorTests(unittest.TestCase):
                 before = self._snapshot()
                 self.assertEqual(
                     self._run("show", "broken"),
-                    (1, "", "sessions: session 'broken' is malformed (expected an envelope)\n"),
+                    (
+                        1,
+                        "",
+                        "sessions: session 'broken' is malformed (expected an envelope)\n",
+                    ),
                 )
                 self.assertEqual(self._snapshot(), before)
 
@@ -152,16 +175,27 @@ class SessionsErrorTests(unittest.TestCase):
         self.assertEqual(self._run("ls", "--json"), (0, "[]\n", ""))
         self.assertEqual(self._snapshot(), before)
 
-    def test_mixed_store_lists_only_the_valid_session_without_repairing_corruption(self):
+    def test_mixed_store_lists_only_the_valid_session_without_repairing_corruption(
+        self,
+    ):
         saved = self._saved()
         (self.store / "broken.json").write_bytes(b'{"unfinished":')
         before = self._snapshot()
         code, out, err = self._run("ls", "--json")
         self.assertEqual((code, err), (0, ""))
-        self.assertEqual(json.loads(out), [{
-            "id": saved.id, "command": saved.command, "updated": saved.updated,
-            "messages": len(saved.messages), "model": saved.model, "pending": 0,
-        }])
+        self.assertEqual(
+            json.loads(out),
+            [
+                {
+                    "id": saved.id,
+                    "command": saved.command,
+                    "updated": saved.updated,
+                    "messages": len(saved.messages),
+                    "model": saved.model,
+                    "pending": 0,
+                }
+            ],
+        )
         self.assertEqual(self._snapshot(), before)
 
     def test_rm_corrupt_session_removes_only_the_requested_bad_file(self):
@@ -170,7 +204,9 @@ class SessionsErrorTests(unittest.TestCase):
         broken.write_bytes(b'{"unfinished":')
         expected = self._snapshot()
         del expected["broken.json"]
-        self.assertEqual(self._run("rm", "broken"), (0, "", "removed session 'broken'.\n"))
+        self.assertEqual(
+            self._run("rm", "broken"), (0, "", "removed session 'broken'.\n")
+        )
         self.assertFalse(broken.exists())
         self.assertEqual(self._snapshot(), expected)
 
@@ -196,15 +232,21 @@ class SessionsErrorTests(unittest.TestCase):
     def test_send_whitespace_stdin_does_not_create_a_mailbox(self):
         self._assert_empty_message_rejected("-", stdin=" \t\n ")
 
-    def test_send_read_only_store_reports_permission_error_without_partial_mailbox(self):
+    def test_send_read_only_store_reports_permission_error_without_partial_mailbox(
+        self,
+    ):
         saved = self._saved()
         before = self._snapshot()
         original_mode = stat.S_IMODE(self.store.stat().st_mode)
         self.store.chmod(0o555)
         try:
-            self.assertFalse(os.access(self.store, os.W_OK), "fixture must really deny writes")
+            self.assertFalse(
+                os.access(self.store, os.W_OK), "fixture must really deny writes"
+            )
             sidecar = self.store / saved.id
-            denied = PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(sidecar))
+            denied = PermissionError(
+                errno.EACCES, os.strerror(errno.EACCES), str(sidecar)
+            )
             self.assertEqual(
                 self._run("send", saved.id, "valid steering message"),
                 (1, "", f"sessions: could not queue message: {denied}\n"),
@@ -221,7 +263,9 @@ class SessionsErrorTests(unittest.TestCase):
         original_mode = stat.S_IMODE(self.store.stat().st_mode)
         self.store.chmod(0o555)
         try:
-            self.assertFalse(os.access(self.store, os.W_OK), "fixture must really deny writes")
+            self.assertFalse(
+                os.access(self.store, os.W_OK), "fixture must really deny writes"
+            )
             path = self.store / f"{saved.id}.json"
             denied = PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(path))
             self.assertEqual(
@@ -231,6 +275,19 @@ class SessionsErrorTests(unittest.TestCase):
             self.assertEqual(self._snapshot(), before)
         finally:
             self.store.chmod(original_mode)
+
+    def test_send_latest_with_only_corrupt_sessions_preserves_bytes_without_mailbox(
+        self,
+    ):
+        self.store.mkdir()
+        path = self.store / "broken.json"
+        payload = b'{"unfinished":'
+        path.write_bytes(payload)
+        before = self._snapshot()
+        self.assertEqual(self._run("send", "latest", "hello"), (1, "", NO_CODE_SESSION))
+        self.assertEqual(path.read_bytes(), payload)
+        self.assertEqual(self._snapshot(), before)
+        self.assertEqual(sorted(p.name for p in self.store.iterdir()), ["broken.json"])
 
 
 if __name__ == "__main__":
