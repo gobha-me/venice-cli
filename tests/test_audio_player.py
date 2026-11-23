@@ -6,6 +6,7 @@ import contextlib
 import io
 import json
 import os
+import shlex
 import sys
 import tempfile
 import unittest
@@ -16,6 +17,14 @@ from venice import audio_player
 
 # README's documented precedence, independent of the implementation's table.
 PLAYERS = ("paplay", "aplay", "ffplay", "mpg123", "play", "afplay")
+
+
+def _python_launcher(script):
+    # A shebang splits interpreter paths at spaces. The shell preserves both
+    # the interpreter and the Python program as single quoted arguments.
+    return (
+        f'#!/bin/sh\nexec {shlex.quote(sys.executable)} -c {shlex.quote(script)} "$@"\n'
+    )
 
 
 class AudioPlayerBoundaryTests(unittest.TestCase):
@@ -37,13 +46,14 @@ class AudioPlayerBoundaryTests(unittest.TestCase):
     def install_player(self, name, *, status=0, executable=True):
         path = self.bin / name
         path.write_text(
-            f"#!{sys.executable}\n"
-            "import json\n"
-            "from pathlib import Path\n"
-            "import sys\n"
-            f"Path({str(self.record)!r}).write_text("
-            f"json.dumps({{'player': {name!r}, 'argv': sys.argv[1:]}}))\n"
-            f"raise SystemExit({status!r})\n",
+            _python_launcher(
+                "import json\n"
+                "from pathlib import Path\n"
+                "import sys\n"
+                f"Path({str(self.record)!r}).write_text("
+                f"json.dumps({{'player': {name!r}, 'argv': sys.argv[1:]}}))\n"
+                f"raise SystemExit({status!r})\n"
+            ),
             encoding="utf-8",
         )
         path.chmod(0o755 if executable else 0o644)
@@ -159,14 +169,15 @@ class AudioPlayerBoundaryTests(unittest.TestCase):
     def test_player_cannot_consume_cli_input_or_write_to_cli_streams(self):
         player = self.install_player("paplay")
         player.write_text(
-            f"#!{sys.executable}\n"
-            "import json\n"
-            "from pathlib import Path\n"
-            "import sys\n"
-            "print('player stdout must stay private')\n"
-            "print('player stderr must stay private', file=sys.stderr)\n"
-            f"Path({str(self.record)!r}).write_text("
-            "json.dumps({'stdin': sys.stdin.read()}))\n",
+            _python_launcher(
+                "import json\n"
+                "from pathlib import Path\n"
+                "import sys\n"
+                "print('player stdout must stay private')\n"
+                "print('player stderr must stay private', file=sys.stderr)\n"
+                f"Path({str(self.record)!r}).write_text("
+                "json.dumps({'stdin': sys.stdin.read()}))\n"
+            ),
             encoding="utf-8",
         )
         # Change actual descriptors: Python's redirect_stdout cannot capture
