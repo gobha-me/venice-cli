@@ -25,6 +25,9 @@ class TestMemoryUnhappyPaths(unittest.TestCase):
         self.root.chmod(0o700)
         self.project = self.root / "project"
         self.project.mkdir()
+        # Memory discovery follows .venice markers, independently of Git.
+        # Store files stay absent until the individual case deliberately seeds.
+        (self.project / ".venice").mkdir()
         self.home = self.root / "home"
         self.home.mkdir()
         self.global_memory = self.root / "global-memory"
@@ -42,6 +45,7 @@ class TestMemoryUnhappyPaths(unittest.TestCase):
                 "VENICE_SESSIONS_DIR": str(self.root / "sessions"),
                 "VENICE_API_KEY": "test-fake-key",
                 "PATH": os.defpath,
+                "COLUMNS": "80",
                 "GIT_CONFIG_NOSYSTEM": "1",
                 "GIT_CONFIG_GLOBAL": os.devnull,
             },
@@ -49,8 +53,8 @@ class TestMemoryUnhappyPaths(unittest.TestCase):
         )
         environment.start()
         self.addCleanup(environment.stop)
-        # A real nested repo prevents an unrelated ancestor checkout from
-        # choosing the fixture's project-memory location.
+        # Keep an actual nested Git project; the owned .venice marker above
+        # independently confines project-memory discovery to this fixture.
         subprocess.run(
             ["git", "init", "--quiet", str(self.project)],
             check=True,
