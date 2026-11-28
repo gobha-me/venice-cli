@@ -13,10 +13,10 @@ from __future__ import annotations
 
 import contextlib
 import json
-import math
 import os
 import sys
 import time
+from decimal import Decimal
 from pathlib import Path
 from typing import Optional
 
@@ -27,6 +27,7 @@ from . import (
     _code,
     _compact,
     _context_archive,
+    _index,
     _mcp,
     _mcp_client,
     _models,
@@ -628,6 +629,8 @@ def _tools_for(args, client, models, model):
     except ValueError as e:
         print(f"chat: {e}", file=sys.stderr)
         return None, 2
+    if tool_fit and _index.discover_store(None) is None:
+        tools = [tool for tool in tools if tool.name not in {"project_search", "reindex"}]
     return tools, None
 
 
@@ -690,7 +693,7 @@ def _tools_session(args, client, models, model):
         yield tools + remote, None
 
 
-def _tool_fit_quote(models, model, max_tokens) -> Optional[float]:
+def _tool_fit_quote(models, model, max_tokens) -> Optional[Decimal]:
     """Reserve the full input window plus the requested output at catalog rates."""
     for entry in models or ():
         if isinstance(entry, dict) and entry.get("id") == model:
@@ -704,16 +707,17 @@ def _tool_fit_quote(models, model, max_tokens) -> Optional[float]:
     if type(context) is not int or context <= 0:
         return None
     pricing = spec.get("pricing")
-    input_rate = _agent._usd_per_token(pricing, "input")
-    output_rate = _agent._usd_per_token(pricing, "output")
+    input_rate = _agent._usd_per_million_tokens(pricing, "input")
+    output_rate = _agent._usd_per_million_tokens(pricing, "output")
     if input_rate is None or output_rate is None:
         return None
     # Include potentially higher cache-write pricing in the reservation.
-    cache_read_rate = _agent._usd_per_token(pricing, "cache_input") or 0.0
-    cache_write_rate = _agent._usd_per_token(pricing, "cache_write") or 0.0
+    cache_read_rate = _agent._usd_per_million_tokens(pricing, "cache_input") or 0.0
+    cache_write_rate = _agent._usd_per_million_tokens(pricing, "cache_write") or 0.0
     input_rate = max(input_rate, cache_read_rate, cache_write_rate)
-    quote = context * input_rate + max_tokens * output_rate
-    return quote if math.isfinite(quote) else None
+    # Multiply at catalog units and convert to USD in decimal for the cap check.
+    return (context * Decimal(str(input_rate))
+            + max_tokens * Decimal(str(output_rate))) / 1_000_000
 
 
 def _run_tool_fit(args, message: str) -> int:
@@ -731,7 +735,7 @@ def _run_tool_fit(args, message: str) -> int:
             print("chat: tool-fit needs catalog pricing and context size to verify spend",
                   file=sys.stderr)
             return 1
-        if _shared.over_budget(quote, args.max_spend):
+        if quote > Decimal(str(args.max_spend)):
             print(f"chat: tool-fit cost bound ${quote:.6g} exceeds "
                   f"--max-spend ${args.max_spend:.6g}", file=sys.stderr)
             return 1
@@ -740,18 +744,17 @@ def _run_tool_fit(args, message: str) -> int:
             if chat_tools is None:
                 return rc or 2
             tools = {tool.name: tool for tool in chat_tools}
-            for tool in _code.code_tools(os.getcwd(), client, include_search=True, assets=True):
-                tools.setdefault(tool.name, tool)
-            if _agent.resolve_web_search_model(models, None, model) is not None:
-                search = _code.web_search_tool(None, model, models=models)
-                tools.setdefault(search.name, search)
+            if not args.tool:
+                for tool in _code.code_tools(os.getcwd(), client, assets=True):
+                    tools.setdefault(tool.name, tool)
+                if _agent.resolve_web_search_model(models, None, model) is not None:
+                    search = _code.web_search_tool(None, model, models=models)
+                    tools.setdefault(search.name, search)
             # The lean client sends exactly one completion without SDK retries. This
             # path never dispatches calls, even if the server ignores tool_choice.
-            response = client.post_json("/chat/completions", {
+            payload = {
                 "model": model,
                 "messages": [{"role": "user", "content": message}],
-                "tools": _agent.to_openai_tools(list(tools.values())),
-                "tool_choice": "none",
                 "max_tokens": args.max_tokens,
                 "stream": False,
                 "venice_parameters": {
@@ -761,7 +764,11 @@ def _run_tool_fit(args, message: str) -> int:
                     "enable_x_search": False,
                     "strip_thinking_response": True,
                 },
-            })
+            }
+            if tools:
+                payload["tools"] = _agent.to_openai_tools(list(tools.values()))
+                payload["tool_choice"] = "none"
+            response = client.post_json("/chat/completions", payload)
     except (auth.AuthError, ValueError) as exc:
         print(f"chat: {exc}", file=sys.stderr)
         return 2
@@ -784,7 +791,7 @@ def _run_tool_fit(args, message: str) -> int:
         ledger = _agent.usage_ledger(args, models, model)
         ledger.record(response.get("usage"))
         print(json.dumps({"final": content, "model": model, "tools": list(tools),
-                          "cost_upper_bound_usd": quote, "usage": ledger.to_dict()},
+                          "cost_upper_bound_usd": float(quote), "usage": ledger.to_dict()},
                          allow_nan=False))
     else:
         print(content)

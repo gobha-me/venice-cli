@@ -127,7 +127,7 @@ def valid_gap(gap) -> bool:
 
 def normalized_title(title: str) -> str:
     folded = unicodedata.normalize("NFKC", title).casefold()
-    folded = re.sub(r"^(?:\[tool-gap\]\s*|(?:tool-gap|feat|enhancement):\s*)", "", folded)
+    folded = re.sub(r"^(?:\[tool-gap\]\s*|(?:tool[ -]gap|feat|enhancement):\s*)", "", folded)
     return "-".join(re.findall(r"[a-z0-9]+", folded))
 
 
