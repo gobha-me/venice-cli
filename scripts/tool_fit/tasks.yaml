@@ -1,0 +1,30 @@
+- id: code-regression
+  description: Find the cause of a failing parser regression in a Python project and make a targeted fix.
+  success_hint: Locate the failure, patch the relevant code, and rerun the affected test.
+- id: code-callers
+  description: Migrate all callers of a renamed helper across a multi-package project.
+  success_hint: Find references, update call sites safely, and inspect the resulting diff.
+- id: code-review
+  description: Review a local branch for behavioral regressions against its base.
+  success_hint: Compare the branch, follow changed call paths, and cite actionable findings by file and line.
+- id: asset-transparent
+  description: Create a product illustration and prepare a transparent PNG for a landing page.
+  success_hint: Generate or edit the image, remove the background, and inspect the result.
+- id: asset-audio
+  description: Produce a voiced product intro and a short sound effect under a fixed budget.
+  success_hint: Choose appropriate generation tools, confirm the price, and collect the two audio files.
+- id: asset-video
+  description: Generate a short teaser clip from a still and collect its finished render.
+  success_hint: Start a render, check job progress, then save the completed clip.
+- id: mcp-lookup
+  description: Find the current onboarding document in a connected document system.
+  success_hint: Identify an attached tool that can search the document system and retrieve the right source.
+- id: mcp-update
+  description: Update the status of a tracked task in a connected issue tracker.
+  success_hint: Find the issue and identify a tool that can apply and verify the status change.
+- id: search-project
+  description: Locate the implementation of a feature in an unfamiliar repository from its behavior.
+  success_hint: Find relevant code without knowing exact identifiers and verify it against the source.
+- id: search-web
+  description: Find the official documentation for a library option and verify how it is configured.
+  success_hint: Discover the relevant documentation and return the supported usage with a source link.

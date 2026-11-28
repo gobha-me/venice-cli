@@ -216,17 +216,22 @@ class CacheGuardEvent(NamedTuple):
     message: str
 
 
-def _usd_per_token(pricing, key) -> Optional[float]:
-    """`pricing.<key>.usd` as a per-token rate (catalog prices are per 1M)."""
+def _usd_per_million_tokens(pricing, key) -> Optional[float]:
+    """Read and validate the catalog's `pricing.<key>.usd` rate."""
     if not isinstance(pricing, dict):
         return None
     node = pricing.get(key)
     if isinstance(node, dict) and "usd" in node:
         try:
-            return _numeric.non_negative_float(node["usd"]) / 1_000_000.0
+            return _numeric.non_negative_float(node["usd"])
         except ValueError:
             raise ValueError(f"invalid catalog pricing for {key}") from None
     return None
+
+
+def _usd_per_token(pricing, key) -> Optional[float]:
+    rate = _usd_per_million_tokens(pricing, key)
+    return rate / 1_000_000.0 if rate is not None else None
 
 
 def _as_int(v) -> int:

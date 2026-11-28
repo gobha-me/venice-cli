@@ -16,15 +16,18 @@ import json
 import os
 import sys
 import time
+from decimal import Decimal
 from pathlib import Path
 from typing import Optional
 
-from .. import _numeric, auth, userconfig
-from ..client import build_client_from_auth
+from .. import _numeric, _redact, auth, userconfig
+from ..client import VeniceAPIError, build_client_from_auth
 from . import (
     _agent,
+    _code,
     _compact,
     _context_archive,
+    _index,
     _mcp,
     _mcp_client,
     _models,
@@ -32,6 +35,7 @@ from . import (
     _persona,
     _repl,
     _session,
+    _shared,
 )
 
 # Named so `defaults.chat.web_search` can be validated against the same set the
@@ -181,6 +185,11 @@ def register(subparsers) -> None:
 
     # --- Agent / tool calling (#15) ---
     ag = p.add_argument_group("Agent / tools")
+    ag.add_argument(
+        "--tool-fit", action="store_true",
+        help="Ask one model turn to assess the chat and coding tool schemas without "
+        "running tools. Give a message, --max-spend (total USD), and --max-tokens.",
+    )
     ag.add_argument(
         "--tools", "--agent", action="store_true", dest="tools", default=None,
         help="Let the model call venice's own tools (image/tts/sfx/music/upscale/"
@@ -477,6 +486,12 @@ def _run(args) -> int:
     _session.apply_to_args(args, session, "chat")
     userconfig.apply_defaults(args, "chat")
     userconfig.apply_literals(args, compact_loss_policy="aggressive")
+    if getattr(args, "tool_fit", False):
+        message = _resolve_message(args)
+        if not message or session is not None or _agent.wants_interactive(args, message):
+            print("chat: --tool-fit requires a one-shot message", file=sys.stderr)
+            return 2
+        return _run_tool_fit(args, message)
     # These are tools, so each opt-in implies the agent loop.
     if (getattr(args, "shell", None) or getattr(args, "memory", None)
             or getattr(args, "browser", None)) \
@@ -553,11 +568,13 @@ def _tools_for(args, client, models, model):
     requested ``--tool`` subset is invalid. Prints the same capability notes the
     one-shot path always did.
     """
+    tool_fit = getattr(args, "tool_fit", False)
     ok, rc = _agent.check_function_calling(
         models, model, label=PROFILE.name,
-        degraded_tail="running without tools",
+        degraded_tail=("--tool-fit needs a function-calling model (pass --model)"
+                       if tool_fit else "running without tools"),
         unverified_tail="attempting tools",
-        degrade=PROFILE.degrade_to_chat,
+        degrade=PROFILE.degrade_to_chat and not tool_fit,
     )
     if not ok:
         return None, rc  # degrade_to_chat -> (None, None): caller falls through to plain chat
@@ -612,6 +629,8 @@ def _tools_for(args, client, models, model):
     except ValueError as e:
         print(f"chat: {e}", file=sys.stderr)
         return None, 2
+    if tool_fit and _index.discover_store(None) is None:
+        tools = [tool for tool in tools if tool.name not in {"project_search", "reindex"}]
     return tools, None
 
 
@@ -672,6 +691,111 @@ def _tools_session(args, client, models, model):
                 file=sys.stderr,
             )
         yield tools + remote, None
+
+
+def _tool_fit_quote(models, model, max_tokens) -> Optional[Decimal]:
+    """Reserve the full input window plus the requested output at catalog rates."""
+    for entry in models or ():
+        if isinstance(entry, dict) and entry.get("id") == model:
+            spec = entry.get("model_spec")
+            break
+    else:
+        return None
+    if not isinstance(spec, dict):
+        return None
+    context = spec.get("availableContextTokens")
+    if type(context) is not int or context <= 0:
+        return None
+    pricing = spec.get("pricing")
+    input_rate = _agent._usd_per_million_tokens(pricing, "input")
+    output_rate = _agent._usd_per_million_tokens(pricing, "output")
+    if input_rate is None or output_rate is None:
+        return None
+    # Include potentially higher cache-write pricing in the reservation.
+    cache_read_rate = _agent._usd_per_million_tokens(pricing, "cache_input") or 0.0
+    cache_write_rate = _agent._usd_per_million_tokens(pricing, "cache_write") or 0.0
+    input_rate = max(input_rate, cache_read_rate, cache_write_rate)
+    # Multiply at catalog units and convert to USD in decimal for the cap check.
+    return (context * Decimal(str(input_rate))
+            + max_tokens * Decimal(str(output_rate))) / 1_000_000
+
+
+def _run_tool_fit(args, message: str) -> int:
+    if args.max_spend is None or args.max_tokens is None or args.max_tokens <= 0:
+        print("chat: --tool-fit needs --max-spend and a positive --max-tokens", file=sys.stderr)
+        return 2
+    try:
+        client = build_client_from_auth()
+        models = _models.catalog(client, "text")
+        model, rc = _models.resolve_model(args.model, models, label="chat", noun="text model")
+        if rc is not None:
+            return rc
+        quote = _tool_fit_quote(models, model, args.max_tokens)
+        if quote is None:
+            print("chat: tool-fit needs catalog pricing and context size to verify spend",
+                  file=sys.stderr)
+            return 1
+        if quote > Decimal(str(args.max_spend)):
+            print(f"chat: tool-fit cost bound ${quote:.6g} exceeds "
+                  f"--max-spend ${args.max_spend:.6g}", file=sys.stderr)
+            return 1
+
+        with _tools_session(args, client, models, model) as (chat_tools, rc):
+            if chat_tools is None:
+                return rc or 2
+            tools = {tool.name: tool for tool in chat_tools}
+            if not args.tool:
+                for tool in _code.code_tools(os.getcwd(), client, assets=True):
+                    tools.setdefault(tool.name, tool)
+                if _agent.resolve_web_search_model(models, None, model) is not None:
+                    search = _code.web_search_tool(None, model, models=models)
+                    tools.setdefault(search.name, search)
+            # The lean client sends exactly one completion without SDK retries. This
+            # path never dispatches calls, even if the server ignores tool_choice.
+            payload = {
+                "model": model,
+                "messages": [{"role": "user", "content": message}],
+                "max_tokens": args.max_tokens,
+                "stream": False,
+                "venice_parameters": {
+                    "include_venice_system_prompt": False,
+                    "enable_web_search": "off",
+                    "enable_web_scraping": False,
+                    "enable_x_search": False,
+                    "strip_thinking_response": True,
+                },
+            }
+            if tools:
+                payload["tools"] = _agent.to_openai_tools(list(tools.values()))
+                payload["tool_choice"] = "none"
+            response = client.post_json("/chat/completions", payload)
+    except (auth.AuthError, ValueError) as exc:
+        print(f"chat: {exc}", file=sys.stderr)
+        return 2
+    except VeniceAPIError as exc:
+        print(f"chat: {exc}", file=sys.stderr)
+        return _shared.status_to_exit(exc)
+
+    try:
+        choice = response["choices"][0]
+        reply = choice["message"]
+        content = reply["content"]
+        if (choice.get("finish_reason") == "length" or reply.get("tool_calls")
+                or not isinstance(content, str) or not content.strip()):
+            raise ValueError
+    except (KeyError, IndexError, TypeError, ValueError):
+        print("chat: tool-fit did not return a complete text answer", file=sys.stderr)
+        return 2
+    content = _redact.redact_text(content, client.api_key)
+    if args.json:
+        ledger = _agent.usage_ledger(args, models, model)
+        ledger.record(response.get("usage"))
+        print(json.dumps({"final": content, "model": model, "tools": list(tools),
+                          "cost_upper_bound_usd": float(quote), "usage": ledger.to_dict()},
+                         allow_nan=False))
+    else:
+        print(content)
+    return 0
 
 
 def _run_agent(args, oai, openai, client, models, model, kwargs) -> Optional[int]:
